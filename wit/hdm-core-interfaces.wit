@@ -1,0 +1,64 @@
+// Document 5: The Complete Universal WIT Interface Registry (HDM-Interfaces).
+// The rigorous, type-clamped host/guest boundaries the Go operating core
+// handles natively and that fluid-layer cells import at compilation.
+package hdm:kernel@1.0.0;
+
+interface block-storage {
+    use hdm:schema/types.{hash-identifier, urn, error-payload};
+
+    /// Reads an immutable data frame out of the CAS blocks bucket.
+    read-block: func(block-hash: hash-identifier) -> result<list<u8>, error-payload>;
+
+    /// Writes an immutable payload into the CAS blocks bucket and returns its SHA-256 hash.
+    write-block: func(payload: list<u8>) -> result<hash-identifier, error-payload>;
+
+    /// Reads a mutable pointer value from the refs bucket.
+    get-ref: func(target-urn: urn) -> result<hash-identifier, error-payload>;
+
+    /// Updates a mutable pointer head to point to a new content-addressed block.
+    update-ref: func(target-urn: urn, new-hash: hash-identifier) -> result<_, error-payload>;
+}
+
+interface cognitive-engine {
+    use hdm:schema/types.{error-payload};
+
+    /// Invokes the local quantized model using rigid token constraints.
+    invoke-reasoning: func(
+        system-prompt: string,
+        user-context: string
+    ) -> result<string, error-payload>;
+}
+
+interface cell-logger {
+    enum log-level { debug, info, warn, error }
+
+    /// Ambient log emitter. The host automatically appends active transaction
+    /// context metadata.
+    emit-log: func(level: log-level, message: string);
+}
+
+interface chronos {
+    /// Monadic clock. In production returns wall-clock nanoseconds; under
+    /// shadow replay it is rebound to a tape's fixed timestamp so guest time
+    /// reads are deterministic.
+    now-ns: func() -> s64;
+
+    /// Returns byte `index` of the controlled entropy seed (0 if out of range),
+    /// replacing ambient randomness with the transaction envelope's seed.
+    entropy: func(index: u32) -> u32;
+}
+
+interface cell-dispatch {
+    /// Invoke another cell by URN across the host bridge, passing a reference
+    /// container (ptr, len) and returning its i32 result. This is the bridge
+    /// that Cellular Fusion collapses when two cells are tightly coupled.
+    invoke-cell: func(target-urn-ptr: u32, target-urn-len: u32, arg-ptr: u32, arg-len: u32) -> s32;
+}
+
+world core-runtime {
+    import block-storage;
+    import cognitive-engine;
+    import cell-logger;
+    import chronos;
+    import cell-dispatch;
+}

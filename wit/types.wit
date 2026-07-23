@@ -1,0 +1,22 @@
+// HDM shared structural type registry. Referenced by every core interface so
+// host/guest boundaries share one set of resource handles, eliminating the
+// structural type variance that triggers memory faults during pointer transfer.
+package hdm:schema@1.0.0;
+
+interface types {
+    /// Hex-encoded SHA-256 content address of a CAS block
+    /// (optionally "sha256:"-prefixed).
+    type hash-identifier = string;
+
+    /// Canonical Uniform Resource Name identifying a system entity.
+    type urn = string;
+
+    /// Semantic utility score feeding the Hamiltonian reward term.
+    type saliency-score = f64;
+
+    /// Structured diagnostic returned across fallible host boundaries.
+    record error-payload {
+        code: u32,
+        message: string,
+    }
+}

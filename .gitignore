@@ -1,0 +1,13 @@
+.DS_Store
+.claude/
+hdm.db
+
+# Build + run artifacts
+/hdm
+hdm.out
+*.db
+
+# Local secrets — never commit
+.hdm_api_key
+.gemini_api_key
+.env

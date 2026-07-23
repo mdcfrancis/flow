@@ -1,0 +1,32 @@
+// System Model Layer 1: the immutable node descriptor. The state layout of
+// every component is specified as an explicit WIT record binding metadata,
+// dependencies, and content hashes into a content-addressed manifest node.
+package hdm:schema/topology@1.0.0;
+
+interface configuration {
+    use hdm:schema/types.{urn, hash-identifier, saliency-score};
+
+    record dependency-constraint {
+        target-urn: urn,
+        dependency-hash: hash-identifier,
+        is-hot-path: bool,
+    }
+
+    record semantic-manifest {
+        functional-intent: string,
+        input-invariants: list<string>,
+        output-invariants: list<string>,
+        domain-tags: list<string>,
+    }
+
+    record node-descriptor {
+        identity-urn: urn,
+        // Reference link to the WAT source block (Genotype).
+        genotype-hash: hash-identifier,
+        // Reference link to the compiled execution WASM (Phenotype).
+        phenotype-hash: hash-identifier,
+        dependencies: list<dependency-constraint>,
+        semantics: semantic-manifest,
+        current-saliency: saliency-score,
+    }
+}
