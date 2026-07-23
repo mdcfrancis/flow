@@ -2067,6 +2067,9 @@ func main() {
 	}
 	log.Printf("[LEDGER] %s", dbPath)
 	defer ledger.Close()
+	// Seed the growable knowledge base (documents + compile-checked worked examples)
+	// that retrieval injects into synthesis. Idempotent, so it is safe every boot.
+	evolution.SeedKnowledge(ledger)
 
 	// 2. Wire the cognitive engine. Two backends: the local OpenAI-compatible MLX
 	//    server (default) or the Google Gemini API. Selecting Gemini needs no

@@ -723,6 +723,31 @@ func (o *Orchestrator) commit(ctx context.Context, fr *FrameResult, baseRoot, ta
 
 // buildSeed renders the sieve seed for spec-driven building: the goal, the
 // required entry, the acceptance checks to satisfy, and the current genotype.
+// renderKnowledge retrieves the top docs + worked examples for a cell of this entry
+// kind and intent from the knowledge base, formatted for the synthesis prompt. Empty
+// when the stores hold nothing relevant (the static few-shot then carries synthesis).
+func (o *Orchestrator) renderKnowledge(contract *EntryContract, intent string) string {
+	kind := ""
+	if contract == RenderFrameContract {
+		kind = "render"
+	}
+	docs := FindDocuments(o.ledger, kind, intent, 2)
+	exs := FindExamples(o.ledger, kind, intent, nil, nil, 2)
+	if len(docs) == 0 && len(exs) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("RELEVANT KNOWLEDGE (retrieved for this cell — apply it):\n")
+	for _, d := range docs {
+		fmt.Fprintf(&b, "• %s — %s\n", d.Title, d.Body)
+	}
+	for _, e := range exs {
+		fmt.Fprintf(&b, "WORKED EXAMPLE (%s, %s):\n%s\n", e.Kind, e.Semantics, e.WAT)
+	}
+	b.WriteString("\n")
+	return b.String()
+}
+
 func (o *Orchestrator) buildSeed(urn, intent, genotype string, contract *EntryContract, suite *AcceptanceSuite) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "Build cell %s.\nGOAL: %s\n\n", urn, intent)
@@ -770,6 +795,13 @@ func (o *Orchestrator) buildSeed(urn, intent, genotype string, contract *EntryCo
 	if sc := LoadContract(o.ledger, ns); sc != nil {
 		b.WriteString(sc.Render())
 		b.WriteString("\n")
+	}
+	// RETRIEVED KNOWLEDGE: the how-to documents + worked examples from the growable
+	// knowledge base most relevant to a cell of THIS kind and intent — concrete guidance
+	// targeting exactly this synthesis shape (the doc explains the pattern, the example
+	// shows it working). The static few-shot in the system prompt is only the floor.
+	if k := o.renderKnowledge(contract, intent); k != "" {
+		b.WriteString(k)
 	}
 	// User guidance (soft): cross-app SYSTEM principles and this APP's principles,
 	// rewritten from operator commentary. The model weighs these while building; an
