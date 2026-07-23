@@ -146,6 +146,43 @@ func (r *ModelRouter) SetObserve(fn func(purpose string, promptBytes, respBytes,
 	}
 }
 
+// WeightedTokens returns the cognitive spend weighted by model TIER: each distinct
+// client's tokens times the cost weight of the type bound to it (the base/default at
+// the reason tier). This is the type-aware cost the budget/tuning logic reads, so an
+// expensive reasoner's tokens count for more than a fast model's. Exact when types
+// bind distinct models (the mixed-model case); a type sharing the base folds into it
+// at the reason weight. Equals raw tokens × reason-weight in the single-model case.
+func (r *ModelRouter) WeightedTokens() float64 {
+	seen := map[*LocalModelClient]bool{}
+	var total float64
+	if r.base != nil {
+		total += float64(r.base.TotalTokens()) * ModelReason.CostWeight()
+		seen[r.base] = true
+	}
+	for _, t := range AllModelTypes {
+		c := r.clients[t]
+		if c == nil || seen[c] {
+			continue
+		}
+		seen[c] = true
+		total += float64(c.TotalTokens()) * t.CostWeight()
+	}
+	return total
+}
+
+// TokensByType returns the raw token count for each type that binds a DISTINCT client
+// (a type sharing the base is omitted — its tokens are counted on the base). For the
+// per-type spend readout.
+func (r *ModelRouter) TokensByType() map[ModelType]uint64 {
+	out := make(map[ModelType]uint64, len(AllModelTypes))
+	for _, t := range AllModelTypes {
+		if c := r.clients[t]; c != nil && c != r.base {
+			out[t] = c.TotalTokens()
+		}
+	}
+	return out
+}
+
 // Bindings returns, in stable order, the resolved (type, model) pairs — for the
 // boot log so the active routing is visible.
 func (r *ModelRouter) Bindings() []struct{ Type, Model string } {

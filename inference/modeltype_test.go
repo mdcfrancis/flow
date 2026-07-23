@@ -74,6 +74,29 @@ type reasonerShape interface {
 	InvokeReasoning(ctx context.Context, systemPrompt, userContext string) (string, error)
 }
 
+func TestWeightedTokens(t *testing.T) {
+	base := NewLocalModelClient("http://base", "base")   // reason tier (weight 2.0)
+	coder := NewLocalModelClient("http://coder", "coder") // code tier (weight 1.0)
+	router := NewModelRouter(base, map[ModelType]*LocalModelClient{ModelCode: coder})
+
+	if router.WeightedTokens() != 0 {
+		t.Fatal("no calls yet → weighted cost 0")
+	}
+	base.totalTokens.Store(100)
+	coder.totalTokens.Store(200)
+	// 100 * reason(2.0) + 200 * code(1.0) = 400
+	if got := router.WeightedTokens(); got != 400 {
+		t.Fatalf("weighted = %v, want 400", got)
+	}
+	// The expensive tier is weighted heavier: same tokens on reason cost more than code.
+	if ModelReason.CostWeight() <= ModelCode.CostWeight() {
+		t.Fatal("reason must outweigh code")
+	}
+	if bt := router.TokensByType(); bt[ModelCode] != 200 {
+		t.Fatalf("TokensByType[code] = %d, want 200", bt[ModelCode])
+	}
+}
+
 func TestModelRouterBindingsAndDistinct(t *testing.T) {
 	base := NewLocalModelClient("http://base", "base-model")
 	coder := NewLocalModelClient("http://coder", "coder-model")

@@ -221,12 +221,26 @@ type SystemMetrics struct {
 	StalledFrac   float64
 	AvgFrameMs    float64
 	SessionTokens uint64 // cumulative model tokens; deltas measure token burn between tunes
+	// WeightedCost is cumulative cognitive spend weighted by model TIER — an expensive
+	// reasoner's tokens count for more than a fast model's (see inference.ModelType
+	// cost weights). Its delta is the burn signal the policy tuner reacts to, so model
+	// choice is priced into the tuning. Falls back to raw tokens when unweighted.
+	WeightedCost float64
 }
+
+// weightedTokenSource optionally exposes tier-weighted cognitive cost (the router does;
+// a bare client does not).
+type weightedTokenSource interface{ WeightedTokens() float64 }
 
 func systemMetrics(ctx context.Context, registry *evolution.CellRegistry, orch *evolution.Orchestrator, friction map[string]evolution.FrictionState, budget *frameBudget, root string, model tokenSource) SystemMetrics {
 	var m SystemMetrics
 	if model != nil {
 		m.SessionTokens = model.TotalTokens()
+		if wt, ok := model.(weightedTokenSource); ok {
+			m.WeightedCost = wt.WeightedTokens()
+		} else {
+			m.WeightedCost = float64(m.SessionTokens)
+		}
 	}
 	green, stalled := 0, 0
 	for _, u := range registry.List() {
@@ -260,7 +274,8 @@ type policyTuneState struct {
 	lastAt         time.Time
 	prevPolicy     *evolution.Policy
 	baselineGreen  float64
-	baselineTokens uint64 // session tokens at the last tune — the burn-rate baseline
+	baselineTokens uint64  // session tokens at the last tune (raw, for reference)
+	baselineCost   float64 // tier-weighted cognitive spend at the last tune — the burn-rate baseline
 }
 
 var policyTuneInterval = 10 * time.Minute
@@ -287,18 +302,22 @@ func autoTunePolicy(ctx context.Context, grower *appgen.Grower, ledger *storage.
 	before := evolution.LoadPolicy(ledger)
 	// Token burn since the last tune — the first-class efficiency signal. If correctness held
 	// flat while tokens poured out, the loop is wasting fuel and the tune should pull it back.
-	var burn uint64
-	if st.baselineTokens > 0 && m.SessionTokens >= st.baselineTokens {
-		burn = m.SessionTokens - st.baselineTokens
+	// Tier-weighted burn since the last tune — the first-class efficiency signal, now
+	// priced by model type so an expensive reasoner's spend registers heavier. If
+	// correctness held flat while cost poured out, the loop is wasting spend.
+	var burn float64
+	if st.baselineCost > 0 && m.WeightedCost >= st.baselineCost {
+		burn = m.WeightedCost - st.baselineCost
 	}
-	obs := fmt.Sprintf("Observed outcomes: %d application cells, %.0f%% correct (green), %.0f%% stalled beyond retries, avg per-frame cost %.2f ms. Since the last tune ~%d model tokens were spent. TOKEN EFFICIENCY IS FIRST-CLASS: if correctness is not climbing, that spend is waste — tune to burn FEWER tokens (fewer retries on cells that are not progressing, less frequent critics, a more direct path) while never lowering correctness. Tune the policy toward the goal.",
+	obs := fmt.Sprintf("Observed outcomes: %d application cells, %.0f%% correct (green), %.0f%% stalled beyond retries, avg per-frame cost %.2f ms. Since the last tune ~%.0f (tier-weighted) cognitive cost was spent. TOKEN EFFICIENCY IS FIRST-CLASS: if correctness is not climbing, that spend is waste — tune to burn FEWER tokens (fewer retries on cells that are not progressing, less frequent critics, a more direct path, or a cheaper model type where it suffices) while never lowering correctness. Tune the policy toward the goal.",
 		m.CellCount, m.GreenFrac*100, m.StalledFrac*100, m.AvgFrameMs, burn)
 	if _, changed, note, err := grower.OptimizePolicy(ctx, obs); err == nil && changed {
 		applyPolicy(ledger)
 		st.prevPolicy = &before
 		st.baselineGreen = m.GreenFrac
 		st.baselineTokens = m.SessionTokens
-		log.Printf("[POLICY] self-tuned from metrics (green %.0f%%, stalled %.0f%%, +%d tok): %s", m.GreenFrac*100, m.StalledFrac*100, burn, note)
+		st.baselineCost = m.WeightedCost
+		log.Printf("[POLICY] self-tuned from metrics (green %.0f%%, stalled %.0f%%, +%.0f cost): %s", m.GreenFrac*100, m.StalledFrac*100, burn, note)
 	}
 }
 
