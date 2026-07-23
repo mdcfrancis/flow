@@ -137,6 +137,10 @@ type RuntimeManager struct {
 	repo        *manifest.Repository
 	sieve       *compiler.CompilerService
 	inference   *inference.LocalModelClient
+	// visionClient, when set at boot, serves the multimodal vision path — so the
+	// visual critic can run on a vision-typed model distinct from the reasoning base.
+	// Falls back to inference when unset.
+	visionClient *inference.LocalModelClient
 	sharedMem   api.Memory
 	scratchNext uint32
 	// Software paging (pages.go): physical private pages + the per-cell window mapping.
@@ -1277,10 +1281,23 @@ func (rm *RuntimeManager) rasterizeFramesLocked(n int) [][]byte {
 // frames (rasterized to PNGs) — the vision path. It snapshots + rasterizes
 // under the lock, then makes the (slow) model call WITHOUT holding it, so rendering
 // and ticks continue. Caller must NOT hold rm.mu.
+// SetVisionClient routes the multimodal vision path to a distinct client (e.g. the
+// router's vision-typed model). Set once at boot, before ticks run.
+func (rm *RuntimeManager) SetVisionClient(c *inference.LocalModelClient) { rm.visionClient = c }
+
+// visionInfer returns the client that serves the vision path: the dedicated vision
+// client when set, otherwise the base inference client.
+func (rm *RuntimeManager) visionInfer() *inference.LocalModelClient {
+	if rm.visionClient != nil {
+		return rm.visionClient
+	}
+	return rm.inference
+}
+
 func (rm *RuntimeManager) VisionJudge(ctx context.Context, sysPrompt, question string, n int) (string, error) {
 	rm.mu.Lock()
 	imgs := rm.rasterizeFramesLocked(n)
-	infer := rm.inference
+	infer := rm.visionInfer()
 	rm.mu.Unlock()
 	if len(imgs) == 0 {
 		return "", fmt.Errorf("no frames to judge yet")
@@ -1297,7 +1314,7 @@ func (rm *RuntimeManager) VisionJudge(ctx context.Context, sysPrompt, question s
 func (rm *RuntimeManager) invokeVisionUnlocked(ctx context.Context, sys, question string, imgs [][]byte) (string, error) {
 	rm.mu.Unlock()
 	defer rm.mu.Lock()
-	return rm.inference.InvokeVision(ctx, sys, question, imgs)
+	return rm.visionInfer().InvokeVision(ctx, sys, question, imgs)
 }
 
 // hostInvokeVision is the invoke-vision kernel host function, symmetric with

@@ -2020,6 +2020,9 @@ func main() {
 	if err != nil {
 		log.Fatalf("Hypervisor initialization failed: %v", err)
 	}
+	// Route the multimodal vision path to the vision-typed client (the base client
+	// when no HDM_LLM_MODEL_VISION override is set, so this is a no-op by default).
+	hypervisor.SetVisionClient(router.For(string(inference.ModelVision)))
 	defer hypervisor.Close(ctx)
 
 	// 4. Bring CompilerService online.

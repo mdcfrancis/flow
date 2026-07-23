@@ -3,6 +3,7 @@ package inference
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -160,15 +161,15 @@ func (c *LocalModelClient) InvokeReasoning(ctx context.Context, sysPrompt string
 	})
 }
 
-// ErrVisionUnsupported is returned by InvokeVision for a provider without
-// multimodal input (currently only the Gemini backend can see).
-var ErrVisionUnsupported = errors.New("vision (multimodal) not supported by this provider")
+// ErrVisionUnsupported is returned by InvokeVision when there is nothing to see.
+var ErrVisionUnsupported = errors.New("vision (multimodal) call had no images")
 
 // InvokeVision asks the model a natural-language question about one or more
-// rendered frames (PNG images) — the vision path. Gemini-only for now;
-// shares the reconnect/retry window with InvokeReasoning.
+// rendered frames (PNG images) — the vision path. Works on either backend: Gemini
+// via generateContent, or the local OpenAI-compatible server via image_url content
+// (verified against omlx Gemma-4). Shares the reconnect/retry window.
 func (c *LocalModelClient) InvokeVision(ctx context.Context, sysPrompt, question string, images [][]byte) (string, error) {
-	if c.provider != providerGemini || len(images) == 0 {
+	if len(images) == 0 {
 		return "", ErrVisionUnsupported
 	}
 	return c.retryLoop(ctx, func(ctx context.Context) (string, bool, error) {
@@ -207,7 +208,12 @@ func (c *LocalModelClient) retryLoop(ctx context.Context, send func(context.Cont
 // visionAttempt sends one multimodal request and parses the verdict, tagging a
 // transient network/5xx/429 error as retriable (like attempt()).
 func (c *LocalModelClient) visionAttempt(ctx context.Context, sysPrompt, question string, images [][]byte) (content string, retriable bool, err error) {
-	httpReq, err := c.geminiVisionRequest(ctx, sysPrompt, question, images)
+	var httpReq *http.Request
+	if c.provider == providerGemini {
+		httpReq, err = c.geminiVisionRequest(ctx, sysPrompt, question, images)
+	} else {
+		httpReq, err = c.openaiVisionRequest(ctx, sysPrompt, question, images)
+	}
 	if err != nil {
 		return "", false, fmt.Errorf("failed to construct vision request: %w", err)
 	}
@@ -222,7 +228,12 @@ func (c *LocalModelClient) visionAttempt(ctx context.Context, sysPrompt, questio
 		retry := resp.StatusCode >= 500 || resp.StatusCode == http.StatusTooManyRequests
 		return "", retry, fmt.Errorf("vision server returned status %d: %s", resp.StatusCode, string(body))
 	}
-	content, tokens, err := parseGemini(body)
+	var tokens int
+	if c.provider == providerGemini {
+		content, tokens, err = parseGemini(body)
+	} else {
+		content, tokens, err = parseOpenAI(body)
+	}
 	if err != nil {
 		return "", false, err
 	}
@@ -291,6 +302,39 @@ func (c *LocalModelClient) openaiRequest(ctx context.Context, sysPrompt, userCtx
 		Messages: []ChatMessage{
 			{Role: "system", Content: sysPrompt},
 			{Role: "user", Content: userCtx},
+		},
+	})
+	if err != nil {
+		return nil, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/v1/chat/completions", bytes.NewReader(payload))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if c.apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+c.apiKey)
+	}
+	return req, nil
+}
+
+// openaiVisionRequest builds a multimodal /v1/chat/completions POST: the user
+// message carries an array of content parts — the question plus one image_url per
+// frame as a base64 PNG data URI. Verified against the omlx Gemma-4 server.
+func (c *LocalModelClient) openaiVisionRequest(ctx context.Context, sysPrompt, question string, images [][]byte) (*http.Request, error) {
+	parts := make([]any, 0, len(images)+1)
+	parts = append(parts, map[string]any{"type": "text", "text": question})
+	for _, img := range images {
+		uri := "data:image/png;base64," + base64.StdEncoding.EncodeToString(img)
+		parts = append(parts, map[string]any{"type": "image_url", "image_url": map[string]any{"url": uri}})
+	}
+	payload, err := json.Marshal(map[string]any{
+		"model":       c.model,
+		"temperature": 0.0,
+		"max_tokens":  512,
+		"messages": []any{
+			map[string]any{"role": "system", "content": sysPrompt},
+			map[string]any{"role": "user", "content": parts},
 		},
 	})
 	if err != nil {
