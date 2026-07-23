@@ -2104,6 +2104,11 @@ func main() {
 	//    recording isolation passes.
 	orchestrator := evolution.NewOrchestrator(ledger, router)
 	orchestrator.Gravity = codependency.NewTracker(ledger)
+	// Route the evolution-loop sieve by the target cell's kind (render → vision,
+	// compute/leaf → code). Injected to avoid an evolution→appgen import cycle.
+	orchestrator.SieveModelType = func(urn string) inference.ModelType {
+		return appgen.ModelTypeForCell(ledger, urn)
+	}
 	tapeStore := evolution.NewTapeStore(ledger)
 	orchestrator.Tapes = tapeStore
 	// Activity broker: the orchestrator, grower, and scheduler push phase/event

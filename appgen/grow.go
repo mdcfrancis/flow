@@ -941,7 +941,7 @@ Requirements:
 	if ui {
 		sig = evolution.RenderFrameContract
 	}
-	out, err := evolution.RunSieve(ctx, g.modelFor(inference.ModelCode), genesisSystem, seed, g.SieveIter, sig)
+	out, err := evolution.RunSieve(ctx, g.modelFor(deriveModelType(kindOf(sub))), genesisSystem, seed, g.SieveIter, sig)
 	if err == nil && out != nil && out.Artifact != nil && out.Artifact.SyntaxPassed {
 		return out.WAT, out.Artifact.Bytecode
 	}

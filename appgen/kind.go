@@ -5,8 +5,35 @@ import (
 	"strings"
 
 	"github.com/mdcfrancis/flow/evolution"
+	"github.com/mdcfrancis/flow/inference"
 	"github.com/mdcfrancis/flow/storage"
 )
+
+// deriveModelType maps a cell's kind to the model type that should SYNTHESIZE it.
+// Synthesis is fundamentally coding, so most kinds route to `code`; a render cell —
+// whose output is visual and whose critic is the vision model — routes to `vision`
+// (the omlx Gemma vision models are also capable coders), keeping a cell's builder
+// and its critic on the same model.
+func deriveModelType(k CellKind) inference.ModelType {
+	switch k {
+	case KindRender:
+		return inference.ModelVision
+	default: // compute, input, leaf, compose
+		return inference.ModelCode
+	}
+}
+
+// ModelTypeForCell resolves the synthesis model type for a live cell URN via its
+// declared kind — defaults to code when the cell is not a known subsystem. Injected
+// into the orchestrator so the evolution-loop sieve can route by kind without
+// importing appgen (which would cycle).
+func ModelTypeForCell(ledger *storage.LedgerEngine, cellURN string) inference.ModelType {
+	k := CellKind(CellKindOf(ledger, cellURN))
+	if !k.valid() {
+		return inference.ModelCode
+	}
+	return deriveModelType(k)
+}
 
 // CellKind is a cell's declared TYPE — a fixed, extensible ontology that binds
 // together, in one authoritative fact, the four things that used to be inferred

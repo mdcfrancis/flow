@@ -189,6 +189,12 @@ type Orchestrator struct {
 	// during a frame so an operator surface can show what the loop is doing and
 	// (during a model round-trip) why it is waiting. Optional; nil-safe.
 	Activity ActivitySink
+	// SieveModelType, when set, maps a cell URN to the model type that should
+	// SYNTHESIZE it (from its cell kind) — so the evolution-loop sieve routes a render
+	// cell to the vision model and compute/leaf cells to the coder. Injected from
+	// main (appgen.ModelTypeForCell) to avoid an evolution→appgen import cycle. When
+	// nil the sieve uses the code type. Optional; nil-safe.
+	SieveModelType func(urn string) inference.ModelType
 	// structural marks cells whose LOCAL optimization has plateaued while they are
 	// still expensive: their next synthesis is offered the data-structure toolkit
 	// (StructureToolkit) so the model may refactor to dispatch to a shared primitive
@@ -388,6 +394,15 @@ func (o *Orchestrator) modelFor(mt inference.ModelType) Reasoner {
 	return o.model
 }
 
+// sieveModel picks the synthesis client for a target: its kind-derived model type
+// when a resolver is wired, else the code type.
+func (o *Orchestrator) sieveModel(urn string) Reasoner {
+	if o.SieveModelType != nil {
+		return o.modelFor(o.SieveModelType(urn))
+	}
+	return o.modelFor(inference.ModelCode)
+}
+
 func (o *Orchestrator) resolver() CellResolver {
 	return func(urn string) ([]byte, bool) {
 		desc, err := o.repo.Load(urn)
@@ -502,7 +517,7 @@ func (o *Orchestrator) RunFrame(ctx context.Context, targetURN string) (*FrameRe
 		o.event("mutate", targetURN, "genotype refinement")
 		o.phase("synthesizing", "reasoning a candidate for "+targetURN+" (awaiting cognitive engine)", targetURN)
 	}
-	sieve, serr := RunSieve(ctx, o.modelFor(inference.ModelCode), sysPrompt, seed, o.SieveMaxIters, contract)
+	sieve, serr := RunSieve(ctx, o.sieveModel(targetURN), sysPrompt, seed, o.SieveMaxIters, contract)
 	// NOVEL-PRIMITIVE MINTING (witnessed by consumer): if the structural response minted a new
 	// primitive, provisionally store it so the refactored cell can dispatch to it during
 	// verification. The primitive is TRUSTED only if this cell commits (its tapes hold while
