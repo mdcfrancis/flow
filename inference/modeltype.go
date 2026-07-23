@@ -2,6 +2,10 @@ package inference
 
 import (
 	"context"
+	"fmt"
+	"io"
+	"net/http"
+	"net/url"
 	"os"
 	"strings"
 )
@@ -168,6 +172,41 @@ func (r *ModelRouter) WeightedTokens() float64 {
 		total += float64(c.TotalTokens()) * t.CostWeight()
 	}
 	return total
+}
+
+// Unload asks the local server to evict this client's model from memory
+// (POST /v1/models/{model}/unload) — freeing RAM when several models are bound to
+// different types. No-op for Gemini (nothing local to unload). Best-effort.
+func (c *LocalModelClient) Unload(ctx context.Context) error {
+	if c == nil || c.provider == providerGemini {
+		return nil
+	}
+	u := c.baseURL + "/v1/models/" + url.PathEscape(c.model) + "/unload"
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u, nil)
+	if err != nil {
+		return err
+	}
+	if c.apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+c.apiKey)
+	}
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("unload %s: status %d: %s", c.model, resp.StatusCode, string(body))
+	}
+	return nil
+}
+
+// UnloadAll evicts every distinct model the router holds, freeing local memory —
+// e.g. on shutdown when HDM loaded several models across types. Best-effort.
+func (r *ModelRouter) UnloadAll(ctx context.Context) {
+	for _, c := range r.distinct() {
+		_ = c.Unload(ctx)
+	}
 }
 
 // TokensByType returns the raw token count for each type that binds a DISTINCT client

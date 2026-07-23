@@ -2031,6 +2031,17 @@ func main() {
 	// stays for the RuntimeManager's vision path. With no HDM_LLM_MODEL_<TYPE>
 	// overrides the router resolves every type to the base — identical to today.
 	router := buildModelRouter(modelClient)
+	// Free the local models HDM loaded when it exits (opt-in) — helpful when several
+	// types bind different models and the box is memory-constrained. Uses a fresh
+	// context since the run context is already cancelled by the time this defer runs.
+	if os.Getenv("HDM_UNLOAD_ON_EXIT") != "" {
+		defer func() {
+			uctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			router.UnloadAll(uctx)
+			log.Printf("[COGNITION] unloaded model(s) on exit (HDM_UNLOAD_ON_EXIT)")
+		}()
+	}
 
 	// 3. Bring RuntimeManager online with the ledger + cognitive engine wired
 	//    into the kernel host interfaces (block-storage, cognitive-engine,
