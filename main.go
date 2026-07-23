@@ -2413,9 +2413,29 @@ func main() {
 			if tot := hits + misses; tot > 0 {
 				rate = float64(hits) / float64(tot)
 			}
+			// Model routing: the per-type bindings + tier-weighted cognitive spend, so
+			// the mixture-of-models is visible (which model serves each role, and where
+			// the cost is going).
+			bindings := map[string]string{}
+			for _, b := range router.Bindings() {
+				bindings[b.Type] = b.Model
+			}
+			byType := map[string]uint64{}
+			for t, n := range router.TokensByType() {
+				byType[string(t)] = n
+			}
+			models := map[string]any{
+				"bindings":     bindings,
+				"totalTokens":  router.TotalTokens(),
+				"weightedCost": router.WeightedTokens(),
+			}
+			if len(byType) > 0 {
+				models["tokensByType"] = byType
+			}
 			return map[string]any{
-				"cells": rows,
-				"memo":  map[string]any{"hits": hits, "misses": misses, "hitRate": rate},
+				"cells":  rows,
+				"memo":   map[string]any{"hits": hits, "misses": misses, "hitRate": rate},
+				"models": models,
 			}
 		},
 		Vision: func(question string) (string, error) {

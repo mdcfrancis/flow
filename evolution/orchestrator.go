@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"strings"
 
 	"github.com/mdcfrancis/flow/codependency"
@@ -182,6 +183,11 @@ type Orchestrator struct {
 	// lastLatency tracks each cell's most recent baseline p99 bridge latency,
 	// feeding the Fusion trigger.
 	lastLatency map[string]uint64
+	// escalation counts a cell's consecutive no-acceptance-progress synthesis
+	// attempts. Past sieveEscalateThreshold the sieve escalates its model type to
+	// the reasoner (the cheaper kind-derived model couldn't crack it) — cost-driven
+	// escalation. Reset on any commit (progress). Serial with the evolution loop.
+	escalation map[string]int
 	// Tapes, when set, persists each frame's discovered regression corpus to
 	// the CAS ledger so the Tape Compaction Janitor has a repository to prune.
 	Tapes *TapeStore
@@ -263,6 +269,7 @@ func NewOrchestrator(ledger *storage.LedgerEngine, model Reasoner) *Orchestrator
 		GravityThreshold:   DefaultGravityThreshold,
 		LatencyThresholdNS: DefaultBridgeLatencyThresholdNS,
 		lastLatency:        map[string]uint64{},
+		escalation:         map[string]int{},
 		// Default chaos: clock drift, which rejects candidates whose behavior
 		// depends on wall time. Memory-boundary clamping and dropped host
 		// signals are off by default — the former needs B6 clamping hooks
@@ -394,13 +401,23 @@ func (o *Orchestrator) modelFor(mt inference.ModelType) Reasoner {
 	return o.model
 }
 
+// sieveEscalateThreshold is how many consecutive no-progress synthesis attempts a
+// cell may accrue before its sieve escalates to the reasoner.
+const sieveEscalateThreshold = 2
+
 // sieveModel picks the synthesis client for a target: its kind-derived model type
-// when a resolver is wired, else the code type.
+// when a resolver is wired, else the code type — but a cell that has repeatedly
+// STALLED escalates to the reasoner, the strongest model. The escalation is
+// cost-justified: the cheaper model already failed to crack this cell.
 func (o *Orchestrator) sieveModel(urn string) Reasoner {
+	mt := inference.ModelCode
 	if o.SieveModelType != nil {
-		return o.modelFor(o.SieveModelType(urn))
+		mt = o.SieveModelType(urn)
 	}
-	return o.modelFor(inference.ModelCode)
+	if o.escalation[urn] >= sieveEscalateThreshold {
+		mt = inference.ModelReason
+	}
+	return o.modelFor(mt)
 }
 
 func (o *Orchestrator) resolver() CellResolver {
@@ -678,6 +695,7 @@ func (o *Orchestrator) compactCorpus(ctx context.Context, baseline []byte) ([]Re
 // commit persists the candidate as a fresh descriptor and hot-swaps the target
 // under the MVCC optimistic-concurrency check.
 func (o *Orchestrator) commit(ctx context.Context, fr *FrameResult, baseRoot, targetURN string, desc *manifest.NodeDescriptor, sieve *SieveOutcome, reason string) (*FrameResult, error) {
+	delete(o.escalation, targetURN) // progress: reset the cost-driven escalation counter
 	newDescHash, _, err := o.repo.PutCell(targetURN, sieve.WAT, sieve.Artifact.Bytecode, desc.Semantics, desc.Saliency)
 	if err != nil {
 		return nil, fmt.Errorf("persist evolved descriptor: %w", err)
@@ -816,6 +834,12 @@ func (o *Orchestrator) acceptanceFrame(ctx context.Context, fr *FrameResult, bas
 		// needs to add the next behavior. Hold and keep pushing for correctness;
 		// efficiency optimization is deferred until the cell passes everything.
 		if basePass < total {
+			// Stall: the synthesis made no acceptance headway. Count it toward
+			// escalation — once past the threshold the next sieve uses the reasoner.
+			o.escalation[targetURN]++
+			if o.escalation[targetURN] == sieveEscalateThreshold {
+				log.Printf("[MODEL] %s stalled %dx at %d/%d — escalating synthesis to the reasoner", targetURN, o.escalation[targetURN], basePass, total)
+			}
 			fr.Reason = fmt.Sprintf("no acceptance progress (%d/%d); deferring optimization until complete", basePass, total)
 			return fr, nil
 		}
