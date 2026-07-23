@@ -25,9 +25,11 @@ mutates, through a feedback loop of checks and evolution.
 
 Treat it as a sketch to learn from, nothing more.
 
-## Contributing
+## Working in the code
 
-Conventions and the repo layout are in [CONTRIBUTING.md](CONTRIBUTING.md). The short
+The working guide for humans and agents is [AGENTS.md](AGENTS.md) — the rules of the
+road, the mental model (with file pointers), and how to extend it. Contribution
+mechanics and the package map are in [CONTRIBUTING.md](CONTRIBUTING.md). The short
 version: no new dependencies, cells stay deterministic, and everything builds, vets,
 and tests green before commit.
 
