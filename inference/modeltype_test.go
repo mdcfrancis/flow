@@ -74,6 +74,49 @@ type reasonerShape interface {
 	InvokeReasoning(ctx context.Context, systemPrompt, userContext string) (string, error)
 }
 
+func TestCostWeightOverride(t *testing.T) {
+	if ModelReason.CostWeight() != 2.0 {
+		t.Fatalf("default reason weight = %v, want 2.0", ModelReason.CostWeight())
+	}
+	SetCostWeights(map[ModelType]float64{ModelReason: 5.0})
+	defer SetCostWeights(nil) // reset for other tests
+	if ModelReason.CostWeight() != 5.0 {
+		t.Fatalf("overridden reason weight = %v, want 5.0", ModelReason.CostWeight())
+	}
+	if ModelCode.CostWeight() != 1.0 {
+		t.Fatalf("un-overridden code should keep built-in 1.0, got %v", ModelCode.CostWeight())
+	}
+	SetCostWeights(nil)
+	if ModelReason.CostWeight() != 2.0 {
+		t.Fatal("clearing overrides should restore the built-in tier")
+	}
+}
+
+func TestRebindAndInUse(t *testing.T) {
+	base := NewLocalModelClient("http://base", "base")
+	router := NewModelRouter(base, nil)
+	c2 := NewLocalModelClient("http://c2", "coder2")
+
+	old := router.Rebind(ModelCode, c2)
+	if old != base {
+		t.Fatal("previously-unbound code should have been the base client")
+	}
+	if router.ModelOf(ModelCode) != "coder2" {
+		t.Fatalf("after rebind code model = %q, want coder2", router.ModelOf(ModelCode))
+	}
+	if !router.InUse(c2) {
+		t.Fatal("c2 should be in use after rebind")
+	}
+	if !router.InUse(base) {
+		t.Fatal("base still serves reason/vision/fast, so must read as in-use")
+	}
+	// Rebinding back to nil resets to base; c2 then unused.
+	router.Rebind(ModelCode, nil)
+	if router.InUse(c2) {
+		t.Fatal("c2 should be unused after rebinding code back to base")
+	}
+}
+
 func TestWeightedTokens(t *testing.T) {
 	base := NewLocalModelClient("http://base", "base")   // reason tier (weight 2.0)
 	coder := NewLocalModelClient("http://coder", "coder") // code tier (weight 1.0)

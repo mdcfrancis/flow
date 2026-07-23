@@ -147,11 +147,16 @@ func buildModelClient() *inference.LocalModelClient {
 // with a per-type override (HDM_LLM_MODEL_<TYPE> / _URL_ / _PROVIDER_) binds its own
 // client; every other type resolves to the base. With no overrides the router behaves
 // exactly like the single base model, so this is a no-op until a type is configured.
-func buildModelRouter(base *inference.LocalModelClient) *inference.ModelRouter {
+func buildModelRouter(base *inference.LocalModelClient, policyBindings map[string]string) *inference.ModelRouter {
 	bp, bm, bu, bk := baseModelConfig()
 	perType := map[inference.ModelType]*inference.LocalModelClient{}
 	for _, t := range inference.AllModelTypes {
 		em, eu, ep := inference.TypedModelEnv(t)
+		// A ledger-policy binding overrides env's model id (provider/url still from
+		// env/base) — so bindings persist and are editable without env.
+		if pm := policyBindings[string(t)]; pm != "" {
+			em = pm
+		}
 		if em == "" && eu == "" && ep == "" {
 			continue // no override → base
 		}
@@ -169,9 +174,51 @@ func buildModelRouter(base *inference.LocalModelClient) *inference.ModelRouter {
 		log.Printf("[COGNITION] type=%s -> provider=%s model=%s endpoint=%s", t, p, m, u)
 	}
 	if len(perType) == 0 {
-		log.Printf("[COGNITION] model types: all -> base (%s); override per type with HDM_LLM_MODEL_<REASON|CODE|VISION|FAST>", bm)
+		log.Printf("[COGNITION] model types: all -> base (%s); override per type with HDM_LLM_MODEL_<REASON|CODE|VISION|FAST> or the ledger policy", bm)
 	}
 	return inference.NewModelRouter(base, perType)
+}
+
+// applyModelPolicy applies the ledger policy's evolvable model settings to the live
+// router: the LLM-tunable cost tiers (immediately) and the operator-set bindings
+// (hot-rebinding a type whose model changed and unloading the model it left behind,
+// when nothing else uses it). Called at boot and each fixpoint; nil-safe.
+func applyModelPolicy(ledger *storage.LedgerEngine, router *inference.ModelRouter, hyp *execution.RuntimeManager) {
+	if router == nil {
+		return
+	}
+	p := evolution.LoadPolicy(ledger)
+	if len(p.ModelCostWeights) > 0 {
+		w := make(map[inference.ModelType]float64, len(p.ModelCostWeights))
+		for k, v := range p.ModelCostWeights {
+			w[inference.ModelType(k)] = v
+		}
+		inference.SetCostWeights(w)
+	}
+	if len(p.ModelBindings) == 0 {
+		return
+	}
+	bp, bm, bu, bk := baseModelConfig()
+	for _, t := range inference.AllModelTypes {
+		want := p.ModelBindings[string(t)]
+		if want == "" || router.ModelOf(t) == want {
+			continue
+		}
+		old := router.Rebind(t, buildClient(bp, want, bu, bk))
+		log.Printf("[MODEL] rebound %s -> %s (ledger policy)", t, want)
+		if t == inference.ModelVision && hyp != nil {
+			hyp.SetVisionClient(router.For(string(inference.ModelVision)))
+		}
+		// Free the model left behind, but only if nothing else uses that client and
+		// it is not the base model (which the default/reason path still needs).
+		if old != nil && !router.InUse(old) && old.Model() != bm {
+			go func(c *inference.LocalModelClient) {
+				uctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+				defer cancel()
+				_ = c.Unload(uctx)
+			}(old)
+		}
+	}
 }
 
 // tokenSource is the token-accounting boundary — satisfied by both the base client
@@ -2030,7 +2077,7 @@ func main() {
 	// The router feeds the orchestrator/grower and token accounting; the base client
 	// stays for the RuntimeManager's vision path. With no HDM_LLM_MODEL_<TYPE>
 	// overrides the router resolves every type to the base — identical to today.
-	router := buildModelRouter(modelClient)
+	router := buildModelRouter(modelClient, evolution.LoadPolicy(ledger).ModelBindings)
 	// Free the local models HDM loaded when it exits (opt-in) — helpful when several
 	// types bind different models and the box is memory-constrained. Uses a fresh
 	// context since the run context is already cancelled by the time this defer runs.
@@ -2053,6 +2100,8 @@ func main() {
 	// Route the multimodal vision path to the vision-typed client (the base client
 	// when no HDM_LLM_MODEL_VISION override is set, so this is a no-op by default).
 	hypervisor.SetVisionClient(router.For(string(inference.ModelVision)))
+	// Apply the ledger policy's evolvable model settings (cost tiers + any bindings).
+	applyModelPolicy(ledger, router, hypervisor)
 	defer hypervisor.Close(ctx)
 
 	// 4. Bring CompilerService online.
@@ -2849,7 +2898,8 @@ func main() {
 						// Re-register each cell's deny-by-default mask against the freshly
 						// derived ports, so enforcement tracks the current architecture.
 						refreshMasks(hypervisor, repo, ledger, registry, denyReads)
-						applyPolicy(ledger) // pick up any policy tune since last cycle
+						applyPolicy(ledger)                                // pick up any policy tune since last cycle
+						applyModelPolicy(ledger, router, hypervisor)       // evolvable model cost tiers + bindings
 						// Self-tune policy from real outcomes toward the objective (throttled,
 						// rolls back a tune that hurt correctness).
 						autoTunePolicy(ctx, grower, ledger, systemMetrics(ctx, registry, orchestrator, friction, budget, root, router), &policyTune)

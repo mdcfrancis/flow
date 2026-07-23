@@ -2,6 +2,7 @@ package evolution
 
 import (
 	"path/filepath"
+	"reflect"
 	"testing"
 
 	"github.com/mdcfrancis/flow/storage"
@@ -11,7 +12,7 @@ func TestPolicyClampAndPersist(t *testing.T) {
 	le, _ := storage.NewLedgerEngine(filepath.Join(t.TempDir(), "hdm.db"))
 	defer le.Close()
 	// Defaults when nothing stored.
-	if p := LoadPolicy(le); p != DefaultPolicy() {
+	if p := LoadPolicy(le); !reflect.DeepEqual(p, DefaultPolicy()) {
 		t.Fatalf("expected defaults, got %+v", p)
 	}
 	if PolicyOverridden(le) {

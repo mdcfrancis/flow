@@ -8,6 +8,8 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"sync"
+	"sync/atomic"
 )
 
 // ModelType is a logical model ROLE — a fixed, extensible enumeration that lets
@@ -47,9 +49,30 @@ var modelTypes = map[ModelType]modelTypeSpec{
 // Valid reports whether t is a known model type.
 func (t ModelType) Valid() bool { _, ok := modelTypes[t]; return ok }
 
-// CostWeight returns the type's relative token cost (1.0 for an unknown type, so a
-// bad value never zeroes the cost).
+// costWeightOverride holds the ledger-policy cost-weight overrides (map[ModelType]
+// float64), copy-on-write so CostWeight reads lock-free while the fixpoint updates it.
+var costWeightOverride atomic.Value
+
+// SetCostWeights replaces the per-type cost-weight overrides (a nil/empty map clears
+// them). Applied from the ledger policy at boot and each fixpoint, so the cost tiers
+// are runtime-tunable.
+func SetCostWeights(w map[ModelType]float64) {
+	m := make(map[ModelType]float64, len(w))
+	for k, v := range w {
+		m[k] = v
+	}
+	costWeightOverride.Store(m)
+}
+
+// CostWeight returns the type's relative token cost: the ledger-policy override if
+// set, else the built-in tier (1.0 for an unknown type, so a bad value never zeroes
+// the cost).
 func (t ModelType) CostWeight() float64 {
+	if v := costWeightOverride.Load(); v != nil {
+		if w, ok := v.(map[ModelType]float64)[t]; ok {
+			return w
+		}
+	}
 	if s, ok := modelTypes[t]; ok {
 		return s.CostWeight
 	}
@@ -77,6 +100,7 @@ func TypedModelEnv(t ModelType) (model, url, provider string) {
 // router with no HDM_LLM_MODEL_* set behaves exactly like the single base model.
 type ModelRouter struct {
 	base    *LocalModelClient
+	mu      sync.RWMutex // guards clients (Rebind writes; readers RLock)
 	clients map[ModelType]*LocalModelClient
 }
 
@@ -102,11 +126,60 @@ func (r *ModelRouter) For(role string) *LocalModelClient {
 	if r == nil {
 		return nil
 	}
-	if c, ok := r.clients[ModelType(strings.ToLower(strings.TrimSpace(role)))]; ok && c != nil {
+	r.mu.RLock()
+	c, ok := r.clients[ModelType(strings.ToLower(strings.TrimSpace(role)))]
+	r.mu.RUnlock()
+	if ok && c != nil {
 		return c
 	}
 	return r.base
 }
+
+// Rebind swaps the client serving a type at runtime (e.g. after a ledger-policy
+// binding change) and returns the previous client so the caller may Unload it. A nil
+// client resets the type to the base.
+func (r *ModelRouter) Rebind(t ModelType, c *LocalModelClient) *LocalModelClient {
+	if c == nil {
+		c = r.base
+	}
+	r.mu.Lock()
+	old := r.clients[t]
+	r.clients[t] = c
+	r.mu.Unlock()
+	return old
+}
+
+// ModelOf returns the model id currently bound to a type ("" if none).
+func (r *ModelRouter) ModelOf(t ModelType) string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if c := r.clients[t]; c != nil {
+		return c.model
+	}
+	return ""
+}
+
+// InUse reports whether a client is still referenced (the base or any type), so a
+// caller can decide it is safe to Unload a rebound-away client.
+func (r *ModelRouter) InUse(c *LocalModelClient) bool {
+	if c == nil {
+		return false
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if r.base == c {
+		return true
+	}
+	for _, cl := range r.clients {
+		if cl == c {
+			return true
+		}
+	}
+	return false
+}
+
+// Model returns the model id this client serves.
+func (c *LocalModelClient) Model() string { return c.model }
 
 // InvokeReasoning makes the router a Reasoner in its own right, defaulting to the
 // reason type — so it drops in wherever a single model is expected today.
@@ -116,6 +189,8 @@ func (r *ModelRouter) InvokeReasoning(ctx context.Context, systemPrompt, userCon
 
 // distinct returns each underlying client once (types often share the base client).
 func (r *ModelRouter) distinct() []*LocalModelClient {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 	seen := map[*LocalModelClient]bool{}
 	var out []*LocalModelClient
 	add := func(c *LocalModelClient) {
@@ -157,6 +232,8 @@ func (r *ModelRouter) SetObserve(fn func(purpose string, promptBytes, respBytes,
 // bind distinct models (the mixed-model case); a type sharing the base folds into it
 // at the reason weight. Equals raw tokens × reason-weight in the single-model case.
 func (r *ModelRouter) WeightedTokens() float64 {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 	seen := map[*LocalModelClient]bool{}
 	var total float64
 	if r.base != nil {
@@ -213,6 +290,8 @@ func (r *ModelRouter) UnloadAll(ctx context.Context) {
 // (a type sharing the base is omitted — its tokens are counted on the base). For the
 // per-type spend readout.
 func (r *ModelRouter) TokensByType() map[ModelType]uint64 {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 	out := make(map[ModelType]uint64, len(AllModelTypes))
 	for _, t := range AllModelTypes {
 		if c := r.clients[t]; c != nil && c != r.base {
@@ -225,6 +304,8 @@ func (r *ModelRouter) TokensByType() map[ModelType]uint64 {
 // Bindings returns, in stable order, the resolved (type, model) pairs — for the
 // boot log so the active routing is visible.
 func (r *ModelRouter) Bindings() []struct{ Type, Model string } {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 	out := make([]struct{ Type, Model string }, 0, len(AllModelTypes))
 	for _, t := range AllModelTypes {
 		out = append(out, struct{ Type, Model string }{string(t), r.clients[t].model})
