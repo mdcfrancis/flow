@@ -90,9 +90,12 @@ const (
 // .gemini_api_key file exists), or HDM_LLM_PROVIDER=gemini; otherwise the local
 // OpenAI-compatible MLX server is used. HDM_LLM_MODEL / HDM_LLM_URL still
 // override the model id and endpoint for either backend.
-func buildModelClient() *inference.LocalModelClient {
-	provider := strings.ToLower(strings.TrimSpace(os.Getenv("HDM_LLM_PROVIDER")))
-	geminiKey := strings.TrimSpace(os.Getenv("GEMINI_API_KEY"))
+// baseModelConfig resolves the BASE backend from the environment: Gemini when
+// GEMINI_API_KEY / .gemini_api_key is present or HDM_LLM_PROVIDER=gemini, otherwise
+// the local OpenAI-compatible server, with model/url overridable.
+func baseModelConfig() (provider, model, url, geminiKey string) {
+	provider = strings.ToLower(strings.TrimSpace(os.Getenv("HDM_LLM_PROVIDER")))
+	geminiKey = strings.TrimSpace(os.Getenv("GEMINI_API_KEY"))
 	if geminiKey == "" {
 		if b, err := os.ReadFile(geminiKeyFile); err == nil {
 			geminiKey = strings.TrimSpace(string(b))
@@ -101,31 +104,80 @@ func buildModelClient() *inference.LocalModelClient {
 	if provider == "" && geminiKey != "" {
 		provider = "gemini"
 	}
-
+	model = os.Getenv("HDM_LLM_MODEL")
+	url = os.Getenv("HDM_LLM_URL")
 	if provider == "gemini" {
-		model := os.Getenv("HDM_LLM_MODEL")
 		if model == "" {
 			model = defaultGeminiModel
 		}
-		url := os.Getenv("HDM_LLM_URL") // empty → default Gemini endpoint
+		return "gemini", model, url, geminiKey // url empty → default Gemini endpoint
+	}
+	if model == "" {
+		model = defaultModel
+	}
+	if url == "" {
+		url = defaultModelURL
+	}
+	return "local", model, url, geminiKey
+}
+
+// buildClient constructs one client for a (provider, model, url).
+func buildClient(provider, model, url, geminiKey string) *inference.LocalModelClient {
+	if provider == "gemini" {
+		return inference.NewGeminiClient(url, model, geminiKey)
+	}
+	return inference.NewLocalModelClient(url, model)
+}
+
+// buildModelClient constructs the BASE cognitive-engine client (see baseModelConfig).
+func buildModelClient() *inference.LocalModelClient {
+	provider, model, url, geminiKey := baseModelConfig()
+	if provider == "gemini" {
 		if geminiKey == "" {
 			log.Printf("[COGNITION] WARNING: Gemini selected but no GEMINI_API_KEY / %s found; calls will 4xx", geminiKeyFile)
 		}
 		log.Printf("[COGNITION] provider=gemini model=%s (override with HDM_LLM_MODEL)", model)
-		return inference.NewGeminiClient(url, model, geminiKey)
+	} else {
+		log.Printf("[COGNITION] provider=local model=%s endpoint=%s (override with HDM_LLM_MODEL / HDM_LLM_URL)", model, url)
 	}
-
-	model := os.Getenv("HDM_LLM_MODEL")
-	if model == "" {
-		model = defaultModel
-	}
-	url := os.Getenv("HDM_LLM_URL")
-	if url == "" {
-		url = defaultModelURL
-	}
-	log.Printf("[COGNITION] provider=local model=%s endpoint=%s (override with HDM_LLM_MODEL / HDM_LLM_URL)", model, url)
-	return inference.NewLocalModelClient(url, model)
+	return buildClient(provider, model, url, geminiKey)
 }
+
+// buildModelRouter wraps the base client in a ModelRouter: any logical model type
+// with a per-type override (HDM_LLM_MODEL_<TYPE> / _URL_ / _PROVIDER_) binds its own
+// client; every other type resolves to the base. With no overrides the router behaves
+// exactly like the single base model, so this is a no-op until a type is configured.
+func buildModelRouter(base *inference.LocalModelClient) *inference.ModelRouter {
+	bp, bm, bu, bk := baseModelConfig()
+	perType := map[inference.ModelType]*inference.LocalModelClient{}
+	for _, t := range inference.AllModelTypes {
+		em, eu, ep := inference.TypedModelEnv(t)
+		if em == "" && eu == "" && ep == "" {
+			continue // no override → base
+		}
+		p, m, u := bp, bm, bu
+		if ep != "" {
+			p = strings.ToLower(strings.TrimSpace(ep))
+		}
+		if em != "" {
+			m = em
+		}
+		if eu != "" {
+			u = eu
+		}
+		perType[t] = buildClient(p, m, u, bk)
+		log.Printf("[COGNITION] type=%s -> provider=%s model=%s endpoint=%s", t, p, m, u)
+	}
+	if len(perType) == 0 {
+		log.Printf("[COGNITION] model types: all -> base (%s); override per type with HDM_LLM_MODEL_<REASON|CODE|VISION|FAST>", bm)
+	}
+	return inference.NewModelRouter(base, perType)
+}
+
+// tokenSource is the token-accounting boundary — satisfied by both the base client
+// and the ModelRouter (which sums across all typed clients), so metrics stay correct
+// once calls fan out across model types.
+type tokenSource interface{ TotalTokens() uint64 }
 
 // convergenceHolds is how many consecutive no-progress frames mark a cell as
 // converged (no friction left to reduce), after which it is dropped from
@@ -171,7 +223,7 @@ type SystemMetrics struct {
 	SessionTokens uint64 // cumulative model tokens; deltas measure token burn between tunes
 }
 
-func systemMetrics(ctx context.Context, registry *evolution.CellRegistry, orch *evolution.Orchestrator, friction map[string]evolution.FrictionState, budget *frameBudget, root string, model *inference.LocalModelClient) SystemMetrics {
+func systemMetrics(ctx context.Context, registry *evolution.CellRegistry, orch *evolution.Orchestrator, friction map[string]evolution.FrictionState, budget *frameBudget, root string, model tokenSource) SystemMetrics {
 	var m SystemMetrics
 	if model != nil {
 		m.SessionTokens = model.TotalTokens()
@@ -279,7 +331,7 @@ func benchmarkAppTimeout() time.Duration {
 	return 4 * time.Minute
 }
 
-func runBenchmark(ctx context.Context, grower *appgen.Grower, orch *evolution.Orchestrator, model *inference.LocalModelClient, epoch string) evolution.BenchmarkResult {
+func runBenchmark(ctx context.Context, grower *appgen.Grower, orch *evolution.Orchestrator, model tokenSource, epoch string) evolution.BenchmarkResult {
 	evolutionPaused.Store(true)
 	defer evolutionPaused.Store(false)
 	res := evolution.BenchmarkResult{Epoch: epoch, At: time.Now().Unix()}
@@ -345,7 +397,7 @@ func runBenchmark(ctx context.Context, grower *appgen.Grower, orch *evolution.Or
 // benchmark, and cut a new epoch ONLY if the system did not regress in correctness and improved
 // (more correct, or equally correct but more efficient at evolving) vs the last epoch's
 // benchmark. On promotion it checkpoints the epoch AND records this benchmark as the new bar.
-func tryPromoteEpoch(ctx context.Context, grower *appgen.Grower, orch *evolution.Orchestrator, model *inference.LocalModelClient, ledger *storage.LedgerEngine, name string) map[string]any {
+func tryPromoteEpoch(ctx context.Context, grower *appgen.Grower, orch *evolution.Orchestrator, model tokenSource, ledger *storage.LedgerEngine, name string) map[string]any {
 	res := runBenchmark(ctx, grower, orch, model, name)
 	baseline := evolution.LoadBenchmarkBaseline(ledger)
 	promote, reason := evolution.ShouldPromote(res, baseline)
@@ -1956,6 +2008,10 @@ func main() {
 	//    HDM_LLM_PROVIDER=gemini. Model/endpoint stay overridable via
 	//    HDM_LLM_MODEL / HDM_LLM_URL.
 	modelClient := buildModelClient()
+	// The router feeds the orchestrator/grower and token accounting; the base client
+	// stays for the RuntimeManager's vision path. With no HDM_LLM_MODEL_<TYPE>
+	// overrides the router resolves every type to the base — identical to today.
+	router := buildModelRouter(modelClient)
 
 	// 3. Bring RuntimeManager online with the ledger + cognitive engine wired
 	//    into the kernel host interfaces (block-storage, cognitive-engine,
@@ -2043,7 +2099,7 @@ func main() {
 
 	// 5. Bring the evolutionary orchestrator online, with co-mutation tracking
 	//    recording isolation passes.
-	orchestrator := evolution.NewOrchestrator(ledger, modelClient)
+	orchestrator := evolution.NewOrchestrator(ledger, router)
 	orchestrator.Gravity = codependency.NewTracker(ledger)
 	tapeStore := evolution.NewTapeStore(ledger)
 	orchestrator.Tapes = tapeStore
@@ -2054,10 +2110,10 @@ func main() {
 	orchestrator.Activity = activity
 	// Feed the live data-flow log: every reasoning round-trip reports what
 	// actually flowed (purpose, prompt/response sizes, tokens, duration).
-	modelClient.Observe = func(purpose string, promptBytes, respBytes, tokens int, ms int64) {
+	router.SetObserve(func(purpose string, promptBytes, respBytes, tokens int, ms int64) {
 		activity.Flow("infer", purpose, fmt.Sprintf("%s→%s · %d tok · %dms",
 			humanBytes(promptBytes), humanBytes(respBytes), tokens, ms))
-	}
+	})
 	resolve := func(u string) ([]byte, bool) {
 		d, err := repo.Load(u)
 		if err != nil {
@@ -2078,7 +2134,7 @@ func main() {
 	for _, u := range registry.List() {
 		activity.SetCell(u, status.CellLive)
 	}
-	grower := appgen.NewGrower(ledger, modelClient)
+	grower := appgen.NewGrower(ledger, router)
 	grower.Activity = activity
 
 	// Resume: re-enroll application subsystems grown in previous sessions so the
@@ -2404,7 +2460,7 @@ func main() {
 			if evolutionPaused.Load() {
 				return map[string]string{"error": "a benchmark is already running"}
 			}
-			go tryPromoteEpoch(context.Background(), grower, orchestrator, modelClient, ledger, name)
+			go tryPromoteEpoch(context.Background(), grower, orchestrator, router, ledger, name)
 			return map[string]any{"started": name, "note": "running system benchmark (evolves the app suite); watch the log and /benchmark for the verdict"}
 		},
 		Benchmark: func() any {
@@ -2738,7 +2794,7 @@ func main() {
 						applyPolicy(ledger) // pick up any policy tune since last cycle
 						// Self-tune policy from real outcomes toward the objective (throttled,
 						// rolls back a tune that hurt correctness).
-						autoTunePolicy(ctx, grower, ledger, systemMetrics(ctx, registry, orchestrator, friction, budget, root, modelClient), &policyTune)
+						autoTunePolicy(ctx, grower, ledger, systemMetrics(ctx, registry, orchestrator, friction, budget, root, router), &policyTune)
 						// Recurring-pattern detector: propose a shared data-structure primitive
 						// for cells that repeat the same shape, autonomously (no operator).
 						autoDetectStructure(ctx, grower, orchestrator, registry, repo, ledger, &structDetect)
