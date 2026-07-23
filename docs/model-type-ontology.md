@@ -39,9 +39,15 @@ model per provider:
 | `fast` | difficulty judgment, scenario/motion gates, cheap classification | speed/low cost |
 
 Config via `HDM_LLM_MODEL_<TYPE>` (+ optional `HDM_LLM_URL_<TYPE>` /
-`HDM_LLM_PROVIDER_<TYPE>` so a type can bind a *different provider* — e.g. local `code`,
-Gemini `vision`). **Unset ⇒ the base model** (`HDM_LLM_MODEL` / today's default), so
-existing single-model runs are unchanged.
+`HDM_LLM_PROVIDER_<TYPE>` so a type can bind a *different provider*). **Unset ⇒ the base
+model** (`HDM_LLM_MODEL` / today's default), so existing single-model runs are unchanged.
+
+**Vision can be fully local.** omlx serves vision-capable Gemma-4 models (verified: a
+red PNG → "Red" via the OpenAI `image_url` content format), so `vision` does not have to
+be Gemini. The catch is code, not availability: today's vision path is Gemini-only
+(`inference/gemini.go`); `LocalModelClient` sends text only. Routing `vision` to a local
+model therefore needs a bounded addition — send image content in the OpenAI-style request
+(see Stage 3).
 
 ### Routing
 
@@ -99,6 +105,10 @@ Each stage builds + tests green on its own; early stages are behavior-preserving
   `JudgeDifficulty`→`fast`, scenario/motion gates→`fast`.
 - Keep the rest on the default. Verify each call site still compiles + tests pass with the
   base model; then a mixed-model boot shows each faculty using its bound model.
+- **Local-vision support:** for `vision` to resolve to an omlx model, add image content to
+  `LocalModelClient`'s request (OpenAI `image_url` data-URI — verified to work on omlx
+  Gemma-4) so the visual critic can send the rendered frame. If `vision` is left on
+  Gemini, this is skipped.
 
 ### Stage 4 — cell-kind → model-type in the sieve
 - In the synthesis path, derive the sieve's model type from the target cell's `Kind`
@@ -148,5 +158,7 @@ Each stage builds + tests green on its own; early stages are behavior-preserving
   Stage 3+ is configured.
 - **Cost calibration** (`centsPerToken` per type) is a judgement call; start with relative
   tiers and make them policy-tunable (Stage 7) rather than hard-coding forever.
-- **Provider mixing** (local `code` + Gemini `vision`) is a feature, but keep vision's
-  Gemini-only constraint in mind — the registry resolver handles per-type provider.
+- **Provider mixing** is a feature (the registry resolver handles per-type provider), and
+  **vision can be local** — omlx Gemma-4 models are vision-capable (verified). The only
+  code cost is adding image content to `LocalModelClient` (Stage 3); no dependency on a
+  remote provider is required.
