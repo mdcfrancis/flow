@@ -583,6 +583,16 @@ func (o *Orchestrator) RunFrame(ctx context.Context, targetURN string) (*FrameRe
 		// it so the scheduler does not count it as a convergence hold (which would
 		// wrongly park the cell just because the model blipped).
 		fr.Transport = errors.Is(serr, inference.ErrServerUnreachable)
+		if !fr.Transport {
+			// A genuine synthesis failure (no compilable, contract-valid candidate)
+			// counts toward escalation just like an acceptance stall — so a cell stuck
+			// at the COMPILE stage escalates to the AGENTIC sieve, where compile_check
+			// hands the model the precise assembler error to fix.
+			o.escalation[targetURN]++
+			if o.escalation[targetURN] == sieveEscalateThreshold {
+				log.Printf("[MODEL] %s failed synthesis %dx — escalating to the agentic sieve (compile-check + knowledge tools)", targetURN, o.escalation[targetURN])
+			}
+		}
 		return fr, nil
 	}
 	fr.Sieve = sieve
