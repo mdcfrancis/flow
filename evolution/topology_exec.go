@@ -125,7 +125,7 @@ CELL %s:
 PARTNER %s:
 %s`, target, partner, target, tGeno, partner, pGeno)
 
-	sieve, serr := RunSieve(ctx, o.model, o.compass(), seed, o.SieveMaxIters, RunTickContract)
+	sieve, serr := RunSieve(ctx, o.sieveModel(target), o.compass(), seed, o.SieveMaxIters, RunTickContract)
 	if serr != nil {
 		fr.Sieve = sieve
 		fr.Reason = fmt.Sprintf("fusion synthesis skipped: %v", serr)

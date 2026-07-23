@@ -33,6 +33,15 @@ type Policy struct {
 	// VisionIntervalSec / CodeCriticIntervalSec: how often the (costly) adversarial critics run.
 	VisionIntervalSec     int `json:"visionIntervalSec"`
 	CodeCriticIntervalSec int `json:"codeCriticIntervalSec"`
+	// ModelBindings maps a logical model type (reason/code/vision/fast) to the model
+	// id serving it. Operator/env-seeded and PERSISTED, so bindings survive restarts
+	// and can be edited without env; an empty entry falls back to the env override or
+	// base model. NOT auto-tuned — a model id cannot be safely invented by the tuner.
+	ModelBindings map[string]string `json:"modelBindings,omitempty"`
+	// ModelCostWeights overrides the per-type cost tier in the tier-weighted cost
+	// signal — numeric and LLM-TUNABLE, so the loop can learn the real cost ratios
+	// between model types. An empty entry keeps the built-in tier.
+	ModelCostWeights map[string]float64 `json:"modelCostWeights,omitempty"`
 }
 
 // DefaultPolicy is the hand-tuned baseline.
@@ -51,6 +60,13 @@ func (p *Policy) clamp() {
 	p.GrievanceThreshold = clampInt(p.GrievanceThreshold, 1, 20)
 	p.VisionIntervalSec = clampInt(p.VisionIntervalSec, 15, 900)
 	p.CodeCriticIntervalSec = clampInt(p.CodeCriticIntervalSec, 30, 1800)
+	for k, w := range p.ModelCostWeights { // keep cost tiers positive and bounded
+		if w < 0.05 {
+			p.ModelCostWeights[k] = 0.05
+		} else if w > 50 {
+			p.ModelCostWeights[k] = 50
+		}
+	}
 }
 
 func clampInt(v, lo, hi int) int {

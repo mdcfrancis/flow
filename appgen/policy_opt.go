@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"reflect"
 	"strings"
 
 	"github.com/mdcfrancis/flow/evolution"
@@ -22,10 +23,14 @@ Field meanings (all integers):
 - visionIntervalSec / codeCriticIntervalSec: seconds between the (costly) adversarial critics.
   Lower = tighter correctness feedback but more cost; higher = cheaper but slower to catch a
   regression.
+You MAY also adjust "modelCostWeights" — an optional object mapping a model TYPE
+(reason|code|vision|fast) to its relative cost per token (a positive number ~0.1..10; fast is
+cheapest, reason dearest). Raising a type's weight makes the loop treat that model as more
+expensive and prefer cheaper types where they suffice. Only touch it if the cost signal
+warrants; omit it otherwise. Do NOT invent or change "modelBindings" (model ids) — leave them out.
 
-Change ONLY fields the feedback/goal justifies; keep the rest. Values are clamped to safe
-bounds afterward, so stay reasonable. Output ONLY the adjusted policy as JSON with the same
-fields, no prose.`
+Change ONLY what the feedback/goal justifies; keep the rest. Values are clamped to safe bounds
+afterward, so stay reasonable. Output ONLY the adjusted policy as JSON, no prose.`
 
 // OptimizePolicy adjusts the tunable policy toward the SYSTEM GOAL from feedback/observations.
 // The LLM proposes new values; clamping to safe bounds (in SavePolicy) is the guardrail — a
@@ -48,7 +53,8 @@ func (g *Grower) OptimizePolicy(ctx context.Context, feedback string) (evolution
 	if json.Unmarshal([]byte(js), &next) != nil {
 		return cur, false, "unparseable policy", nil
 	}
-	if next == cur {
+	next.ModelBindings = cur.ModelBindings // bindings are operator-set, never LLM-tuned
+	if reflect.DeepEqual(next, cur) {
 		return cur, false, "no change proposed", nil
 	}
 	if err := evolution.SavePolicy(g.ledger, next); err != nil {

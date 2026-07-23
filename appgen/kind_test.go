@@ -1,6 +1,23 @@
 package appgen
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/mdcfrancis/flow/inference"
+)
+
+func TestDeriveModelType(t *testing.T) {
+	// Synthesis is coding → most kinds route to code; a render cell routes to vision
+	// (aligned with its critic and its visual output).
+	if got := deriveModelType(KindRender); got != inference.ModelVision {
+		t.Errorf("render → %q, want vision", got)
+	}
+	for _, k := range []CellKind{KindCompute, KindInput, KindLeaf, KindCompose} {
+		if got := deriveModelType(k); got != inference.ModelCode {
+			t.Errorf("%s → %q, want code", k, got)
+		}
+	}
+}
 
 func TestDeriveKindFromPorts(t *testing.T) {
 	cases := []struct {
