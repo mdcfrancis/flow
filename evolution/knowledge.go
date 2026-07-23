@@ -146,9 +146,11 @@ func AddDocument(ledger *storage.LedgerEngine, d Document) error {
 }
 
 // sameShape reports whether two examples cover the same synthesis shape: same entry and
-// same tag set (tags name the pattern, e.g. "draw-at-position", "wall-bounce").
+// same tag set (tags name the pattern, e.g. "draw-at-position", "wall-bounce"). An
+// untagged example (a raw capture) has no declared shape, so it is only deduped by exact
+// content, never collapsed against another — additive but content-unique.
 func sameShape(a, b Example) bool {
-	if a.Entry != b.Entry {
+	if a.Entry != b.Entry || len(a.Tags) == 0 || len(b.Tags) == 0 {
 		return false
 	}
 	return strings.EqualFold(strings.Join(sortedLower(a.Tags), ","), strings.Join(sortedLower(b.Tags), ","))

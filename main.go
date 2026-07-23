@@ -742,6 +742,29 @@ func recoverOrphanedCells(ctx context.Context, grower *appgen.Grower, orch *evol
 // truth (each cell's verified checks + its genotype's memory accesses), so the
 // map every synthesis and authoring prompt is built against reflects the system
 // as it currently stands rather than as it was first planned.
+// captureGreens promotes newly-green app cells to knowledge-base examples — the
+// self-improvement loop: a green cell's WAT becomes a worked example future synthesis
+// can retrieve. Each uncaptured app cell is scored once; captured ones are remembered
+// so they are not re-scored. Returns how many were captured this pass.
+func captureGreens(ctx context.Context, grower *appgen.Grower, orch *evolution.Orchestrator, registry *evolution.CellRegistry, captured map[string]bool) int {
+	n := 0
+	for _, urn := range registry.List() {
+		if captured[urn] || appNamespace(urn) == "" {
+			continue
+		}
+		p, tot, err := orch.ScoreCell(ctx, urn)
+		if err != nil || tot == 0 || p < tot {
+			continue // not green yet
+		}
+		captured[urn] = true
+		if ok, _ := grower.CaptureExample(urn, fmt.Sprintf("%d/%d", p, tot)); ok {
+			n++
+			log.Printf("[EXAMPLE] captured green cell %s (%d/%d) into the knowledge base", urn, p, tot)
+		}
+	}
+	return n
+}
+
 func refreshAppMaps(ctx context.Context, grower *appgen.Grower, registry *evolution.CellRegistry) {
 	seen := map[string]bool{}
 	for _, u := range registry.List() {
@@ -2765,6 +2788,9 @@ func main() {
 			visionCritiqueInterval = d
 		}
 	}
+	// capturedCells remembers app cells already promoted to knowledge-base examples,
+	// so captureGreens scores each green cell once and stops re-scoring it.
+	capturedCells := map[string]bool{}
 	// Persistent, root-keyed convergence: load each known cell's friction from
 	// the ledger (resume across restarts) and persist updates as they change.
 	friction := map[string]evolution.FrictionState{}
@@ -2903,6 +2929,7 @@ func main() {
 						refreshMasks(hypervisor, repo, ledger, registry, denyReads)
 						applyPolicy(ledger)                                // pick up any policy tune since last cycle
 						applyModelPolicy(ledger, router, hypervisor)       // evolvable model cost tiers + bindings
+						captureGreens(ctx, grower, orchestrator, registry, capturedCells) // green cells -> knowledge base
 						// Self-tune policy from real outcomes toward the objective (throttled,
 						// rolls back a tune that hurt correctness).
 						autoTunePolicy(ctx, grower, ledger, systemMetrics(ctx, registry, orchestrator, friction, budget, root, router), &policyTune)
