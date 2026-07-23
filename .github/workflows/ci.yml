@@ -1,0 +1,64 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build-test:
+    name: build · vet · gofmt · test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: gofmt (must be clean)
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "::error::These files are not gofmt-clean:"; echo "$unformatted"
+            exit 1
+          fi
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: build
+        run: go build ./...
+
+      - name: test (race detector)
+        run: go test -race ./...
+
+  gosec:
+    name: gosec (security scan)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: install gosec
+        run: go install github.com/securego/gosec/v2/cmd/gosec@latest
+
+      # Excluded rules are documented false-positives / pervasive noise for this
+      # numeric, WAT-assembling, localhost-only research codebase:
+      #   G101  keys load from env vars / gitignored files; the flagged sites are env-var
+      #         names + WAT template strings, not hardcoded secrets.
+      #   G104  the only hits are hash.Write, which never returns an error.
+      #   G115  pervasive integer conversions for shared-memory offsets / WAT operands,
+      #         bounded by design (the assembler validates ranges).
+      #   G705  the single XSS hit is a binary octet-stream canvas frame (not HTML);
+      #         the console binds to 127.0.0.1 only.
+      #   G706  "log injection" on log lines that print cell URNs / identifiers in a
+      #         localhost tool.
+      - name: gosec
+        run: $(go env GOPATH)/bin/gosec -exclude=G101,G104,G115,G705,G706 ./...

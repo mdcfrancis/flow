@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/mdcfrancis/flow/appgen"
 	"github.com/mdcfrancis/flow/evolution"
@@ -177,6 +178,7 @@ func (cs *CanvasServer) Frame(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	// Binary canvas frame served as octet-stream — not HTML, so not an XSS sink.
 	w.Header().Set("Content-Type", "application/octet-stream")
 	_, _ = w.Write(frame)
 }
@@ -893,7 +895,14 @@ func Serve(ctx context.Context, addr string, s Services) *http.Server {
 		}
 		http.NotFound(w, r)
 	})
-	srv := &http.Server{Addr: addr, Handler: mux}
+	srv := &http.Server{
+		Addr:              addr,
+		Handler:           mux,
+		ReadHeaderTimeout: 10 * time.Second, // bound header reads (Slowloris) — G112
+		ReadTimeout:       60 * time.Second,
+		WriteTimeout:      120 * time.Second, // vision/build responses can be slow
+		IdleTimeout:       120 * time.Second,
+	}
 	go func() { _ = srv.ListenAndServe() }()
 	go func() {
 		<-ctx.Done()

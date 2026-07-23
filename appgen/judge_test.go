@@ -22,8 +22,8 @@ func TestAutonomousMovementDetection(t *testing.T) {
 
 	// input-driven: seed in HMI register -> not autonomous
 	inp := &evolution.AcceptanceSuite{Scenarios: []evolution.Scenario{{
-		Entry: "run-tick",
-		Seed:  []evolution.SeedWrite{{At: "0x50020", U32: []uint32{68}}},
+		Entry:  "run-tick",
+		Seed:   []evolution.SeedWrite{{At: "0x50020", U32: []uint32{68}}},
 		Expect: evolution.ScenarioExpect{Reads: []evolution.SeedWrite{{At: "0xB0000", Cmp: "increased"}}},
 	}}}
 	if _, offs := autonomousMovement(inp); offs != nil {

@@ -36,15 +36,15 @@ type GlobalConstraints struct {
 // coordination contract instead of having to infer the wiring from prose (which
 // left renderers static and put bullet logic on the wrong field).
 type Subsystem struct {
-	Identity  string   `json:"identity"`
-	Semantics string   `json:"semantics"`
+	Identity  string `json:"identity"`
+	Semantics string `json:"semantics"`
 	// Kind is the subsystem's declared TYPE (compute|render|input|leaf|compose) — the
 	// single authoritative fact that drives its entry export, genesis contract, and
 	// scenario shape. Declared by the envelope/fracture author and validated against
 	// the ports below (ports win on contradiction). See kind.go.
-	Kind      CellKind `json:"kind,omitempty"`
-	Reads     []string `json:"reads,omitempty"`  // contract field names it reads (plus "HMI input")
-	Writes    []string `json:"writes,omitempty"` // contract field names it writes
+	Kind   CellKind `json:"kind,omitempty"`
+	Reads  []string `json:"reads,omitempty"`  // contract field names it reads (plus "HMI input")
+	Writes []string `json:"writes,omitempty"` // contract field names it writes
 	// Composition, when set, makes this subsystem a COMBINATOR driver: HDM generates
 	// the boilerplate that applies a leaf function cell across the arrays via
 	// cell-dispatch, and the model implements only the small leaf (a separate

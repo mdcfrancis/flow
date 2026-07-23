@@ -420,6 +420,26 @@ func (o *Orchestrator) sieveModel(urn string) Reasoner {
 	return o.modelFor(mt)
 }
 
+// synthesize runs the sieve for a target. A cell that has ESCALATED (repeatedly stalled)
+// and whose model supports tools is synthesized AGENTICALLY — the model may retrieve a
+// worked example / how-to and compile-check drafts via the knowledge + compiler tools.
+// Every other cell uses the standard one-shot sieve. Both feed the identical
+// verification gates; the agentic tools inform synthesis, they never bypass it.
+func (o *Orchestrator) synthesize(ctx context.Context, targetURN, intent, sysPrompt, seed string, contract *EntryContract) (*SieveOutcome, error) {
+	m := o.sieveModel(targetURN)
+	if o.escalation[targetURN] >= sieveEscalateThreshold {
+		if tr, ok := m.(ToolReasoner); ok {
+			kind := ""
+			if contract == RenderFrameContract {
+				kind = "render"
+			}
+			log.Printf("[MODEL] %s — agentic synthesis (knowledge + compiler tools)", targetURN)
+			return RunAgenticSieve(ctx, tr, o.ledger, sysPrompt, seed, kind, intent, contract)
+		}
+	}
+	return RunSieve(ctx, m, sysPrompt, seed, o.SieveMaxIters, contract)
+}
+
 func (o *Orchestrator) resolver() CellResolver {
 	return func(urn string) ([]byte, bool) {
 		desc, err := o.repo.Load(urn)
@@ -534,7 +554,7 @@ func (o *Orchestrator) RunFrame(ctx context.Context, targetURN string) (*FrameRe
 		o.event("mutate", targetURN, "genotype refinement")
 		o.phase("synthesizing", "reasoning a candidate for "+targetURN+" (awaiting cognitive engine)", targetURN)
 	}
-	sieve, serr := RunSieve(ctx, o.sieveModel(targetURN), sysPrompt, seed, o.SieveMaxIters, contract)
+	sieve, serr := o.synthesize(ctx, targetURN, desc.Semantics.FunctionalIntent, sysPrompt, seed, contract)
 	// NOVEL-PRIMITIVE MINTING (witnessed by consumer): if the structural response minted a new
 	// primitive, provisionally store it so the refactored cell can dispatch to it during
 	// verification. The primitive is TRUSTED only if this cell commits (its tapes hold while
@@ -563,6 +583,16 @@ func (o *Orchestrator) RunFrame(ctx context.Context, targetURN string) (*FrameRe
 		// it so the scheduler does not count it as a convergence hold (which would
 		// wrongly park the cell just because the model blipped).
 		fr.Transport = errors.Is(serr, inference.ErrServerUnreachable)
+		if !fr.Transport {
+			// A genuine synthesis failure (no compilable, contract-valid candidate)
+			// counts toward escalation just like an acceptance stall — so a cell stuck
+			// at the COMPILE stage escalates to the AGENTIC sieve, where compile_check
+			// hands the model the precise assembler error to fix.
+			o.escalation[targetURN]++
+			if o.escalation[targetURN] == sieveEscalateThreshold {
+				log.Printf("[MODEL] %s failed synthesis %dx — escalating to the agentic sieve (compile-check + knowledge tools)", targetURN, o.escalation[targetURN])
+			}
+		}
 		return fr, nil
 	}
 	fr.Sieve = sieve
@@ -723,6 +753,31 @@ func (o *Orchestrator) commit(ctx context.Context, fr *FrameResult, baseRoot, ta
 
 // buildSeed renders the sieve seed for spec-driven building: the goal, the
 // required entry, the acceptance checks to satisfy, and the current genotype.
+// renderKnowledge retrieves the top docs + worked examples for a cell of this entry
+// kind and intent from the knowledge base, formatted for the synthesis prompt. Empty
+// when the stores hold nothing relevant (the static few-shot then carries synthesis).
+func (o *Orchestrator) renderKnowledge(contract *EntryContract, intent string) string {
+	kind := ""
+	if contract == RenderFrameContract {
+		kind = "render"
+	}
+	docs := FindDocuments(o.ledger, kind, intent, 2)
+	exs := FindExamples(o.ledger, kind, intent, nil, nil, 2)
+	if len(docs) == 0 && len(exs) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("RELEVANT KNOWLEDGE (retrieved for this cell — apply it):\n")
+	for _, d := range docs {
+		fmt.Fprintf(&b, "• %s — %s\n", d.Title, d.Body)
+	}
+	for _, e := range exs {
+		fmt.Fprintf(&b, "WORKED EXAMPLE (%s, %s):\n%s\n", e.Kind, e.Semantics, e.WAT)
+	}
+	b.WriteString("\n")
+	return b.String()
+}
+
 func (o *Orchestrator) buildSeed(urn, intent, genotype string, contract *EntryContract, suite *AcceptanceSuite) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "Build cell %s.\nGOAL: %s\n\n", urn, intent)
@@ -770,6 +825,13 @@ func (o *Orchestrator) buildSeed(urn, intent, genotype string, contract *EntryCo
 	if sc := LoadContract(o.ledger, ns); sc != nil {
 		b.WriteString(sc.Render())
 		b.WriteString("\n")
+	}
+	// RETRIEVED KNOWLEDGE: the how-to documents + worked examples from the growable
+	// knowledge base most relevant to a cell of THIS kind and intent — concrete guidance
+	// targeting exactly this synthesis shape (the doc explains the pattern, the example
+	// shows it working). The static few-shot in the system prompt is only the floor.
+	if k := o.renderKnowledge(contract, intent); k != "" {
+		b.WriteString(k)
 	}
 	// User guidance (soft): cross-app SYSTEM principles and this APP's principles,
 	// rewritten from operator commentary. The model weighs these while building; an

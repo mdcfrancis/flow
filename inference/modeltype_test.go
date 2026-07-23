@@ -118,7 +118,7 @@ func TestRebindAndInUse(t *testing.T) {
 }
 
 func TestWeightedTokens(t *testing.T) {
-	base := NewLocalModelClient("http://base", "base")   // reason tier (weight 2.0)
+	base := NewLocalModelClient("http://base", "base")    // reason tier (weight 2.0)
 	coder := NewLocalModelClient("http://coder", "coder") // code tier (weight 1.0)
 	router := NewModelRouter(base, map[ModelType]*LocalModelClient{ModelCode: coder})
 

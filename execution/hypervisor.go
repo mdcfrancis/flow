@@ -132,17 +132,17 @@ type RuntimeManager struct {
 	// frames is a ring of the most recent rendered draw streams (oldest first), so
 	// the vision path can look at the last N frames — a single image for a static
 	// view, a sequence for motion. Accessed under mu.
-	frames      [][]byte
-	ledger      *storage.LedgerEngine
-	repo        *manifest.Repository
-	sieve       *compiler.CompilerService
-	inference   *inference.LocalModelClient
+	frames    [][]byte
+	ledger    *storage.LedgerEngine
+	repo      *manifest.Repository
+	sieve     *compiler.CompilerService
+	inference *inference.LocalModelClient
 	// visionClient, when set at boot, serves the multimodal vision path — so the
 	// visual critic can run on a vision-typed model distinct from the reasoning base.
 	// Falls back to inference when unset.
 	visionClient *inference.LocalModelClient
-	sharedMem   api.Memory
-	scratchNext uint32
+	sharedMem    api.Memory
+	scratchNext  uint32
 	// Software paging (pages.go): physical private pages + the per-cell window mapping.
 	pages       []pageRec         // host-managed physical pages in the page zone
 	pageNext    uint32            // bump pointer within the page zone

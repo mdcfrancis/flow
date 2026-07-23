@@ -61,8 +61,8 @@ func TestActiveCandidatesExcludesSettled(t *testing.T) {
 	const root = "R1"
 	all := []string{"a", "b", "c"}
 	friction := map[string]evolution.FrictionState{
-		"b": {Converged: true, Root: root},   // settled at the current root -> inactive
-		"c": {Converged: true, Root: "OLD"},  // converged at a stale root -> re-evaluate
+		"b": {Converged: true, Root: root},  // settled at the current root -> inactive
+		"c": {Converged: true, Root: "OLD"}, // converged at a stale root -> re-evaluate
 	}
 	got := activeCandidates(all, friction, root)
 	// a (never converged) and c (stale) are active; b is settled.

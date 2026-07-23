@@ -416,11 +416,11 @@ type pendingExport struct {
 type exportMode int
 
 const (
-	exFuncName exportMode = iota // resolve sval via funcNames (absolute)
-	exFuncDefined                // ival is a defined-func ordinal
-	exGlobalName                 // resolve sval via globalNames (absolute)
-	exGlobalDefined              // ival is a defined-global ordinal
-	exDirect                     // ival is already an absolute index
+	exFuncName      exportMode = iota // resolve sval via funcNames (absolute)
+	exFuncDefined                     // ival is a defined-func ordinal
+	exGlobalName                      // resolve sval via globalNames (absolute)
+	exGlobalDefined                   // ival is a defined-global ordinal
+	exDirect                          // ival is already an absolute index
 )
 
 type dataDef struct {
