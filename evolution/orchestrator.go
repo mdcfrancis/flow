@@ -420,6 +420,26 @@ func (o *Orchestrator) sieveModel(urn string) Reasoner {
 	return o.modelFor(mt)
 }
 
+// synthesize runs the sieve for a target. A cell that has ESCALATED (repeatedly stalled)
+// and whose model supports tools is synthesized AGENTICALLY — the model may retrieve a
+// worked example / how-to and compile-check drafts via the knowledge + compiler tools.
+// Every other cell uses the standard one-shot sieve. Both feed the identical
+// verification gates; the agentic tools inform synthesis, they never bypass it.
+func (o *Orchestrator) synthesize(ctx context.Context, targetURN, intent, sysPrompt, seed string, contract *EntryContract) (*SieveOutcome, error) {
+	m := o.sieveModel(targetURN)
+	if o.escalation[targetURN] >= sieveEscalateThreshold {
+		if tr, ok := m.(ToolReasoner); ok {
+			kind := ""
+			if contract == RenderFrameContract {
+				kind = "render"
+			}
+			log.Printf("[MODEL] %s — agentic synthesis (knowledge + compiler tools)", targetURN)
+			return RunAgenticSieve(ctx, tr, o.ledger, sysPrompt, seed, kind, intent, contract)
+		}
+	}
+	return RunSieve(ctx, m, sysPrompt, seed, o.SieveMaxIters, contract)
+}
+
 func (o *Orchestrator) resolver() CellResolver {
 	return func(urn string) ([]byte, bool) {
 		desc, err := o.repo.Load(urn)
@@ -534,7 +554,7 @@ func (o *Orchestrator) RunFrame(ctx context.Context, targetURN string) (*FrameRe
 		o.event("mutate", targetURN, "genotype refinement")
 		o.phase("synthesizing", "reasoning a candidate for "+targetURN+" (awaiting cognitive engine)", targetURN)
 	}
-	sieve, serr := RunSieve(ctx, o.sieveModel(targetURN), sysPrompt, seed, o.SieveMaxIters, contract)
+	sieve, serr := o.synthesize(ctx, targetURN, desc.Semantics.FunctionalIntent, sysPrompt, seed, contract)
 	// NOVEL-PRIMITIVE MINTING (witnessed by consumer): if the structural response minted a new
 	// primitive, provisionally store it so the refactored cell can dispatch to it during
 	// verification. The primitive is TRUSTED only if this cell commits (its tapes hold while
