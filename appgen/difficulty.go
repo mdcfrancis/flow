@@ -7,6 +7,7 @@ import (
 	"log"
 
 	"github.com/mdcfrancis/flow/evolution"
+	"github.com/mdcfrancis/flow/inference"
 )
 
 // maxProactiveFractures bounds the up-front DFS so a mis-calibrated "hard" judgment can't
@@ -40,7 +41,7 @@ func (g *Grower) JudgeDifficulty(ctx context.Context, semantics, namespace strin
 		contractText = c.Render()
 	}
 	payload, _ := json.Marshal(map[string]any{"subsystem": semantics, "shared_contract": contractText})
-	resp, err := g.model.InvokeReasoning(ctx, g.prompt("difficulty", difficultyPrompt), string(payload))
+	resp, err := g.modelFor(inference.ModelFast).InvokeReasoning(ctx, g.prompt("difficulty", difficultyPrompt), string(payload))
 	if err != nil {
 		return true, ""
 	}

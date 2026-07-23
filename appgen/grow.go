@@ -16,6 +16,7 @@ import (
 	"github.com/mdcfrancis/flow/compiler"
 	"github.com/mdcfrancis/flow/evolution"
 	"github.com/mdcfrancis/flow/execution"
+	"github.com/mdcfrancis/flow/inference"
 	"github.com/mdcfrancis/flow/manifest"
 	"github.com/mdcfrancis/flow/storage"
 )
@@ -271,6 +272,17 @@ type Grower struct {
 }
 
 // NewGrower constructs a Grower.
+// modelFor selects the client bound to a logical model type when the model is a
+// router, else the single model. Faculties that want a specific type (the sieve →
+// code, cheap gates → fast) call this; everything else uses g.model, which the
+// router resolves to the reason type by default.
+func (g *Grower) modelFor(mt inference.ModelType) Reasoner {
+	if r, ok := g.model.(*inference.ModelRouter); ok {
+		return r.For(string(mt))
+	}
+	return g.model
+}
+
 func NewGrower(ledger *storage.LedgerEngine, model Reasoner) *Grower {
 	return &Grower{
 		ledger:    ledger,
@@ -929,7 +941,7 @@ Requirements:
 	if ui {
 		sig = evolution.RenderFrameContract
 	}
-	out, err := evolution.RunSieve(ctx, g.model, genesisSystem, seed, g.SieveIter, sig)
+	out, err := evolution.RunSieve(ctx, g.modelFor(inference.ModelCode), genesisSystem, seed, g.SieveIter, sig)
 	if err == nil && out != nil && out.Artifact != nil && out.Artifact.SyntaxPassed {
 		return out.WAT, out.Artifact.Bytecode
 	}

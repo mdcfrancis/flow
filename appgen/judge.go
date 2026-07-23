@@ -20,6 +20,7 @@ import (
 	"strings"
 
 	"github.com/mdcfrancis/flow/evolution"
+	"github.com/mdcfrancis/flow/inference"
 )
 
 const motionJudgePrompt = `You judge whether a moving element's per-step POSITION PATH is a smooth traversal
@@ -187,7 +188,7 @@ func (g *Grower) judgeDegenerate(ctx context.Context, objective string, offsets 
 	for _, i := range suspicious {
 		fmt.Fprintf(&b, "field %s path: %s\n", offsets[i], formatPath(paths[i]))
 	}
-	resp, err := g.model.InvokeReasoning(ctx, g.prompt("motion-judge", motionJudgePrompt), b.String())
+	resp, err := g.modelFor(inference.ModelFast).InvokeReasoning(ctx, g.prompt("motion-judge", motionJudgePrompt), b.String())
 	if err != nil {
 		return false // model unavailable — do not strengthen on a guess
 	}

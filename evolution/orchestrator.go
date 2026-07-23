@@ -378,6 +378,16 @@ func (o *Orchestrator) ScenarioFlags(ctx context.Context, cellURN string) ([]Sce
 
 // resolver returns a CellResolver backed by the descriptor repository, so shadow
 // replays can follow inter-cell dispatch (needed for fusion/fission baselines).
+// modelFor selects the client bound to a logical model type when the model is a
+// router, else the single model. The sieve routes to code; other calls use o.model,
+// which the router resolves to the reason type by default.
+func (o *Orchestrator) modelFor(mt inference.ModelType) Reasoner {
+	if r, ok := o.model.(*inference.ModelRouter); ok {
+		return r.For(string(mt))
+	}
+	return o.model
+}
+
 func (o *Orchestrator) resolver() CellResolver {
 	return func(urn string) ([]byte, bool) {
 		desc, err := o.repo.Load(urn)
@@ -492,7 +502,7 @@ func (o *Orchestrator) RunFrame(ctx context.Context, targetURN string) (*FrameRe
 		o.event("mutate", targetURN, "genotype refinement")
 		o.phase("synthesizing", "reasoning a candidate for "+targetURN+" (awaiting cognitive engine)", targetURN)
 	}
-	sieve, serr := RunSieve(ctx, o.model, sysPrompt, seed, o.SieveMaxIters, contract)
+	sieve, serr := RunSieve(ctx, o.modelFor(inference.ModelCode), sysPrompt, seed, o.SieveMaxIters, contract)
 	// NOVEL-PRIMITIVE MINTING (witnessed by consumer): if the structural response minted a new
 	// primitive, provisionally store it so the refactored cell can dispatch to it during
 	// verification. The primitive is TRUSTED only if this cell commits (its tapes hold while

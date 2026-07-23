@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"github.com/mdcfrancis/flow/compiler"
+	"github.com/mdcfrancis/flow/inference"
 )
 
 // behaviorOnlyDrop lets a candidate be accepted purely on behavior preservation,
@@ -125,7 +126,7 @@ CELL %s:
 PARTNER %s:
 %s`, target, partner, target, tGeno, partner, pGeno)
 
-	sieve, serr := RunSieve(ctx, o.model, o.compass(), seed, o.SieveMaxIters, RunTickContract)
+	sieve, serr := RunSieve(ctx, o.modelFor(inference.ModelCode), o.compass(), seed, o.SieveMaxIters, RunTickContract)
 	if serr != nil {
 		fr.Sieve = sieve
 		fr.Reason = fmt.Sprintf("fusion synthesis skipped: %v", serr)
