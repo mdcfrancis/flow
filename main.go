@@ -971,6 +971,22 @@ func appNamespace(urn string) string {
 	return prefix + rest
 }
 
+// isRenderCell reports whether a cell draws to the canvas — the signal the canvas
+// uses to auto-focus a freshly-grown app. It matches the same intent predicate the
+// frame loop trusts (IsUISubsystem), but also falls back to the ground truth in the
+// genotype — a render cell exports "render-frame" (WAT) or declares a Flux "(draw"
+// block — so a render cell whose intent text happens to miss the keyword list still
+// brings the app on-screen rather than leaving it invisible behind a default view.
+func isRenderCell(repo *manifest.Repository, desc *manifest.NodeDescriptor) bool {
+	if appgen.IsUISubsystem(desc.Semantics.FunctionalIntent) {
+		return true
+	}
+	if src, err := repo.Genotype(desc); err == nil {
+		return strings.Contains(src, "render-frame") || strings.Contains(src, "(draw")
+	}
+	return false
+}
+
 // challengeArchitectures asks, for each fully-complete grown application, whether
 // its architecture is complete for the objective — proposing (and scaffolding) a
 // missing subsystem if not. Only complete apps are challenged, so a stuck/partial
@@ -2751,7 +2767,7 @@ func main() {
 				// stay frozen at its init state. Only claim focus from a non-app default
 				// view; never steal it from an app already on screen.
 				if appNamespace(canvasSrv.Active()) == "" {
-					if desc, lerr := repo.Load(urn); lerr == nil && appgen.IsUISubsystem(desc.Semantics.FunctionalIntent) {
+					if desc, lerr := repo.Load(urn); lerr == nil && isRenderCell(repo, desc) {
 						canvasSrv.SetActive(urn)
 						log.Printf("[APP] focused canvas on %s (render cell live — app now animating)", urn)
 					}
