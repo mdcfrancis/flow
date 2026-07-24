@@ -88,7 +88,7 @@ func RunAgenticSieve(ctx context.Context, model ToolReasoner, ledger *storage.Le
 		}
 	}
 	taxoWAT(wat, art, "")
-	return &SieveOutcome{Artifact: art, WAT: wat, Iterations: 1, Raw: resp}, nil
+	return &SieveOutcome{Artifact: art, WAT: wat, Flux: fluxSrc, Iterations: 1, Raw: resp}, nil
 }
 
 // buildAgenticTools returns the tool definitions and a Go executor bound to the

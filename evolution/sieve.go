@@ -20,10 +20,24 @@ type Reasoner interface {
 
 // SieveOutcome reports the result of the inner recursive synthesis loop.
 type SieveOutcome struct {
-	Artifact   *compiler.CompilationArtifact
-	WAT        string
+	Artifact *compiler.CompilationArtifact
+	WAT      string
+	// Flux is the model's Flux source when the cell was authored in Flux. It is
+	// the GENOME for such cells (WAT is a derived artifact): stored on commit and
+	// shown back to the next solver frame so synthesis refines it, not restarts.
+	Flux       string
 	Iterations int
 	Raw        string // the model's full final response (for structural NEW-PRIMITIVE extraction)
+}
+
+// Genotype is the source to persist as the cell's genome: the Flux program when
+// authored in Flux, otherwise the WAT. The phenotype (bytecode) is identical
+// either way — Flux is lowered to that WAT.
+func (s *SieveOutcome) Genotype() string {
+	if s.Flux != "" {
+		return s.Flux
+	}
+	return s.WAT
 }
 
 // EntryContract is the exact signature a synthesized cell's entry export must
@@ -48,6 +62,14 @@ var (
 // thus entry-agnostic — a cell is evolved against whichever monadic entry it
 // implements.
 func entryContractFor(genotype string) *EntryContract {
+	// A Flux genome names its shape by its terminal: a view cell has a (draw …),
+	// a compute cell a (write …). WAT names it by the export.
+	if strings.Contains(genotype, "(cell") {
+		if strings.Contains(genotype, "(draw") {
+			return RenderFrameContract
+		}
+		return RunTickContract
+	}
 	if strings.Contains(genotype, `"render-frame"`) {
 		return RenderFrameContract
 	}
@@ -112,7 +134,7 @@ func runSieve(ctx context.Context, model Reasoner, systemPrompt, seedContext str
 			// Syntax cleared; now enforce the entry contract if one was given.
 			if want == nil {
 				taxoWAT(wat, art, "")
-				return &SieveOutcome{Artifact: art, WAT: wat, Iterations: i, Raw: resp}, nil
+				return &SieveOutcome{Artifact: art, WAT: wat, Flux: fluxSrc, Iterations: i, Raw: resp}, nil
 			}
 			if sigErr := checkEntrySignature(ctx, art.Bytecode, want); sigErr != nil {
 				taxoWAT(wat, art, sigErr.Error()) // assembled, but type/stack/signature invalid
@@ -121,7 +143,7 @@ func runSieve(ctx context.Context, model Reasoner, systemPrompt, seedContext str
 				continue
 			}
 			taxoWAT(wat, art, "")
-			return &SieveOutcome{Artifact: art, WAT: wat, Iterations: i, Raw: resp}, nil
+			return &SieveOutcome{Artifact: art, WAT: wat, Flux: fluxSrc, Iterations: i, Raw: resp}, nil
 		}
 		taxoWAT(wat, art, "") // syntax fault — classified from the assembler artifact
 		payload = correctionDirective(art)

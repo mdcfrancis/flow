@@ -707,7 +707,7 @@ func (o *Orchestrator) RunFrame(ctx context.Context, targetURN string) (*FrameRe
 
 	// 4. Atomic reference commit: persist the new genotype+phenotype as a fresh
 	//    descriptor and hot-swap under an optimistic concurrency check.
-	newDescHash, _, err := o.repo.PutCell(targetURN, sieve.WAT, sieve.Artifact.Bytecode, desc.Semantics, desc.Saliency)
+	newDescHash, _, err := o.repo.PutCell(targetURN, sieve.Genotype(), sieve.Artifact.Bytecode, desc.Semantics, desc.Saliency)
 	if err != nil {
 		return nil, fmt.Errorf("persist evolved descriptor: %w", err)
 	}
@@ -764,7 +764,7 @@ func (o *Orchestrator) compactCorpus(ctx context.Context, baseline []byte) ([]Re
 // under the MVCC optimistic-concurrency check.
 func (o *Orchestrator) commit(ctx context.Context, fr *FrameResult, baseRoot, targetURN string, desc *manifest.NodeDescriptor, sieve *SieveOutcome, reason string) (*FrameResult, error) {
 	delete(o.escalation, targetURN) // progress: reset the cost-driven escalation counter
-	newDescHash, _, err := o.repo.PutCell(targetURN, sieve.WAT, sieve.Artifact.Bytecode, desc.Semantics, desc.Saliency)
+	newDescHash, _, err := o.repo.PutCell(targetURN, sieve.Genotype(), sieve.Artifact.Bytecode, desc.Semantics, desc.Saliency)
 	if err != nil {
 		return nil, fmt.Errorf("persist evolved descriptor: %w", err)
 	}
@@ -913,6 +913,12 @@ func (o *Orchestrator) buildSeed(urn, intent, genotype string, contract *EntryCo
 		// explicit instruction to output only a (cell …) program. The lowerer owns
 		// the encoding, so the model only writes logic.
 		b.WriteString(fluxSeedBlock(contract, fluxLayout))
+		// If the stored genome is already Flux, show it as the program to REFINE —
+		// so synthesis accumulates across frames instead of restarting each time
+		// (the stored genotype is the Flux source once a Flux cell has committed).
+		if strings.HasPrefix(strings.TrimSpace(genotype), "(cell") {
+			fmt.Fprintf(&b, "CURRENT PROGRAM — improve THIS, do not restart from scratch. Keep what already works; change only what the acceptance checks and any critic feedback above require:\n%s\n", genotype)
+		}
 	} else {
 		fmt.Fprintf(&b, "\nCURRENT GENOTYPE (improve it to pass more checks):\n%s", genotype)
 	}

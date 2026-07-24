@@ -43,7 +43,7 @@ type SemanticManifest struct {
 // NodeDescriptor is the immutable manifest node for a single cell.
 type NodeDescriptor struct {
 	IdentityURN   string                 `json:"identity_urn"`
-	GenotypeHash  string                 `json:"genotype_hash"`  // CAS hash of the WAT source
+	GenotypeHash  string                 `json:"genotype_hash"`  // CAS hash of the genotype source (Flux program or WAT)
 	PhenotypeHash string                 `json:"phenotype_hash"` // CAS hash of the compiled WASM
 	Dependencies  []DependencyConstraint `json:"dependencies"`
 	Semantics     SemanticManifest       `json:"semantics"`
