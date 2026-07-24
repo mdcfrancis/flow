@@ -128,6 +128,17 @@ func NewLocalModelClient(baseURL, model string) *LocalModelClient {
 			reconnect = d
 		}
 	}
+	// Per-request HTTP timeout. Non-streaming completions return headers only when
+	// the whole generation is done, so a slow REASONING model (e.g. qwen3.6, which
+	// emits hundreds of hidden reasoning tokens before any content) can exceed the
+	// default on a large prompt and fail "awaiting headers". Raise it with
+	// HDM_LLM_TIMEOUT (e.g. 600s) for such models.
+	timeout := 120 * time.Second
+	if v := os.Getenv("HDM_LLM_TIMEOUT"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d > 0 {
+			timeout = d
+		}
+	}
 	return &LocalModelClient{
 		provider:  providerOpenAI,
 		baseURL:   baseURL,
@@ -135,7 +146,7 @@ func NewLocalModelClient(baseURL, model string) *LocalModelClient {
 		apiKey:    apiKey,
 		reconnect: reconnect,
 		client: &http.Client{
-			Timeout: 120 * time.Second,
+			Timeout: timeout,
 		},
 	}
 }
