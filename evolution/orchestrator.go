@@ -453,17 +453,25 @@ func (o *Orchestrator) sieveModel(urn string) Reasoner {
 // verification gates; the agentic tools inform synthesis, they never bypass it.
 func (o *Orchestrator) synthesize(ctx context.Context, targetURN, intent, sysPrompt, seed string, contract *EntryContract) (*SieveOutcome, error) {
 	m := o.sieveModel(targetURN)
-	if o.escalation[targetURN] >= sieveEscalateThreshold {
+	layout := o.fluxLayoutFor(targetURN)
+	// Flux cells are authored test-driven and agentic BY DEFAULT (the model checks
+	// and RUNS its cell via tools) — not only on escalation. Raw-WAT cells stay
+	// agentic only after they stall, as before.
+	if layout != nil || o.escalation[targetURN] >= sieveEscalateThreshold {
 		if tr, ok := m.(ToolReasoner); ok {
 			kind := ""
 			if contract == RenderFrameContract {
 				kind = "render"
 			}
-			log.Printf("[MODEL] %s — agentic synthesis (knowledge + compiler tools)", targetURN)
-			return RunAgenticSieve(ctx, tr, o.ledger, sysPrompt, seed, kind, intent, o.fluxLayoutFor(targetURN), contract)
+			if layout != nil {
+				log.Printf("[FLUX] %s — agentic Flux synthesis (flux_check + flux_run)", targetURN)
+			} else {
+				log.Printf("[MODEL] %s — agentic synthesis (knowledge + compiler tools)", targetURN)
+			}
+			return RunAgenticSieve(ctx, tr, o.ledger, sysPrompt, seed, kind, intent, layout, contract)
 		}
 	}
-	return RunSieveWithLayout(ctx, m, sysPrompt, seed, o.SieveMaxIters, o.fluxLayoutFor(targetURN), contract)
+	return RunSieveWithLayout(ctx, m, sysPrompt, seed, o.SieveMaxIters, layout, contract)
 }
 
 func (o *Orchestrator) resolver() CellResolver {

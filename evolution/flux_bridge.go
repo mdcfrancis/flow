@@ -1,10 +1,13 @@
 package evolution
 
 import (
+	"context"
+	"encoding/json"
 	"fmt"
 	"sort"
 	"strings"
 
+	"github.com/mdcfrancis/flow/compiler"
 	"github.com/mdcfrancis/flow/flux"
 )
 
@@ -196,6 +199,99 @@ func fluxSeedBlock(contract *EntryContract, layout flux.Layout) string {
 	}
 	b.WriteString("Output only your (cell …) program.\n")
 	return b.String()
+}
+
+// runFluxCell lowers a Flux program and runs it once (or `steps` times) in the
+// real deterministic sandbox with the given inputs, returning a human-readable
+// summary of the resulting writable-field values (compute cells) or drawn
+// primitives (view cells). It is the engine of the flux_run agentic tool: it lets
+// the authoring model TEST its cell empirically — set inputs, see outputs, iterate
+// — instead of guessing. inputsJSON is a JSON object of field name → integer.
+func runFluxCell(layout flux.Layout, src, inputsJSON string, steps int) (string, error) {
+	wat, err := flux.Compile("cell", src, layout)
+	if err != nil {
+		return "", err
+	}
+	art, aerr := compiler.NewCompilerService().CompileGenotype(wat)
+	if aerr != nil || art == nil || !art.SyntaxPassed {
+		return "", fmt.Errorf("lowered WAT did not assemble")
+	}
+
+	// Seed the inputs the model chose.
+	raw := map[string]json.Number{}
+	_ = json.Unmarshal([]byte(inputsJSON), &raw)
+	var seeds []SeedWrite
+	var unknown []string
+	for name, num := range raw {
+		f, ok := layout[name]
+		if !ok {
+			unknown = append(unknown, name)
+			continue
+		}
+		iv, _ := num.Int64()
+		seeds = append(seeds, SeedWrite{At: fmt.Sprintf("0x%X", f.Offset), U32: []uint32{uint32(int32(iv))}})
+	}
+
+	entry := "run-tick"
+	if strings.Contains(wat, "render-frame") {
+		entry = "render-frame"
+	}
+	if steps < 1 {
+		steps = 1
+	}
+
+	// Read back every writable field after the run, in a stable order.
+	type wf struct {
+		name string
+		off  uint32
+	}
+	var writables []wf
+	for name, f := range layout {
+		if !f.ReadOnly {
+			writables = append(writables, wf{name, f.Offset})
+		}
+	}
+	sort.Slice(writables, func(i, j int) bool { return writables[i].name < writables[j].name })
+	expect := make([]SeedWrite, len(writables))
+	for i, w := range writables {
+		expect[i] = SeedWrite{At: fmt.Sprintf("0x%X", w.off)}
+	}
+
+	sc := Scenario{Entry: entry, Steps: steps, Seed: seeds, Expect: ScenarioExpect{Reads: expect}}
+	_, frames, reads, _, _, rerr := execScenario(context.Background(), art.Bytecode, sc, DefaultPayloadOffset, DefaultStateWindow, nil)
+	if rerr != nil {
+		return "", rerr
+	}
+
+	var b strings.Builder
+	if len(unknown) > 0 {
+		fmt.Fprintf(&b, "(ignored unknown input field(s): %s)\n", strings.Join(unknown, ", "))
+	}
+	if entry == "render-frame" {
+		var last []DrawRecord
+		if len(frames) > 0 {
+			last = frames[len(frames)-1]
+		}
+		if len(last) == 0 {
+			b.WriteString("drew nothing")
+			return b.String(), nil
+		}
+		name := map[int32]string{1: "rect", 2: "line", 3: "circle"}
+		for _, r := range last {
+			fmt.Fprintf(&b, "drew %s a=%d b=%d c=%d d=%d rgba=0x%08X\n", name[r.Op], r.A, r.B, r.C, r.D, r.RGBA)
+		}
+		return strings.TrimRight(b.String(), "\n"), nil
+	}
+	parts := make([]string, len(writables))
+	for i, w := range writables {
+		v := int32(0)
+		if i < len(reads) && len(reads[i]) > 0 {
+			v = int32(reads[i][0])
+		}
+		parts[i] = fmt.Sprintf("%s=%d", w.name, v)
+	}
+	fmt.Fprintf(&b, "after %d step(s), writable fields: %s", steps, strings.Join(parts, ", "))
+	return b.String(), nil
 }
 
 // fluxCorrectionDirective renders the sieve repair prompt for a Flux compile

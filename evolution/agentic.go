@@ -30,6 +30,19 @@ When finished, reply with ONLY the final complete (module ...) form — no tool 
 
 `
 
+// fluxAgenticPreamble drives TEST-DRIVEN Flux authoring: the model writes a
+// (cell …) program, checks it compiles, and — the key step — RUNS it in the real
+// sandbox on inputs it chooses, reads the outputs, and iterates until the behavior
+// matches the goal. This turns synthesis from "guess the syntax" into an empirical
+// loop, which is what lets a model that has the logic but not the grammar converge.
+const fluxAgenticPreamble = `You author a cell in FLUX — a small typed functional language (its grammar, your exact typed fields, and a worked example are in the task below). You have TOOLS; USE them and ITERATE until the cell is correct — do not answer on the first draft.
+- find_docs / find_examples / read_doc: retrieve a relevant how-to or worked pattern.
+- flux_check(src): parse + type-check + lower your (cell …). It returns "ok" or the exact error (an unknown field, a type mismatch, a syntax slip). Fix EVERY error before running.
+- flux_run(src, inputs): RUN your cell in the real sandbox with inputs YOU choose and read the resulting field values (or drawn shapes) back. This is how you VERIFY behavior: pick inputs that exercise the goal AND the edge cases the acceptance checks describe (e.g. a value at a wall, a specific key), run, and confirm the outputs are exactly what the goal requires. If an output is wrong, fix the LOGIC and run again.
+Only after flux_run shows the correct behavior, reply with ONLY the final complete (cell …) program — no tool call, no prose, no WAT.
+
+`
+
 // RunAgenticSieve synthesizes a cell with the CLIENT-SIDE agentic loop: the model may
 // call knowledge-base + compiler tools (retrieve a worked example, read a how-to,
 // compile-check a draft) while it works. The final WAT is extracted, assembled, and
@@ -38,7 +51,11 @@ When finished, reply with ONLY the final complete (module ...) form — no tool 
 func RunAgenticSieve(ctx context.Context, model ToolReasoner, ledger *storage.LedgerEngine, systemPrompt, seedContext, kind, intent string, layout flux.Layout, contract *EntryContract) (*SieveOutcome, error) {
 	cs := compiler.NewCompilerService()
 	tools, exec := buildAgenticTools(ledger, cs, kind, intent, layout)
-	resp, err := model.InvokeTools(ctx, agenticPreamble+systemPrompt, seedContext, tools, exec, agenticMaxSteps)
+	preamble := agenticPreamble
+	if layout != nil {
+		preamble = fluxAgenticPreamble
+	}
+	resp, err := model.InvokeTools(ctx, preamble+systemPrompt, seedContext, tools, exec, agenticMaxSteps)
 	if err != nil {
 		return nil, fmt.Errorf("agentic sieve: %w", err)
 	}
@@ -85,6 +102,14 @@ func buildAgenticTools(ledger *storage.LedgerEngine, cs *compiler.CompilerServic
 		{Name: "find_docs", Description: "Search how-to documents on architectural patterns; returns titles + bodies.", Parameters: objSchema(map[string]string{"query": "the topic to look up"}, []string{"query"})},
 		{Name: "read_doc", Description: "Return the full body of one document by id.", Parameters: objSchema(map[string]string{"id": "the document id"}, []string{"id"})},
 		{Name: "compile_check", Description: "Assemble a WAT (module ...) through the HDM assembler; returns 'ok' or the exact error. Use before finalizing.", Parameters: objSchema(map[string]string{"wat": "the full WAT module source"}, []string{"wat"})},
+	}
+	// In Flux mode, add the test-driven authoring tools: check a (cell …) program
+	// and RUN it in the real sandbox on chosen inputs to verify behavior.
+	if layout != nil {
+		defs = append(defs,
+			inference.ToolDef{Name: "flux_check", Description: "Parse, type-check, and lower a Flux (cell …) program; returns 'ok' or the exact error (unknown field, type mismatch, syntax). Use before flux_run.", Parameters: objSchema(map[string]string{"src": "the full (cell …) Flux program"}, []string{"src"})},
+			inference.ToolDef{Name: "flux_run", Description: "Run your Flux (cell …) in the real sandbox with inputs you choose, and get the resulting field values (or drawn shapes) back — verify behavior empirically before answering. inputs is a JSON object of field name to integer.", Parameters: objSchema(map[string]string{"src": "the full (cell …) Flux program", "inputs": "JSON object mapping field names to integers, e.g. {\"player_x\":100,\"hmi_key\":39}"}, []string{"src", "inputs"})},
+		)
 	}
 	exec := func(name, argsJSON string) string {
 		args := map[string]any{}
@@ -164,6 +189,23 @@ func buildAgenticTools(ledger *storage.LedgerEngine, cs *compiler.CompilerServic
 				return fmt.Sprintf("COMPILE ERROR (line %d): %s", line, msg)
 			}
 			return "ok: assembles cleanly"
+		case "flux_check":
+			if layout == nil {
+				return "flux_check is unavailable for this cell"
+			}
+			if _, err := flux.Compile("cell", getStr("src"), layout); err != nil {
+				return "FLUX ERROR: " + err.Error()
+			}
+			return "ok: parses, type-checks, and lowers to WASM"
+		case "flux_run":
+			if layout == nil {
+				return "flux_run is unavailable for this cell"
+			}
+			out, err := runFluxCell(layout, getStr("src"), getStr("inputs"), 1)
+			if err != nil {
+				return "RUN ERROR: " + err.Error()
+			}
+			return out
 		}
 		return "unknown tool: " + name
 	}
