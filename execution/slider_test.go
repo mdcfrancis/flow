@@ -28,6 +28,31 @@ func TestSetSliderWritesRegister(t *testing.T) {
 	}
 }
 
+// A slider move latches the discrete-event slot (like a click/key) so a cell that
+// gates on "an input event happened" fires when the operator drags.
+func TestSetSliderBumpsEventLatch(t *testing.T) {
+	rm, _ := newRM(t)
+	if seq := rm.readU32(InEventSeq); seq != 0 {
+		t.Fatalf("event seq should start at 0, got %d", seq)
+	}
+	if err := rm.SetSlider(5, 90); err != nil {
+		t.Fatalf("slider: %v", err)
+	}
+	if seq := rm.readU32(InEventSeq); seq != 1 {
+		t.Fatalf("slider move did not bump event seq: got %d, want 1", seq)
+	}
+	if et := rm.readU32(InEventType); et != EvSlider {
+		t.Fatalf("event type = %d, want EvSlider(%d)", et, EvSlider)
+	}
+	if idx := rm.readU32(InEventKey); idx != 5 {
+		t.Fatalf("event key (slider index) = %d, want 5", idx)
+	}
+	// The new value is readable from the slider register.
+	if v := int32(rm.readU32(InSlider0 + 5*4)); v != 90 {
+		t.Fatalf("slider5 register = %d, want 90", v)
+	}
+}
+
 // An out-of-range slider index is rejected and writes nothing.
 func TestSetSliderRejectsOutOfRange(t *testing.T) {
 	rm, _ := newRM(t)

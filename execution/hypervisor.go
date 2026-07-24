@@ -69,7 +69,7 @@ const (
 	InButtons   = InputBase + 0x08 // u32 held-button mask: bit0 left, bit1 right, bit2 middle
 	InModifiers = InputBase + 0x0C // u32 modifier mask: bit0 shift, bit1 ctrl, bit2 alt, bit3 meta
 	InEventSeq  = InputBase + 0x10 // u32 monotonic discrete-event counter (0 = none yet)
-	InEventType = InputBase + 0x14 // u32 last discrete event: 2 down, 3 up, 4 click, 5 keydown, 6 keyup
+	InEventType = InputBase + 0x14 // u32 last discrete event: 2 down, 3 up, 4 click, 5 keydown, 6 keyup, 7 slider
 	InEventX    = InputBase + 0x18 // i32 cursor x at event time
 	InEventY    = InputBase + 0x1C // i32 cursor y at event time
 	InEventKey  = InputBase + 0x20 // u32 key code for key events (0 for mouse events)
@@ -92,6 +92,7 @@ const (
 	EvClick   = 4
 	EvKeyDown = 5
 	EvKeyUp   = 6
+	EvSlider  = 7 // an operator slider moved; InEventKey holds the slider index
 )
 
 // RuntimeManager manages the compilation and execution of guest cells, the
@@ -1217,6 +1218,15 @@ func (rm *RuntimeManager) SetSlider(index int, value int32) error {
 	}
 	rm.inputActive = true
 	rm.writeU32(uint32(InSlider0+index*4), uint32(value))
+	// A slider move is a discrete interaction: bump the event latch (with the
+	// slider index in the key slot) so a cell that gates on "an input event
+	// happened" — the common (if (> hmi_event_seq …) …) pattern — fires when the
+	// operator drags, exactly as it would for a click or key. The new value is read
+	// from the slider register itself (hmi_slider<index>).
+	rm.inputSeq++
+	rm.writeU32(InEventSeq, rm.inputSeq)
+	rm.writeU32(InEventType, EvSlider)
+	rm.writeU32(InEventKey, uint32(index))
 	return nil
 }
 
