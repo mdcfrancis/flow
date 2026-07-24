@@ -50,22 +50,34 @@ under a functional/dataflow architecture:
 A functional IR is not a new paradigm bolted on — it is naming the paradigm the
 system already runs on, and giving the model a surface that matches it.
 
-## 3. The computational model: a cell is a pure `reads → writes` function
+## 3. The computational model: a cell is a pure function over typed channels
 
-A cell is a pure function from the record of fields it **reads** to the record of
-fields it **writes** (or, for a view, to a **draw list**). It performs no mutation
-and no I/O; the *runtime* applies the returned writes to the shared store and renders
-the draw list. Purity lives inside the cell; effects live at the boundary.
+A cell is a **pure function**. What varies between kinds of cell is only the **typed
+I/O channel** the runtime binds to it. The cell performs no mutation and no I/O
+itself; the runtime reads the input channel, calls the function, and applies the
+output channel. Purity lives inside the cell; effects live at the boundary.
 
-- **Compute cell** (`run-tick`): `Record(reads) → Record(writes)`. Fields not written
-  are unchanged.
+The channel is what makes each cell *shape*:
+
+- **Compute cell** (`run-tick`): `Record(reads) → Record(writes)` over the shared
+  store. Fields not written are unchanged.
 - **View cell** (`render-frame`): `Record(reads) → DrawList`. Writes nothing.
+- **Terminal cell** (`terminal-io`, roadmap): `[Char] → [Char]` — a pure function
+  over a character stream, stdin to stdout. A stateful REPL variant combines a
+  shared-state channel with the char channel: `(Record(reads), [Char]) →
+  (Record(writes), [Char])`. This is the classic monadic `interact :: (String →
+  String)` shape, and it is the reason the type system carries a distinct `Char`
+  from day one (§4.3) — so a keystroke can never be silently added to a pixel.
 - **Effectful cell** (cognition: LLM host calls, `invoke-cell` dispatch): a minority.
   v1 leaves these as raw WAT (see §9 escape hatch); a later effect-primitive model
   can bring them in.
 
-This is *not* full monadic IO — it is a pure function over a record, which is exactly
-what these cells already are.
+The unifying idea: **one calculus of pure functions; the runtime wires a typed
+channel to each.** Compute, view, and terminal are the same thing over different
+channels — which is why they share a grammar, a type system, and a lowerer, and why
+adding a channel (a terminal, a socket, an audio buffer) is a runtime-binding + type
+question, not a new language. This is *not* full monadic IO — each cell is a pure
+function over a typed value, which is exactly what these cells already are.
 
 ## 4. The language
 
@@ -105,39 +117,84 @@ Renderer:
 
 That is the whole logic. Everything else — module wrapper, memory import, `run-tick`
 export + signature, locals declaration and placement, the `0xB0000+` load/store for
-each field, the 24-byte draw-record encoding, stack ordering, i32 typing — is the
-lowerer's job, and it cannot get any of them wrong.
+each field, the 24-byte draw-record encoding, stack ordering, and width/type
+discipline — is the lowerer's job, and it cannot get any of them wrong.
 
 ### 4.2 Grammar (v1, sketch)
 
 ```
 cell   := (cell NAME (reads ID*) (writes ID*)? body)
 body   := (write binding*)          ; compute cell → output record
-        | (draw  prim*)             ; view cell → draw list
+        | (draw  prim*)             ; view cell   → draw list
+        | (stdout expr)             ; terminal cell → [Char]  (roadmap)
 binding:= (ID expr)
-expr   := INT | HEXCOLOR | ID       ; ID is a field read or a let-bound name
+lit    := INT | FLOAT | CHAR | BOOL | COLOR   ; 42  3.14  'a'  true  #xFFCC33FF
+expr   := lit | ID                  ; ID is a field read or a let-bound name
         | (let ([ID expr]*) expr)
-        | (if expr expr expr)
-        | (OP expr*)                ; primitive application
+        | (if expr expr expr)       ; guard : Bool; branches same type
+        | (OP expr*)                ; typed primitive application
 prim   := (rect x y w h color) | (line x1 y1 x2 y2 color) | (circle cx cy r color)
 ```
 
-### 4.3 Types (v1)
+The terminal cell shape (roadmap) reuses the same expression language over the
+`[Char]` channel — one calculus, a different bound channel:
 
-One scalar type: **i32**. The field environment (`reads`) is the typing context;
-`let` binds names; `write`/`draw` are the only terminal forms. A single numeric type
-makes the `type` failure bucket vanish outright. `f32` (fixed-point vs float, fuel
-implications) is a v2 question — see §12.
+```lisp
+(cell echo               ; [Char] -> [Char], stdin to stdout
+  (stdin in)
+  (stdout (map to-upper in)))
+```
+
+### 4.3 Types
+
+A real type system from the start — not because the bouncing ball needs it, but
+because the type system is what keeps *domains* apart while everything lowers to
+WAT's handful of numeric types. A keystroke, a pixel coordinate, a velocity, and a
+truth value are all `i32` in wasm; conflating them is a bug, and the whole point of a
+typed IR is to make that bug unrepresentable.
+
+**Base types (v1):**
+
+| Flux type | lowers to | literals | notes |
+|---|---|---|---|
+| `Int`   | i32 | `42`, `-1`        | pixel/index/scalar arithmetic |
+| `Float` | f32 | `3.14`, `0.5`     | sub-pixel motion, ratios |
+| `Char`  | i32 (code point) | `'a'`, `'\n'` | terminal I/O; distinct from `Int` by design |
+| `Bool`  | i32 (0/1) | `true`, `false` | result of comparisons; guards `if` |
+| `Color` | i32 (RGBA) | `#xFFCC33FF`   | draw-record color; distinct from `Int` |
+
+**On the roadmap:** sized ints (`I64`), `Float64`, and the parametric **sequence**
+`[T]` — one type that serves both the combinators (`[Int]`, `map`/`fold`) and the
+terminal channel (`[Char]`, stdin/stdout). Records are the field environment; a
+`DrawList` is `[Prim]`.
+
+**Where types come from — declared, not guessed.** Field types come from the
+shared-state **contract** (each contract field already declares a type); `reads`
+brings typed fields into scope and `writes` must produce each field's declared type.
+Literals carry their type. Primitives are typed, with arithmetic/comparison
+**overloaded** over `Int` and `Float` but resolved by operand type — **no implicit
+coercion**: crossing `Int`↔`Float` or `Char`↔`Int` needs an explicit `to-float` /
+`to-int` / `char->int` / `int->char`, so widths are never silently mixed (the old
+`i64`-into-`i32.div_s` bug is unrepresentable). Checking is **bidirectional** —
+declared field/literal/primitive types flow through `let` and `if` (branches must
+agree) — so no annotations are needed inside a cell and no full Hindley–Milner
+inference is required.
+
+A name not in `reads`/`let`, a `write` to a field of the wrong type, or an unresolved
+overload is a **semantic type error** caught before lowering and fed back to the
+model as a sentence ("`vel_x` is `Float`, but you wrote an `Int`") — not a stack
+trace.
 
 ### 4.4 Primitives (v1)
 
-Arithmetic `+ - * / mod neg`, comparison `< <= > >= = !=`, boolean `and or not`,
-`if`, `let`, numeric `min max clamp abs`, output `write`, and draw constructors
-`rect line circle` with `#xRRGGBBAA` color literals. Field reads are bare identifiers
-resolved against `reads` (an identifier not in `reads` or a `let` is a type error,
-caught at lower time and fed back — a *semantic* message, not a stack trace).
+Arithmetic `+ - * / mod neg` (`Int`/`Float`), comparison `< <= > >= = !=` (→`Bool`),
+boolean `and or not`, control `if`/`let`, numeric `min max clamp abs`, conversions
+`to-float to-int char->int int->char`, output `write`, and draw constructors
+`rect line circle` taking a `Color`. Field reads are bare identifiers resolved against
+`reads`/`let`.
 
-Higher-order `map`/`fold` over a small fixed vector (for combinator cells) is v2.
+Higher-order `map`/`fold` over a `[T]` (combinator cells; terminal streams) lands with
+the sequence type on the roadmap.
 
 ## 5. Lowering to WAT — what the lowerer owns
 
@@ -148,10 +205,10 @@ guarantees, every deterministic class we measured:
 |---|---|
 | `structural` (module, import, export, locals, parens) | emits the wrapper + `run-tick`/`render-frame` export + locals-at-top |
 | `stack-sig` (`too many results`, stack order) | allocates locals and orders the stack from the expression tree |
-| `type` (i32/i64) | single i32 type; no width to mix |
+| `type` (i32/i64) | typed IR; no implicit coercion, so widths are never mixed |
 | `addressing` (`0xB0000+` load/store) | resolves each field name to its offset; emits load on read, store on write |
 | draw-record ABI (24-byte layout) | `circle`/`rect`/`line` → the record stream + returns the byte length |
-| `empty` (no code) | see §10 — structured emission makes "no code" unrepresentable |
+| `empty` (no code) | see §10 — grammar-constrained decoding makes "not a program" unrepresentable |
 
 The model can no longer emit any of these errors because it never writes the encoding
 — it writes an expression.
@@ -195,14 +252,28 @@ a ban. A cell may still be authored and stored as raw WAT for the rare computati
 core doesn't cover, and for effectful cognition cells in v1. The runtime handles both;
 the genome carries a tag for which substrate a cell uses.
 
-## 10. Structured emission kills `empty`
+## 10. Killing `empty` without JSON
 
 `empty` (model returned prose / no `(module …)`) was 29% of failures — an
-instruction-following failure, not a logic one. Flux can be emitted as a **JSON AST
-against a schema** via the model's structured-output/tools API, so "no code" is
-unrepresentable — the model must return a valid object matching the grammar or the
-call is rejected and retried. (S-expression text remains the human-readable form; the
-canonical genome serialization — S-expr vs JSON AST — is an open question, §12.)
+instruction-following failure, not a logic one. We do **not** solve it by wrapping
+the language in JSON: Flux **is** S-expressions, both the surface the model writes and
+the canonical genome. Three levers keep the empty class down while staying in S-expr:
+
+1. **A smaller, more natural surface.** Flux is a fraction of WAT's size and reads
+   like the logic itself; the model emits it far more readily than a stack-machine
+   module. Much of `empty` was the model balking at WAT's ceremony.
+2. **Grammar-constrained decoding.** The Flux grammar is tiny and context-free, so it
+   can be handed to the sampler as a GBNF/BNF constraint (supported by llama.cpp and
+   several MLX servers). The decoder then *cannot* emit a non-program — every token
+   stays on a valid Flux path. This makes "not a program" unrepresentable without any
+   JSON, and also removes residual `structural` (paren) faults at the source.
+3. **The same feedback loop, but semantic.** When constrained decoding isn't
+   available, a parse error feeds back like today's correction directive — but the
+   message is a sentence about the grammar, not a stack trace, and the retry surface
+   is small.
+
+The canonical genome serialization is Flux S-expression text (readable, model-native,
+diffable) — see §8.
 
 ## 11. Integration with the existing pipeline
 
@@ -222,27 +293,40 @@ canonical genome serialization — S-expr vs JSON AST — is an open question, �
 
 ## 12. Rollout
 
-- **Phase 0 — spike (this branch):** define the v1 grammar; hand-write parser +
-  typechecker + lowerer for `run-tick`/`render-frame`; unit-test that Flux → WAT
-  validates through wazero and behaves. Prove the bouncing-ball physics + renderer
-  **converge on gemma via Flux** where raw WAT failed 31×. Decisive and cheap.
+- **Phase 0 — spike (this branch):** define the v1 grammar + the `Int`/`Float`/
+  `Bool`/`Color` core (enough for physics + a view; `Char`/`[T]` are declared in the
+  type system but exercised later with the terminal); hand-write parser + typechecker
+  + lowerer for `run-tick`/`render-frame`; unit-test that Flux → WAT validates through
+  wazero and behaves. Prove the bouncing-ball physics + renderer **converge on gemma
+  via Flux** where raw WAT failed 31×. Decisive and cheap.
 - **Phase 1 — synthesis path:** wire Flux into `RunSieve` behind `HDM_IR=1`; model
   emits Flux; raw WAT remains fallback/escape hatch.
 - **Phase 2 — genome:** Flux AST as the evolvable genome; mutation/crossover on the
   tree; fusion/memoization as AST rewrites.
 - **Phase 3 — combinators & corpus:** `map`/`fold` native; migrate examples/docs.
 
-## 13. Open questions
+## 13. Decided / open
 
-1. **Numeric type:** stay i32 (fixed-point for sub-pixel motion) or add `f32`? Fuel
-   and determinism implications.
-2. **Genome serialization:** S-expr text (readable, model-native) vs JSON AST
-   (schema-constrained emission kills `empty`). Possibly both — JSON as canonical,
-   S-expr as the rendered/readable form.
-3. **Effect model:** bring cognition cells in via explicit effect primitives
+**Decided (this iteration):**
+- **Surface & genome are S-expression Flux — no JSON.** `empty` is handled by the
+  smaller surface + grammar-constrained decoding + semantic feedback (§10).
+- **A real type system from v1** — `Int`/`Float`/`Char`/`Bool`/`Color`, no implicit
+  coercion (§4.3). `Char` is distinct from day one to make the monadic terminal
+  (`[Char] → [Char]`) type-check later.
+
+**Open:**
+1. **`Float` representation:** f32 vs fixed-point `Int` for sub-pixel motion — the
+   fuel/determinism trade. Both are typeable; which is the default for physics?
+2. **Sequence type `[T]`:** the shared abstraction behind combinators (`[Int]`) and
+   the terminal channel (`[Char]`). What are its bounds (fixed capacity? runtime
+   length?) so lowering and fuel stay predictable?
+3. **Terminal channel binding:** how the runtime wires stdin/stdout buffers to a
+   `terminal-io` cell, and whether a REPL cell composes the char channel with a
+   shared-state channel in one cell or two.
+4. **Effect model:** bring cognition cells in via explicit effect primitives
    (`(reason prompt)`, `(invoke urn args)`) or keep them as WAT indefinitely?
-4. **Higher-order scope:** just `map`/`fold` over fixed vectors, or first-class
-   lambdas? Bounds the compiler's complexity.
-5. **How much does a frontier model need this?** The taxonomy was one *local* model.
+5. **Higher-order scope:** `map`/`fold` over `[T]` only, or first-class lambdas?
+   Bounds the compiler's complexity.
+6. **How much does a frontier model need this?** The taxonomy was one *local* model.
    Flux most benefits the local/cheap/private regime; on a frontier model it removes
    a smaller (but nonzero) error class. Worth re-measuring across models.
