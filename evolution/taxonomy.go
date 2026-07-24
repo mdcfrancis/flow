@@ -68,12 +68,27 @@ func taxoSnapshot() string {
 // TYPE and STACK faults surface because the hand-written assembler is lenient.
 // "ok" means it assembled AND passed the entry-signature check.
 func classifyWAT(wat string, art *compiler.CompilationArtifact, errMsg string) string {
-	if strings.TrimSpace(wat) == "" || !strings.Contains(wat, "(module") {
-		return "empty" // the model returned prose / no code
+	trimmed := strings.TrimSpace(wat)
+	isFlux := strings.Contains(trimmed, "(cell") // a Flux program, not WAT
+	if trimmed == "" || (!isFlux && !strings.Contains(trimmed, "(module")) {
+		return "empty" // the model returned prose / no code at all
 	}
 	msg := strings.ToLower(errMsg)
 	if msg == "" && art != nil {
 		msg = strings.ToLower(art.ErrorContext)
+	}
+	// A Flux program is authored logic, not a stack machine — its failures are
+	// semantic (parse/type/shape), a different class from the WAT assembler faults.
+	// Counting them as "empty" would hide that the model DID attempt a program.
+	if isFlux {
+		switch {
+		case msg == "":
+			return "ok"
+		case strings.Contains(msg, "unexpected") || strings.Contains(msg, "token") || strings.Contains(msg, "eof") || strings.Contains(msg, "sub-expression") || strings.Contains(msg, "parse"):
+			return "flux-parse"
+		default:
+			return "flux-type" // unknown name, wrong field type, bad arity, non-terminal body…
+		}
 	}
 	switch {
 	case msg == "":

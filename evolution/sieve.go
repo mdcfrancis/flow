@@ -98,6 +98,7 @@ func runSieve(ctx context.Context, model Reasoner, systemPrompt, seedContext str
 			// error back. No assembler artifact exists this round.
 			lastFluxErr = ferr
 			last = nil
+			log.Printf("[FLUX] model authored a (cell …) that did not compile: %v", ferr)
 			taxoWAT(fluxSrc, nil, ferr.Error())
 			payload = fluxCorrectionDirective(ferr)
 			continue
