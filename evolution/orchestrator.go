@@ -934,6 +934,14 @@ func (o *Orchestrator) acceptanceFrame(ctx context.Context, fr *FrameResult, bas
 	basePass, total := ScoreSuite(ctx, baseline, contract.Name, suite, o.PayloadOffset, o.StateWindow, o.resolver())
 	candPass, _ := ScoreSuite(ctx, candidate, contract.Name, suite, o.PayloadOffset, o.StateWindow, o.resolver())
 	fr.AcceptBase, fr.AcceptCand, fr.AcceptTotal = basePass, candPass, total
+	// Diagnostics (HDM_ACCEPT_DEBUG): when a candidate fails to beat the baseline,
+	// log WHY each scenario failed — the concrete check + expected vs actual — so a
+	// stall is traceable to a cause instead of a bare score.
+	if acceptDebug && candPass <= basePass {
+		for _, r := range SuiteFailureReasons(ctx, candidate, contract.Name, suite, o.PayloadOffset, o.StateWindow, o.resolver()) {
+			log.Printf("[ACCEPT] %s %d/%d: %s", shortName(targetURN), candPass, total, r)
+		}
+	}
 
 	switch {
 	case candPass < basePass:
