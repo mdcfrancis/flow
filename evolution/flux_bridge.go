@@ -15,6 +15,25 @@ import (
 // that still emits raw WAT is unaffected — extractFlux returns "" and the WAT
 // path runs exactly as before.
 
+// hmiFields are the fixed HARDWARE CAPABILITY fields every cell may read: the HMI
+// Input Event Register (execution.InputBase = 0x50000). They are read-only (the
+// host writes them each tick) and exposed to Flux so a cell can respond to
+// keyboard/mouse without inventing an offset. A cell only receives real values if
+// its enforced boundary declares it reads "HMI input"; otherwise a read returns 0
+// (the boundary's default), which is harmless. Offsets mirror the InMouseX… block
+// in execution/hypervisor.go.
+var hmiFields = map[string]flux.Field{
+	"hmi_mouse_x":    {Type: flux.TInt, Offset: 0x50000, ReadOnly: true}, // cursor x (0..319)
+	"hmi_mouse_y":    {Type: flux.TInt, Offset: 0x50004, ReadOnly: true}, // cursor y (0..239)
+	"hmi_buttons":    {Type: flux.TInt, Offset: 0x50008, ReadOnly: true}, // held-button mask: bit0 L, bit1 R, bit2 M
+	"hmi_modifiers":  {Type: flux.TInt, Offset: 0x5000C, ReadOnly: true}, // modifier mask: bit0 shift,1 ctrl,2 alt,3 meta
+	"hmi_event_seq":  {Type: flux.TInt, Offset: 0x50010, ReadOnly: true}, // monotonic event counter (compare vs last tick)
+	"hmi_event_type": {Type: flux.TInt, Offset: 0x50014, ReadOnly: true}, // 2 down,3 up,4 click,5 keydown,6 keyup
+	"hmi_event_x":    {Type: flux.TInt, Offset: 0x50018, ReadOnly: true}, // cursor x at event time
+	"hmi_event_y":    {Type: flux.TInt, Offset: 0x5001C, ReadOnly: true}, // cursor y at event time
+	"hmi_key":        {Type: flux.TInt, Offset: 0x50020, ReadOnly: true}, // key code for key events
+}
+
 // LayoutFromContract turns the app's shared-state contract into a Flux field
 // Layout (name → type + offset). Only the scalar types Flux v1 lowers are
 // included; array/unknown fields are omitted (a Flux cell that reads one fails
@@ -50,7 +69,18 @@ func (o *Orchestrator) fluxLayoutFor(urn string) flux.Layout {
 	if !o.FluxEnabled {
 		return nil
 	}
-	return LayoutFromContract(LoadContract(o.ledger, AppNamespaceOf(urn)))
+	l := LayoutFromContract(LoadContract(o.ledger, AppNamespaceOf(urn)))
+	if l == nil {
+		return nil // no addressable app state → Flux path off for this cell
+	}
+	// Every Flux cell may also read the fixed hardware capabilities (HMI input),
+	// without a contract field clobber.
+	for n, f := range hmiFields {
+		if _, exists := l[n]; !exists {
+			l[n] = f
+		}
+	}
+	return l
 }
 
 // candidateWAT converts one model response into WAT for the sieve to assemble.
@@ -118,11 +148,17 @@ func extractFlux(resp string) string {
 // encoding.
 func fluxSeedBlock(contract *EntryContract, layout flux.Layout) string {
 	view := contract != nil && contract.Name == "render-frame"
-	fields := make([]string, 0, len(layout))
+	var stateFields, inputFields []string
 	for n, f := range layout {
-		fields = append(fields, fmt.Sprintf("%s : %s", n, f.Type))
+		entry := fmt.Sprintf("%s : %s", n, f.Type)
+		if f.ReadOnly {
+			inputFields = append(inputFields, entry)
+		} else {
+			stateFields = append(stateFields, entry)
+		}
 	}
-	sort.Strings(fields)
+	sort.Strings(stateFields)
+	sort.Strings(inputFields)
 
 	var b strings.Builder
 	b.WriteString("\n=== OUTPUT FORMAT: FLUX (author logic, NOT WAT) ===\n")
@@ -139,7 +175,12 @@ func fluxSeedBlock(contract *EntryContract, layout flux.Layout) string {
 	b.WriteString("Expressions: Int/Float/Bool/Color literals (42, 3.14, true, #xFF8800FF); field & let names;\n")
 	b.WriteString("(if cond then else); primitives  + - * / mod neg abs min max clamp  < <= > >= = != and or not.\n")
 	b.WriteString("Comparisons yield Bool; there is no implicit numeric coercion.\n\n")
-	fmt.Fprintf(&b, "AVAILABLE SHARED FIELDS (name : type) — read/write only within your enforced boundary above:\n  %s\n\n", strings.Join(fields, ", "))
+	fmt.Fprintf(&b, "SHARED STATE fields (read and write, within your enforced boundary above):\n  %s\n", strings.Join(stateFields, ", "))
+	if len(inputFields) > 0 {
+		fmt.Fprintf(&b, "INPUT fields (READ-ONLY hardware — the host writes them each tick; NEVER write them):\n  %s\n", strings.Join(inputFields, ", "))
+		b.WriteString("  hmi_event_type: 2 mousedown, 3 mouseup, 4 click, 5 keydown, 6 keyup. Detect a NEW discrete event by comparing hmi_event_seq to the value you saw last tick. hmi_key is the key code; hmi_mouse_x/y is the live cursor; hmi_buttons/hmi_modifiers are bit masks.\n")
+	}
+	b.WriteString("\n")
 	if view {
 		b.WriteString("WORKED EXAMPLE (a view cell that draws AT its read position):\n")
 		b.WriteString("  (cell renderer (reads ball_x ball_y) (draw (circle ball_x ball_y 8 #xFFCC33FF)))\n\n")

@@ -36,10 +36,14 @@ func (t Type) String() string {
 
 // Field is one shared-state field: its declared type and absolute offset into
 // shared-cluster-memory. In the operational system this comes from the
-// AppContract; a test supplies it directly.
+// AppContract (app state) or the fixed hardware capabilities (HMI input); a test
+// supplies it directly.
 type Field struct {
 	Type   Type
 	Offset uint32
+	// ReadOnly marks a host-written capability field (e.g. the HMI input
+	// registers): a cell may read it but a `write` to it is a type error.
+	ReadOnly bool
 }
 
 // Layout maps each shared-state field name to its type and offset.

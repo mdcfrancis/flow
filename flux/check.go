@@ -201,6 +201,9 @@ func checkWrite(l *List, scope map[string]Type, layout Layout, writeSet map[stri
 		if !ok {
 			return nil, errf(posOf(it.List), "write field %q is not in the shared-state layout", fn)
 		}
+		if fld.ReadOnly {
+			return nil, errf(posOf(it.List), "field %q is a read-only input (host-written); you may read it but not write it", fn)
+		}
 		if len(writeSet) > 0 && !writeSet[fn] {
 			return nil, errf(posOf(it.List), "write to %q which is not in the cell's declared writes", fn)
 		}
