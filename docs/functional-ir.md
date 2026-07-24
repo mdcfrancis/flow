@@ -295,10 +295,15 @@ diffable) — see §8.
 
 - **Phase 0 — spike (this branch):** define the v1 grammar + the `Int`/`Float`/
   `Bool`/`Color` core (enough for physics + a view; `Char`/`[T]` are declared in the
-  type system but exercised later with the terminal); hand-write parser + typechecker
-  + lowerer for `run-tick`/`render-frame`; unit-test that Flux → WAT validates through
-  wazero and behaves. Prove the bouncing-ball physics + renderer **converge on gemma
-  via Flux** where raw WAT failed 31×. Decisive and cheap.
+  type system but exercised later with the terminal). The **reader is
+  [participle](https://github.com/alecthomas/participle)** — the S-expression grammar
+  is Go struct tags (`parser:"…"` keyed form, so `go vet` stays clean), giving a lexer
+  and position-tracked syntax errors for free; we maintain a grammar, not a parser
+  (`flux/parse.go`, proven on the real bouncing-ball cells in `flux/parse_test.go`).
+  Then hand-write the typechecker + lowerer for `run-tick`/`render-frame`; unit-test
+  that Flux → WAT validates through wazero and behaves. Prove the bouncing-ball
+  physics + renderer **converge on gemma via Flux** where raw WAT failed 31×.
+  Decisive and cheap.
 - **Phase 1 — synthesis path:** wire Flux into `RunSieve` behind `HDM_IR=1`; model
   emits Flux; raw WAT remains fallback/escape hatch.
 - **Phase 2 — genome:** Flux AST as the evolvable genome; mutation/crossover on the
