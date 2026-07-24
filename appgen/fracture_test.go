@@ -77,7 +77,7 @@ func TestAuthorCoordinationProducesScenarios(t *testing.T) {
 		{Name: "player_x", Offset: 0xB0000, Type: "i32"},
 		{Name: "player_input", Offset: 0xB0004, Type: "i32"},
 	}}
-	suite := g.authorCoordination(context.Background(), "update player_x from player_input", c, "urn:hdm:apps:si", false, []string{"player_x"})
+	suite := g.authorCoordination(context.Background(), "update player_x from player_input", c, "urn:hdm:apps:si", false, []string{"player_x"}, nil)
 	if suite == nil {
 		t.Fatal("authorCoordination returned nil")
 	}

@@ -96,6 +96,19 @@ var hmiFields = map[string]flux.Field{
 	"hmi_key":        {Type: flux.TInt, Offset: 0x50020, ReadOnly: true}, // key code for key events
 }
 
+// HMIFieldOffset returns the shared-memory offset of a read-only HMI capability
+// field (hmi_mouse_x, hmi_slider0, hmi_event_seq, …), or ok=false if the name is
+// not an HMI field. Exposed so scenario authoring can SEED the inputs an
+// input-source cell reads — the capability implication of the input-source
+// interface (see docs/flux-interfaces.md).
+func HMIFieldOffset(name string) (uint32, bool) {
+	f, ok := hmiFields[name]
+	if !ok {
+		return 0, false
+	}
+	return f.Offset, true
+}
+
 // Register the operator slider knobs (hmi_slider0..NumSliders-1): read-only i32
 // inputs the user drags from the console, so every cell can read a live knob
 // (speed, gravity, hue, …). Offsets mirror execution.InSlider0 (0x50024) and

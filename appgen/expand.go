@@ -279,7 +279,7 @@ func (g *Grower) FractureCell(ctx context.Context, cellURN string, enroll, retir
 		// child keeps its draw-stream scenarios. Best-effort — the fixpoint
 		// curriculum remains a backstop if authoring faults.
 		if contract != nil && kindOf(child) != KindRender {
-			if suite := g.authorCoordination(ctx, child.Semantics, contract, namespace, kindOf(child) == KindRender, child.Writes); suiteCount(suite) > 0 {
+			if suite := g.authorCoordination(ctx, child.Semantics, contract, namespace, kindOf(child) == KindRender, child.Writes, child.Reads); suiteCount(suite) > 0 {
 				_ = evolution.SaveAcceptance(g.ledger, child.Identity, suite)
 				g.event("create", child.Identity, fmt.Sprintf("authored %d coordination check(s)", suiteCount(suite)))
 			}
@@ -296,7 +296,7 @@ func (g *Grower) FractureCell(ctx context.Context, cellURN string, enroll, retir
 // from its semantics and the app's shared-state contract, then adversarially
 // certifies them so only requirement-faithful checks survive. Returns nil if
 // nothing is proposed, nothing survives certification, or the model faults.
-func (g *Grower) authorCoordination(ctx context.Context, semantics string, contract *evolution.AppContract, namespace string, isUI bool, writes []string) *evolution.AcceptanceSuite {
+func (g *Grower) authorCoordination(ctx context.Context, semantics string, contract *evolution.AppContract, namespace string, isUI bool, writes, reads []string) *evolution.AcceptanceSuite {
 	// proposeAdditional grounds coordination scenarios in the contract (resolves
 	// `field` names to offsets, drops invented-offset reads) and forces each
 	// scenario's entry to match the cell kind via isUI (render-frame vs run-tick).
@@ -316,7 +316,7 @@ func (g *Grower) authorCoordination(ctx context.Context, semantics string, contr
 	// logic — the wall physics hit. So for such a cell, generate DIRECTIONAL motion
 	// scenarios from the mock world + its declared writes, and drop the scalar tests.
 	if !isUI {
-		if dir := directionalScenarios(contract, writes); len(dir) > 0 {
+		if dir := directionalScenarios(contract, writes, reads); len(dir) > 0 {
 			certified.Scenarios = append(certified.Scenarios, dir...)
 			certified.Tests = nil
 		}
@@ -343,7 +343,7 @@ func (g *Grower) authorCoordination(ctx context.Context, semantics string, contr
 // floor then extends the moved fields into a multi-tick trajectory (keeps moving,
 // no freeze/jitter). Velocity fields are skipped: they change only on a bounce,
 // not every tick, so "changed after one tick" would wrongly fail a correct cell.
-func directionalScenarios(c *evolution.AppContract, writes []string) []evolution.Scenario {
+func directionalScenarios(c *evolution.AppContract, writes, reads []string) []evolution.Scenario {
 	if c == nil || len(writes) == 0 {
 		return nil
 	}
@@ -355,20 +355,38 @@ func directionalScenarios(c *evolution.AppContract, writes []string) []evolution
 	for _, f := range c.Fields {
 		byName[strings.ToLower(f.Name)] = f
 	}
+	// INPUT-SOURCE implication: if the cell reads any HMI input register, its output
+	// changes only when driven — so seed the inputs it reads to a distinctive test
+	// value. hmiDrivenValue is chosen unlikely to equal a field's Init, so a cell
+	// that forwards the input produces a visible change. A gated cell (if (>
+	// hmi_event_seq 0) …) also fires, since a non-zero seed satisfies the gate.
+	const hmiDrivenValue = 137
+	var hmiSeeds []evolution.SeedWrite
+	for _, r := range reads {
+		if off, ok := evolution.HMIFieldOffset(strings.ToLower(strings.TrimSpace(r))); ok {
+			hmiSeeds = append(hmiSeeds, evolution.SeedWrite{At: fmt.Sprintf("0x%X", off), U32: []uint32{hmiDrivenValue}})
+		}
+	}
 	var out []evolution.Scenario
 	for _, wname := range writes {
 		f, ok := byName[strings.ToLower(wname)]
 		if !ok || strings.Contains(f.Type, "[") { // scalar contract fields only
 			continue
 		}
-		if isVelocityName(strings.ToLower(f.Name)) {
+		// A velocity/speed field changes only on a bounce, not every autonomous tick,
+		// so "changed after one tick" would wrongly fail a correct mover — skip it. But
+		// when the cell is INPUT-DRIVEN (it reads an HMI register), that field IS what
+		// the input sets (e.g. a speed slider → ball_speed), so it must be checked.
+		if len(hmiSeeds) == 0 && isVelocityName(strings.ToLower(f.Name)) {
 			continue
 		}
+		seed := append([]evolution.SeedWrite(nil), init...)
+		seed = append(seed, hmiSeeds...) // input-driven: control the HMI the cell reads
 		out = append(out, evolution.Scenario{
 			Name:  "moves_" + f.Name,
 			Entry: "run-tick",
 			Steps: 1,
-			Seed:  append([]evolution.SeedWrite(nil), init...),
+			Seed:  seed,
 			Expect: evolution.ScenarioExpect{
 				Reads: []evolution.SeedWrite{{At: fmt.Sprintf("0x%X", f.Offset), Cmp: "changed"}},
 			},
