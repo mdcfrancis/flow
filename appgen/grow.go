@@ -640,7 +640,7 @@ func (g *Grower) scaffold(ctx context.Context, env *AppEnvelope, sub Subsystem) 
 		// static scene and nothing moves. Author them from the contract and append
 		// to the draw-floor scenarios.
 		if contract != nil {
-			if coord := g.authorCoordination(ctx, sub.Semantics, contract, env.ApplicationNamespace, true); coord != nil && len(coord.Scenarios) > 0 {
+			if coord := g.authorCoordination(ctx, sub.Semantics, contract, env.ApplicationNamespace, true, sub.Writes); coord != nil && len(coord.Scenarios) > 0 {
 				if suite == nil {
 					suite = &evolution.AcceptanceSuite{}
 				}
@@ -649,7 +649,7 @@ func (g *Grower) scaffold(ctx context.Context, env *AppEnvelope, sub Subsystem) 
 		}
 	default:
 		if contract != nil {
-			suite = g.authorCoordination(ctx, sub.Semantics, contract, env.ApplicationNamespace, false)
+			suite = g.authorCoordination(ctx, sub.Semantics, contract, env.ApplicationNamespace, false, sub.Writes)
 		}
 		if suiteCount(suite) == 0 { // no contract, or authoring produced nothing
 			suite = g.acceptance(ctx, sub)

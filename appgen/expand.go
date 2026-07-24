@@ -279,7 +279,7 @@ func (g *Grower) FractureCell(ctx context.Context, cellURN string, enroll, retir
 		// child keeps its draw-stream scenarios. Best-effort — the fixpoint
 		// curriculum remains a backstop if authoring faults.
 		if contract != nil && kindOf(child) != KindRender {
-			if suite := g.authorCoordination(ctx, child.Semantics, contract, namespace, kindOf(child) == KindRender); suiteCount(suite) > 0 {
+			if suite := g.authorCoordination(ctx, child.Semantics, contract, namespace, kindOf(child) == KindRender, child.Writes); suiteCount(suite) > 0 {
 				_ = evolution.SaveAcceptance(g.ledger, child.Identity, suite)
 				g.event("create", child.Identity, fmt.Sprintf("authored %d coordination check(s)", suiteCount(suite)))
 			}
@@ -296,27 +296,85 @@ func (g *Grower) FractureCell(ctx context.Context, cellURN string, enroll, retir
 // from its semantics and the app's shared-state contract, then adversarially
 // certifies them so only requirement-faithful checks survive. Returns nil if
 // nothing is proposed, nothing survives certification, or the model faults.
-func (g *Grower) authorCoordination(ctx context.Context, semantics string, contract *evolution.AppContract, namespace string, isUI bool) *evolution.AcceptanceSuite {
+func (g *Grower) authorCoordination(ctx context.Context, semantics string, contract *evolution.AppContract, namespace string, isUI bool, writes []string) *evolution.AcceptanceSuite {
 	// proposeAdditional grounds coordination scenarios in the contract (resolves
 	// `field` names to offsets, drops invented-offset reads) and forces each
 	// scenario's entry to match the cell kind via isUI (render-frame vs run-tick).
 	proposed := g.proposeAdditional(ctx, semantics, isUI, &evolution.AcceptanceSuite{}, contract, namespace)
-	if suiteCount(proposed) == 0 {
-		return nil
+	certified := proposed
+	if suiteCount(proposed) > 0 {
+		if cert, _, err := evolution.ValidateSuite(ctx, g.model, semantics, proposed); err == nil && suiteCount(cert) > 0 {
+			certified = cert
+		}
 	}
-	certified, _, err := evolution.ValidateSuite(ctx, g.model, semantics, proposed)
-	if err != nil || suiteCount(certified) == 0 {
-		return nil
+	if certified == nil {
+		certified = &evolution.AcceptanceSuite{}
+	}
+	// A state-writing run-tick cell is graded on the STATE IT PRODUCES, never its
+	// return value: a scalar int-in/int-out test on a physics cell (which returns a
+	// status and mutates shared state) can never pass, no matter how correct the
+	// logic — the wall physics hit. So for such a cell, generate DIRECTIONAL motion
+	// scenarios from the mock world + its declared writes, and drop the scalar tests.
+	if !isUI {
+		if dir := directionalScenarios(contract, writes); len(dir) > 0 {
+			certified.Scenarios = append(certified.Scenarios, dir...)
+			certified.Tests = nil
+		}
 	}
 	// Add a multi-tick SUSTAINED-MOTION floor: a single-tick check ("seed a moving
-	// state, run once, x increased") lets a genotype pass while its live multi-tick
+	// state, run once, x changed") lets a genotype pass while its live multi-tick
 	// behavior is degenerate (freezes after one step). The floor re-runs an accepted
 	// autonomous-movement case for several steps and asserts the moved field keeps
 	// changing — so a cell that stops moving fails, while any correct mover passes.
 	if floor := sustainedMotionFloor(certified); floor != nil {
 		certified.Scenarios = append(certified.Scenarios, *floor)
 	}
+	if suiteCount(certified) == 0 {
+		return nil
+	}
 	return certified
+}
+
+// directionalScenarios generates BEHAVIORAL checks for a state-writing run-tick
+// cell: it must be graded on the state it produces, not its return value. For each
+// non-velocity scalar field the cell writes, it seeds the mock world (the
+// contract's Init) and asserts the field CHANGES after one tick — a directional
+// check a correct mover passes and a do-nothing cell fails. The sustained-motion
+// floor then extends the moved fields into a multi-tick trajectory (keeps moving,
+// no freeze/jitter). Velocity fields are skipped: they change only on a bounce,
+// not every tick, so "changed after one tick" would wrongly fail a correct cell.
+func directionalScenarios(c *evolution.AppContract, writes []string) []evolution.Scenario {
+	if c == nil || len(writes) == 0 {
+		return nil
+	}
+	init := c.InitSeeds()
+	if len(init) == 0 {
+		return nil
+	}
+	byName := map[string]evolution.ContractField{}
+	for _, f := range c.Fields {
+		byName[strings.ToLower(f.Name)] = f
+	}
+	var out []evolution.Scenario
+	for _, wname := range writes {
+		f, ok := byName[strings.ToLower(wname)]
+		if !ok || strings.Contains(f.Type, "[") { // scalar contract fields only
+			continue
+		}
+		if isVelocityName(strings.ToLower(f.Name)) {
+			continue
+		}
+		out = append(out, evolution.Scenario{
+			Name:  "moves_" + f.Name,
+			Entry: "run-tick",
+			Steps: 1,
+			Seed:  append([]evolution.SeedWrite(nil), init...),
+			Expect: evolution.ScenarioExpect{
+				Reads: []evolution.SeedWrite{{At: fmt.Sprintf("0x%X", f.Offset), Cmp: "changed"}},
+			},
+		})
+	}
+	return out
 }
 
 // hmiInputLo/hmiInputHi bound the HMI input register — a seed there means the
