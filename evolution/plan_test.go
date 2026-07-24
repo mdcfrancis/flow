@@ -8,6 +8,52 @@ import (
 	"github.com/mdcfrancis/flow/storage"
 )
 
+// The seed set must include Kinds-less system DESIGN docs, and they must surface
+// for the whole-app design pass (kind-agnostic retrieval) — that is what lets
+// AuthorPlan stand on the architectural knowledge base.
+func TestSeedIncludesArchitecturalDesignDocs(t *testing.T) {
+	le, err := storage.NewLedgerEngine(filepath.Join(t.TempDir(), "hdm.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer le.Close()
+	SeedKnowledge(le)
+
+	want := map[string]bool{"tick-loop-architecture": false, "coordinate-through-state": false, "simulate-then-view": false}
+	for _, d := range LoadDocuments(le) {
+		if _, ok := want[d.Topic]; ok {
+			want[d.Topic] = true
+			if len(d.Kinds) != 0 {
+				t.Fatalf("design doc %q must be Kinds-less (relevant to all), got %v", d.Topic, d.Kinds)
+			}
+		}
+	}
+	for topic, seen := range want {
+		if !seen {
+			t.Fatalf("architectural design doc %q was not seeded", topic)
+		}
+	}
+	// Kind-agnostic retrieval (as AuthorPlan uses) surfaces a design doc.
+	got := FindDocuments(le, "", "decompose the app into input compute render cells that coordinate through shared state", 4)
+	found := false
+	for _, d := range got {
+		if d.Topic == "tick-loop-architecture" || d.Topic == "coordinate-through-state" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("design pass retrieval surfaced no architectural doc, got %+v", topicsOf(got))
+	}
+}
+
+func topicsOf(ds []Document) []string {
+	out := make([]string, len(ds))
+	for i, d := range ds {
+		out[i] = d.Topic
+	}
+	return out
+}
+
 func TestPlanRoundTripAndComponent(t *testing.T) {
 	le, err := storage.NewLedgerEngine(filepath.Join(t.TempDir(), "hdm.db"))
 	if err != nil {

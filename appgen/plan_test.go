@@ -24,6 +24,43 @@ func (planModel) InvokeReasoning(ctx context.Context, sys, user string) (string,
 	     "steps":["read player_x","draw a rect at player_x"]}]}`, nil
 }
 
+// recordingPlanModel captures the user payload it is handed so a test can assert
+// what was injected into the design prompt.
+type recordingPlanModel struct{ user string }
+
+func (m *recordingPlanModel) InvokeReasoning(ctx context.Context, sys, user string) (string, error) {
+	m.user = user
+	return `{"overview":"o","choreography":["c"],
+	  "components":[{"identity":"urn:hdm:apps:si:input","purpose":"p","steps":["s"]}]}`, nil
+}
+
+// The design pass must stand on the architectural knowledge base: a retrieved
+// design doc is injected into the plan prompt so the model designs WITH it.
+func TestAuthorPlanInjectsArchitecturalDocs(t *testing.T) {
+	m := &recordingPlanModel{}
+	g, _ := newGrower(t, m)
+	evolution.AddDocument(g.ledger, evolution.Document{
+		Topic: "arch", Title: "DISTINCT_ARCH_DOC",
+		Body: "coordinate the input and view through player_x each tick",
+	})
+	saveEnvelope(g.ledger, &AppEnvelope{
+		ApplicationNamespace: "urn:hdm:apps:si", Objective: "move a dot via player_x input",
+		SubsystemRequirements: []Subsystem{
+			{Identity: "urn:hdm:apps:si:input", Semantics: "read input, move player",
+				Reads: []string{"HMI input"}, Writes: []string{"player_x"}},
+		},
+	})
+	if err := g.AuthorPlan(context.Background(), "urn:hdm:apps:si"); err != nil {
+		t.Fatalf("AuthorPlan: %v", err)
+	}
+	if !strings.Contains(m.user, "DISTINCT_ARCH_DOC") {
+		t.Fatalf("architectural doc was not injected into the design prompt:\n%s", m.user)
+	}
+	if !strings.Contains(m.user, "ARCHITECTURAL GUIDANCE") {
+		t.Fatalf("guidance header missing from design prompt:\n%s", m.user)
+	}
+}
+
 func TestAuthorPlanGroundsPortsFromEnvelope(t *testing.T) {
 	g, _ := newGrower(t, planModel{})
 	saveEnvelope(g.ledger, &AppEnvelope{
