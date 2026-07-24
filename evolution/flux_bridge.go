@@ -47,6 +47,29 @@ func LoadFluxDraft(ledger *storage.LedgerEngine, urn string) string {
 	return string(raw)
 }
 
+// ClearFluxDraft drops a cell's working draft — the UNWIND: the next synthesis
+// falls back to the last committed genome (a fresh branch) instead of continuing
+// to refine a draft judged blocked.
+func ClearFluxDraft(ledger *storage.LedgerEngine, urn string) {
+	if ledger != nil {
+		_ = ledger.UpdateRef(fluxDraftRef(urn), "")
+	}
+}
+
+// lowerFluxToBytecode lowers a Flux program to wasm bytecode (for judging a draft
+// without committing it), or an error if it does not compile.
+func lowerFluxToBytecode(layout flux.Layout, src string) ([]byte, error) {
+	wat, err := flux.Compile("cell", src, layout)
+	if err != nil {
+		return nil, err
+	}
+	art, aerr := compiler.NewCompilerService().CompileGenotype(wat)
+	if aerr != nil || art == nil || !art.SyntaxPassed {
+		return nil, fmt.Errorf("assemble: %v", aerr)
+	}
+	return art.Bytecode, nil
+}
+
 // This file bridges the Flux functional IR (docs/functional-ir.md) into the
 // operational synthesis path. When a layout is available, the sieve accepts a
 // model that authors a Flux (cell …) program: it is parsed, type-checked, and

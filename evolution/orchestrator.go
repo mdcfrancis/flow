@@ -452,13 +452,10 @@ func (o *Orchestrator) sieveModel(urn string) Reasoner {
 // Every other cell uses the standard one-shot sieve. Both feed the identical
 // verification gates; the agentic tools inform synthesis, they never bypass it.
 func (o *Orchestrator) synthesize(ctx context.Context, targetURN, intent, sysPrompt, seed string, contract *EntryContract) (*SieveOutcome, error) {
-	out, err := o.synthesizeInner(ctx, targetURN, intent, sysPrompt, seed, contract)
-	// Record the latest Flux the model authored (committed or not), so the console
-	// can show a cell's Flux even while it is still building on a WAT stub.
-	if out != nil && out.Flux != "" {
-		_ = SaveFluxDraft(o.ledger, targetURN, out.Flux)
-	}
-	return out, err
+	// The working draft is saved in acceptanceFrame (only when non-regressing), so
+	// the DFS iteration base is always the best WIP — not overwritten by a worse
+	// attempt. synthesize itself no longer saves it.
+	return o.synthesizeInner(ctx, targetURN, intent, sysPrompt, seed, contract)
 }
 
 func (o *Orchestrator) synthesizeInner(ctx context.Context, targetURN, intent, sysPrompt, seed string, contract *EntryContract) (*SieveOutcome, error) {
@@ -923,11 +920,17 @@ func (o *Orchestrator) buildSeed(urn, intent, genotype string, contract *EntryCo
 		// explicit instruction to output only a (cell …) program. The lowerer owns
 		// the encoding, so the model only writes logic.
 		b.WriteString(fluxSeedBlock(contract, fluxLayout))
-		// If the stored genome is already Flux, show it as the program to REFINE —
-		// so synthesis accumulates across frames instead of restarting each time
-		// (the stored genotype is the Flux source once a Flux cell has committed).
-		if strings.HasPrefix(strings.TrimSpace(genotype), "(cell") {
-			fmt.Fprintf(&b, "CURRENT PROGRAM — improve THIS, do not restart from scratch. Keep what already works; change only what the acceptance checks and any critic feedback above require:\n%s\n", genotype)
+		// DFS iteration: refine the model's latest working DRAFT (its most recent
+		// non-regressing attempt), not the last commit — so synthesis goes deeper on
+		// the candidate it was building instead of restarting each frame. Fall back to
+		// the committed Flux genome, then to nothing (a fresh start after an unwind,
+		// which clears the draft).
+		wip := LoadFluxDraft(o.ledger, urn)
+		if wip == "" && strings.HasPrefix(strings.TrimSpace(genotype), "(cell") {
+			wip = genotype
+		}
+		if wip != "" {
+			fmt.Fprintf(&b, "CURRENT PROGRAM — improve THIS, do not restart from scratch. Keep what already works; change only what the acceptance checks and any critic feedback above require:\n%s\n", wip)
 		}
 	} else {
 		fmt.Fprintf(&b, "\nCURRENT GENOTYPE (improve it to pass more checks):\n%s", genotype)
@@ -944,6 +947,13 @@ func (o *Orchestrator) acceptanceFrame(ctx context.Context, fr *FrameResult, bas
 	basePass, total := ScoreSuite(ctx, baseline, contract.Name, suite, o.PayloadOffset, o.StateWindow, o.resolver())
 	candPass, _ := ScoreSuite(ctx, candidate, contract.Name, suite, o.PayloadOffset, o.StateWindow, o.resolver())
 	fr.AcceptBase, fr.AcceptCand, fr.AcceptTotal = basePass, candPass, total
+	// DFS iteration: keep the model's latest NON-REGRESSING Flux as the working
+	// draft, so the next frame refines THIS candidate (goes deeper) instead of
+	// restarting from the last commit. A regression is not a valid deeper node, so
+	// it never overwrites the draft — the base stays the best WIP so far.
+	if sieve.Flux != "" && candPass >= basePass {
+		_ = SaveFluxDraft(o.ledger, targetURN, sieve.Flux)
+	}
 	// Diagnostics (HDM_ACCEPT_DEBUG): when a candidate fails to beat the baseline,
 	// log WHY each scenario failed — the concrete check + expected vs actual — so a
 	// stall is traceable to a cause instead of a bare score.

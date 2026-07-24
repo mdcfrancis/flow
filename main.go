@@ -246,6 +246,13 @@ const maxIdleBackoff = 8
 // (a var, not a const), so it can be refined toward the correct+efficient objective.
 var maxStallRetries = 3
 
+// maxIterateCap is the hard ceiling on judge-extended iterations: once the base
+// retry budget is spent, an LLM judge decides per-frame whether the working draft
+// is still progressing (keep deepening) or blocked (unwind). This caps how far the
+// judge can extend iteration before the cell is unwound regardless, so a cell the
+// judge keeps calling "progressing" can never loop forever.
+var maxIterateCap = 8
+
 // applyPolicy loads the evolvable Policy and applies its tunable judgement calls to the
 // running loop. Called at startup and each fixpoint so a tuned policy takes effect. The
 // vision interval keeps its env override (HDM_VISION_INTERVAL) precedence.
@@ -520,7 +527,26 @@ func retryStalled(ctx context.Context, orch *evolution.Orchestrator, all []strin
 			n++
 			continue
 		}
-		// Budget exhausted: maybe the TESTS are wrong, not the cell. Re-judge the
+		// DFS unwind decision: the base retry budget is spent, but rather than
+		// unwinding immediately, ask the LLM JUDGE whether the working DRAFT is still
+		// progressing toward the goal. Keep DEEPENING iteration on the draft while it
+		// is (up to the hard cap); only UNWIND — clear the draft, so synthesis
+		// restarts from the last commit, and advance the recovery ladder — when the
+		// judge says the draft is BLOCKED.
+		if fs.Retries < maxIterateCap {
+			if prog, why := orch.JudgeProgress(ctx, u); prog {
+				persist(u, evolution.FrictionState{Retries: fs.Retries + 1, Root: root})
+				activity.Event("mutate", u, "judged progressing — deepening iteration")
+				log.Printf("[JUDGE] %s progressing — deepening iteration (attempt %d/%d): %s", u, fs.Retries+1, maxIterateCap, why)
+				n++
+				continue
+			} else {
+				orch.UnwindDraft(u)
+				persist(u, evolution.FrictionState{Retries: maxIterateCap, Root: root}) // stop re-judging; hand off to the ladder
+				log.Printf("[JUDGE] %s blocked — unwinding to last commit before recertify/boundary/fracture: %s", u, why)
+			}
+		}
+		// Budget exhausted (or judged blocked): maybe the TESTS are wrong, not the cell. Re-judge the
 		// suite against the goal; if unfaithful checks are dropped, restart it.
 		if kept, dropped, err := orch.RecertifySuite(ctx, u); err == nil && dropped > 0 {
 			persist(u, evolution.FrictionState{Root: root}) // reset retries, un-park
