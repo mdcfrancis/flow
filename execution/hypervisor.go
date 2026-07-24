@@ -1213,6 +1213,25 @@ func (rm *RuntimeManager) RenderFrame(cellURN string) ([]byte, error) {
 	if rm.sharedMem == nil {
 		return nil, fmt.Errorf("shared memory unavailable")
 	}
+	// Reload the cell when its committed phenotype has changed, so the canvas tracks
+	// evolution instead of rendering a stale cached module. Render cells reach the
+	// runtime ONLY here (the frame loop skips them — they draw on canvas poll), so
+	// without this a converged cell keeps drawing its no-op SEED forever even though
+	// its genome and phenotype have advanced. Mirrors TickAppCell's hash check for
+	// run-tick cells; the repo.Load cost falls on just the one focused canvas cell.
+	if desc, derr := rm.repo.Load(cellURN); derr == nil {
+		if rm.loadedHash == nil {
+			rm.loadedHash = map[string]string{}
+		}
+		if rm.loadedHash[cellURN] != desc.PhenotypeHash {
+			if bc, perr := rm.repo.Phenotype(desc); perr == nil {
+				if compiled, cerr := rm.runtime.CompileModule(rm.ictx, bc); cerr == nil {
+					rm.cells[cellURN] = compiled
+					rm.loadedHash[cellURN] = desc.PhenotypeHash
+				}
+			}
+		}
+	}
 	// Resolve grown cells (present in the manifest but not pre-loaded).
 	if _, ok := rm.cells[cellURN]; !ok {
 		if _, err := rm.resolveCell(rm.ictx, cellURN); err != nil {
