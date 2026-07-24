@@ -2409,6 +2409,18 @@ func main() {
 		Status:  activity.Snapshot,
 		Flow:    activity.Flow,
 		Inspect: func(urn string) any { return inspectCell(ctx, ledger, orchestrator, urn) },
+		Flux: func(urn string) string {
+			// The cell's source genome — its Flux (cell …) program (or WAT).
+			desc, err := repo.Load(urn)
+			if err != nil {
+				return ""
+			}
+			src, err := repo.Genotype(desc)
+			if err != nil {
+				return ""
+			}
+			return src
+		},
 		Objective: func() string {
 			ns := appNamespace(canvasSrv.Active())
 			if ns == "" {

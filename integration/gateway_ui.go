@@ -321,6 +321,7 @@ li{padding:2px 0;font-family:ui-monospace,monospace;font-size:12px}
 #inspector .grp{margin:10px 0 4px;color:#8fa0bf;font-size:11px;text-transform:uppercase;letter-spacing:.04em}
 #inspector table{border-collapse:collapse;width:100%;font-family:ui-monospace,monospace;font-size:11px}
 #inspector td{padding:2px 10px 2px 0;vertical-align:top;border-bottom:1px solid #161c28}
+#inspector pre.src{font-family:ui-monospace,monospace;font-size:11px;line-height:1.4;color:#b8e6c0;background:#0d1117;border:1px solid #1c2532;border-radius:6px;padding:8px;margin:4px 0;white-space:pre;overflow:auto;max-height:40vh}
 #inspector .pass{color:#34d399}#inspector .fail{color:#f87171}
 #inspector .off{color:#a78bfa}
 #cells li{cursor:pointer}#cells li:hover{color:#fff;text-decoration:underline}
@@ -475,6 +476,18 @@ async function inspect(u){
       C.forEach(f=>{h+='<tr><td class="off">'+f.offset+'</td><td>'+esc(f.name||'')+' <span class="muted">'+esc(f.type||'')+'</span></td><td class="muted">'+esc(f.desc||'')+'</td></tr>';});h+='</table>';}
     if(!T.length&&!S.length&&!C.length&&!P)h+='<span class="empty">no plan, tests, or constraints recorded</span>';
     b.innerHTML=h;
+    // Source genome: the Flux (cell …) program the cell was authored in (or its
+    // WAT). Fetched separately and appended so a slow/absent /flux never blocks the
+    // rest of the inspector.
+    try{
+      const src=await (await fetch('/flux?urn='+encodeURIComponent(u),{cache:'no-store'})).text();
+      if(inspectURN===u&&src&&src.trim()){
+        const lang=src.trim().startsWith('(cell')?'Flux':'WAT';
+        const code=document.createElement('div');
+        code.innerHTML='<div class="grp">Source ('+lang+')</div><pre class="src">'+esc(src.trim())+'</pre>';
+        b.appendChild(code);
+      }
+    }catch(e){}
   }catch(e){b.innerHTML='<span class="empty">inspect failed: '+esc(''+e)+'</span>';}
 }
 // The build box is a persistent, editable prompt — a chat-like composer. Each
@@ -668,6 +681,10 @@ type Services struct {
 	// BenchmarkReset clears the recorded baseline (use when the benchmark's measure changed so an
 	// old baseline is no longer comparable). Served at /benchmark?action=reset. Optional.
 	BenchmarkReset func() any
+	// Flux returns a cell's source genome — the Flux (cell …) program it was
+	// authored in (or its WAT, for a WAT cell) — for read-only display in the
+	// console. Served at /flux?urn=. Optional.
+	Flux func(urn string) string
 }
 
 // Serve starts the always-on localhost listener for the edge services, shutting
@@ -717,6 +734,17 @@ func Serve(ctx context.Context, addr string, s Services) *http.Server {
 		mux.HandleFunc("/objective", func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(map[string]string{"objective": s.Objective()})
+		})
+	}
+	if s.Flux != nil {
+		mux.HandleFunc("/flux", func(w http.ResponseWriter, r *http.Request) {
+			urn := r.URL.Query().Get("urn")
+			if urn == "" {
+				http.Error(w, "urn required", http.StatusBadRequest)
+				return
+			}
+			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+			_, _ = io.WriteString(w, s.Flux(urn))
 		})
 	}
 	if s.AppMap != nil {
