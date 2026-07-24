@@ -793,6 +793,15 @@ func (o *Orchestrator) buildSeed(urn, intent, genotype string, contract *EntryCo
 	fmt.Fprintf(&b, "Build cell %s.\nGOAL: %s\n\n", urn, intent)
 	fmt.Fprintf(&b, "Export %q with signature (param i32 i32) (result i32).\n\n", contract.Name)
 	ns := AppNamespaceOf(urn)
+	// When the Flux path is on and the app has an addressable contract, this cell
+	// is authored in Flux (a typed functional program lowered to WAT for the model)
+	// rather than raw WAT — so the tail of the seed instructs Flux authoring and the
+	// WAT-specific sections are suppressed.
+	var fluxLayout flux.Layout
+	if o.FluxEnabled {
+		fluxLayout = LayoutFromContract(LoadContract(o.ledger, ns))
+	}
+	fluxOn := fluxLayout != nil
 	// PLAN-FIRST: lead with the design this cell implements. The plan is the "how"
 	// (its algorithm + how it connects to siblings); the acceptance checks below
 	// merely VERIFY that the plan was implemented. Without this the model reinvents
@@ -870,11 +879,18 @@ func (o *Orchestrator) buildSeed(urn, intent, genotype string, contract *EntryCo
 	// Advertise the reusable data-structure primitives to compute (run-tick) cells, so synthesis
 	// dispatches to a shared primitive instead of re-deriving a scan/loop. UI (render-frame)
 	// cells don't get it — it's noise for a draw path.
-	if contract == RunTickContract {
+	if contract == RunTickContract && !fluxOn {
 		b.WriteString(PrimitiveVocabulary)
 		b.WriteString("\n")
 	}
-	fmt.Fprintf(&b, "\nCURRENT GENOTYPE (improve it to pass more checks):\n%s", genotype)
+	if fluxOn {
+		// Author in Flux: the grammar + typed field list + a worked example, and an
+		// explicit instruction to output only a (cell …) program. The lowerer owns
+		// the encoding, so the model only writes logic.
+		b.WriteString(fluxSeedBlock(contract, fluxLayout))
+	} else {
+		fmt.Fprintf(&b, "\nCURRENT GENOTYPE (improve it to pass more checks):\n%s", genotype)
+	}
 	return b.String()
 }
 

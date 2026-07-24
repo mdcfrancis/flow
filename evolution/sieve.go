@@ -3,6 +3,7 @@ package evolution
 import (
 	"context"
 	"fmt"
+	"log"
 	"strings"
 
 	"github.com/mdcfrancis/flow/compiler"
@@ -100,6 +101,9 @@ func runSieve(ctx context.Context, model Reasoner, systemPrompt, seedContext str
 			taxoWAT(fluxSrc, nil, ferr.Error())
 			payload = fluxCorrectionDirective(ferr)
 			continue
+		}
+		if fluxSrc != "" {
+			log.Printf("[FLUX] lowered a model-authored (cell …) to WAT for synthesis")
 		}
 		art, cerr := cs.CompileGenotype(wat)
 		last = art
