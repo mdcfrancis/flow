@@ -16,9 +16,14 @@ import (
 //
 //   - compute: writes each addressable write-port back UNCHANGED — a true no-op
 //     that still establishes the cell's read/write shape for the model to build on.
-//   - view: draws a placeholder circle at its first two addressable read-ports
-//     (falling back to screen-centre constants), so the canvas shows something and
-//     the renderer has a working draw call to refine.
+//   - view: draws a fixed CHECKERBOARD test pattern from constants (no state
+//     reads) — the universal "placeholder / missing content" marker. Deliberately
+//     NOT the real sprite: a seed that drew (circle ball_x ball_y …) would already
+//     BE the solution for a ball app, so the model would build nothing and the
+//     position scenarios would pass by luck. A checkerboard is visibly a scaffold —
+//     it satisfies "renders ≥1 primitive" so the canvas isn't blank, but every
+//     position scenario stays failing until the model replaces it with the real
+//     state-driven draw.
 //
 // Returns ok=false when the ports aren't addressable by Flux (no i32/f32 contract
 // layout for them) — the caller then keeps the WAT skeleton for that cell.
@@ -30,20 +35,19 @@ func noopFlux(sub Subsystem, layout flux.Layout) (src string, ok bool) {
 	addressable := func(f string) bool { _, in := layout[f]; return in }
 
 	if kindOf(sub) == KindRender {
-		var reads []string
-		for _, r := range sub.Reads {
-			if addressable(r) {
-				reads = append(reads, r)
+		// Magenta tiles on the (black) canvas, one rect per filled square of a
+		// coarse checkerboard. Constants only — clearly a test pattern, not any
+		// app's real output.
+		const cw, ch, tile = 320, 240, 80
+		var tiles strings.Builder
+		for y := 0; y < ch; y += tile {
+			for x := 0; x < cw; x += tile {
+				if ((x/tile)+(y/tile))%2 == 0 {
+					fmt.Fprintf(&tiles, " (rect %d %d %d %d #xFF00FFFF)", x, y, tile, tile)
+				}
 			}
 		}
-		cx, cy := "160", "120" // screen-ish centre when no positional reads exist
-		if len(reads) >= 2 {
-			cx, cy = reads[0], reads[1]
-		}
-		// A visible white placeholder circle — the seed the renderer refines to
-		// track real state.
-		return fmt.Sprintf("(cell %s (reads %s) (draw (circle %s %s 6 #xFFFFFFFF)))",
-			name, strings.Join(reads, " "), cx, cy), true
+		return fmt.Sprintf("(cell %s (reads) (draw%s))", name, tiles.String()), true
 	}
 
 	// Compute: write every addressable write-port back to itself. reads == writes so

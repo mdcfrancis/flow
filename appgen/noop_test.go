@@ -32,20 +32,24 @@ func TestNoopFluxCompiles(t *testing.T) {
 			want: "(write (ball_x ball_x)",
 		},
 		{
-			name: "view draws a circle at its read ports",
+			// A view seed is a NEUTRAL checkerboard placeholder, never the real sprite,
+			// so the model genuinely has to build the state-driven renderer.
+			name: "view draws a checkerboard placeholder, not the sprite",
 			sub: Subsystem{
 				Identity: "urn:hdm:apps:bounce:renderer", Kind: KindRender,
 				Reads: []string{"ball_x", "ball_y"},
 			},
-			want: "(draw (circle ball_x ball_y 6 #xFFFFFFFF))",
+			want: "(rect 0 0 80 80 #xFF00FFFF)",
 		},
 		{
-			name: "view with no addressable reads draws at constants",
+			// The placeholder never reads state — constants regardless of declared read
+			// ports, so it can't accidentally be the solution.
+			name: "view placeholder reads no state",
 			sub: Subsystem{
 				Identity: "urn:hdm:apps:bounce:renderer", Kind: KindRender,
-				Reads: []string{"HMI input"}, // not in layout
+				Reads: []string{"ball_x", "ball_y"},
 			},
-			want: "(circle 160 120 6",
+			want: "(cell renderer (reads)",
 		},
 	}
 	for _, tc := range cases {
