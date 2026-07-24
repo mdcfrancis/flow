@@ -32,7 +32,19 @@ type InferenceRequest struct {
 	Messages    []ChatMessage `json:"messages"`
 	Temperature float32       `json:"temperature"`
 	MaxTokens   int           `json:"max_tokens"`
+	// ChatTemplateKwargs passes template flags to the local server; we use it to
+	// suppress a reasoning model's chain-of-thought (see disableThinking).
+	ChatTemplateKwargs map[string]any `json:"chat_template_kwargs,omitempty"`
 }
+
+// disableThinking suppresses a reasoning model's chain-of-thought on the local
+// OpenAI-compatible server. Qwen3 "thinking" variants otherwise dump a long
+// reasoning trace that exhausts the token budget (never reaching the answer) and
+// exceeds the request timeout — the "malformed completion / unexpected end of
+// JSON" failure. It is the nested chat_template flag (a top-level enable_thinking
+// is ignored), and it is harmless to non-thinking models, which ignore the
+// unknown template key.
+var disableThinking = map[string]any{"enable_thinking": false}
 
 // ChatMessage represents a single message in the conversation array.
 type ChatMessage struct {
@@ -303,6 +315,7 @@ func (c *LocalModelClient) openaiRequest(ctx context.Context, sysPrompt, userCtx
 			{Role: "system", Content: sysPrompt},
 			{Role: "user", Content: userCtx},
 		},
+		ChatTemplateKwargs: disableThinking,
 	})
 	if err != nil {
 		return nil, err
@@ -329,9 +342,10 @@ func (c *LocalModelClient) openaiVisionRequest(ctx context.Context, sysPrompt, q
 		parts = append(parts, map[string]any{"type": "image_url", "image_url": map[string]any{"url": uri}})
 	}
 	payload, err := json.Marshal(map[string]any{
-		"model":       c.model,
-		"temperature": 0.0,
-		"max_tokens":  512,
+		"model":                c.model,
+		"temperature":          0.0,
+		"max_tokens":           512,
+		"chat_template_kwargs": disableThinking,
 		"messages": []any{
 			map[string]any{"role": "system", "content": sysPrompt},
 			map[string]any{"role": "user", "content": parts},
