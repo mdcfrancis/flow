@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/mdcfrancis/flow/compiler"
+	"github.com/mdcfrancis/flow/flux"
 	"github.com/mdcfrancis/flow/inference"
 	"github.com/mdcfrancis/flow/storage"
 )
@@ -34,14 +35,24 @@ When finished, reply with ONLY the final complete (module ...) form — no tool 
 // compile-check a draft) while it works. The final WAT is extracted, assembled, and
 // entry-checked exactly like RunSieve, so its outcome plugs into the same verification
 // gates unchanged — the tools inform synthesis, they never bypass verification.
-func RunAgenticSieve(ctx context.Context, model ToolReasoner, ledger *storage.LedgerEngine, systemPrompt, seedContext, kind, intent string, contract *EntryContract) (*SieveOutcome, error) {
+func RunAgenticSieve(ctx context.Context, model ToolReasoner, ledger *storage.LedgerEngine, systemPrompt, seedContext, kind, intent string, layout flux.Layout, contract *EntryContract) (*SieveOutcome, error) {
 	cs := compiler.NewCompilerService()
-	tools, exec := buildAgenticTools(ledger, cs, kind, intent)
+	tools, exec := buildAgenticTools(ledger, cs, kind, intent, layout)
 	resp, err := model.InvokeTools(ctx, agenticPreamble+systemPrompt, seedContext, tools, exec, agenticMaxSteps)
 	if err != nil {
 		return nil, fmt.Errorf("agentic sieve: %w", err)
 	}
-	wat := extractWAT(resp)
+	// Flux-aware: with a layout the model may answer with a (cell …) program, which
+	// is lowered to WAT here — the same path as the standard sieve.
+	wat, fluxSrc, ferr := candidateWAT(resp, layout)
+	if ferr != nil {
+		taxoWAT(fluxSrc, nil, ferr.Error())
+		return &SieveOutcome{WAT: fluxSrc, Raw: resp},
+			fmt.Errorf("agentic sieve: flux did not compile: %v", ferr)
+	}
+	if fluxSrc != "" {
+		log.Printf("[FLUX] agentic: lowered a model-authored (cell …) to WAT")
+	}
 	art, cerr := cs.CompileGenotype(wat)
 	if cerr != nil || art == nil || !art.SyntaxPassed {
 		taxoWAT(wat, art, "") // agentic final WAT — folded into the compile-stage buckets
@@ -66,7 +77,7 @@ func RunAgenticSieve(ctx context.Context, model ToolReasoner, ledger *storage.Le
 // buildAgenticTools returns the tool definitions and a Go executor bound to the
 // knowledge base + compiler. Every tool is read-only except that compile_check runs the
 // assembler (no side effects); the model's produced WAT is still fully verified later.
-func buildAgenticTools(ledger *storage.LedgerEngine, cs *compiler.CompilerService, kind, intent string) ([]inference.ToolDef, inference.ToolExec) {
+func buildAgenticTools(ledger *storage.LedgerEngine, cs *compiler.CompilerService, kind, intent string, layout flux.Layout) ([]inference.ToolDef, inference.ToolExec) {
 	defs := []inference.ToolDef{
 		{Name: "list_examples", Description: "List available worked WAT examples (id + one-line semantics) for this cell's kind.", Parameters: objSchema(nil, nil)},
 		{Name: "find_examples", Description: "Search worked WAT examples by a query; returns the best matches with their WAT.", Parameters: objSchema(map[string]string{"query": "what you want a worked example of"}, []string{"query"})},
@@ -129,7 +140,19 @@ func buildAgenticTools(ledger *storage.LedgerEngine, cs *compiler.CompilerServic
 			}
 			return "no document with that id"
 		case "compile_check":
-			art, err := cs.CompileGenotype(getStr("wat"))
+			src := getStr("wat")
+			// Flux-aware: if the model checks a (cell …) program, lower it first so the
+			// error it gets back is the Flux (semantic) error, not "expected module".
+			if layout != nil {
+				if f := extractFlux(src); f != "" {
+					w, lerr := flux.Compile("cell", f, layout)
+					if lerr != nil {
+						return "FLUX COMPILE ERROR: " + lerr.Error()
+					}
+					src = w
+				}
+			}
+			art, err := cs.CompileGenotype(src)
 			if err != nil || art == nil || !art.SyntaxPassed {
 				line, msg := 0, "unknown"
 				if art != nil {

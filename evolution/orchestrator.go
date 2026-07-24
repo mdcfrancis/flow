@@ -460,7 +460,7 @@ func (o *Orchestrator) synthesize(ctx context.Context, targetURN, intent, sysPro
 				kind = "render"
 			}
 			log.Printf("[MODEL] %s — agentic synthesis (knowledge + compiler tools)", targetURN)
-			return RunAgenticSieve(ctx, tr, o.ledger, sysPrompt, seed, kind, intent, contract)
+			return RunAgenticSieve(ctx, tr, o.ledger, sysPrompt, seed, kind, intent, o.fluxLayoutFor(targetURN), contract)
 		}
 	}
 	return RunSieveWithLayout(ctx, m, sysPrompt, seed, o.SieveMaxIters, o.fluxLayoutFor(targetURN), contract)

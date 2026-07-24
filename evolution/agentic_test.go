@@ -13,7 +13,7 @@ func TestAgenticToolsExec(t *testing.T) {
 		Kinds: []string{"render"}, Body: "read the field and draw there", Provenance: "seed"}); err != nil {
 		t.Fatal(err)
 	}
-	_, exec := buildAgenticTools(le, compiler.NewCompilerService(), "render", "draw a circle")
+	_, exec := buildAgenticTools(le, compiler.NewCompilerService(), "render", "draw a circle", nil)
 
 	// find_docs surfaces the relevant doc body.
 	if out := exec("find_docs", `{"query":"draw"}`); !strings.Contains(out, "draw there") {
