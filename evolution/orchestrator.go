@@ -880,12 +880,14 @@ func (o *Orchestrator) acceptanceFrame(ctx context.Context, fr *FrameResult, bas
 
 	switch {
 	case candPass < basePass:
+		taxoAccept("regress")
 		fr.Reason = fmt.Sprintf("acceptance regression: %d->%d/%d", basePass, candPass, total)
 		return fr, nil
 
 	case candPass > basePass:
 		// Correctness progress: behavior legitimately changes toward spec, so
 		// the tape-reproduction gate does not apply.
+		taxoAccept("progress")
 		return o.commit(ctx, fr, baseRoot, targetURN, desc, sieve,
 			fmt.Sprintf("correctness %d->%d/%d", basePass, candPass, total))
 
@@ -898,6 +900,7 @@ func (o *Orchestrator) acceptanceFrame(ctx context.Context, fr *FrameResult, bas
 		if basePass < total {
 			// Stall: the synthesis made no acceptance headway. Count it toward
 			// escalation — once past the threshold the next sieve uses the reasoner.
+			taxoAccept("stall")
 			o.escalation[targetURN]++
 			if o.escalation[targetURN] == sieveEscalateThreshold {
 				log.Printf("[MODEL] %s stalled %dx at %d/%d — escalating synthesis to the reasoner", targetURN, o.escalation[targetURN], basePass, total)
@@ -909,6 +912,7 @@ func (o *Orchestrator) acceptanceFrame(ctx context.Context, fr *FrameResult, bas
 		// gauntlet below replays run-tick regression tapes — which only applies to
 		// run-tick cells. A complete render-frame (UI) cell has no such tapes, so
 		// it rests here (built; the scenarios anchor its behavior).
+		taxoAccept("complete")
 		if contract == RenderFrameContract {
 			fr.Reason = fmt.Sprintf("complete (%d/%d); UI cell rests — no run-tick optimization", candPass, total)
 			return fr, nil

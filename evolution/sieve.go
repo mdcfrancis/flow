@@ -84,15 +84,19 @@ func RunSieve(ctx context.Context, model Reasoner, systemPrompt, seedContext str
 		if cerr == nil && art != nil && art.SyntaxPassed {
 			// Syntax cleared; now enforce the entry contract if one was given.
 			if want == nil {
+				taxoWAT(wat, art, "")
 				return &SieveOutcome{Artifact: art, WAT: wat, Iterations: i, Raw: resp}, nil
 			}
 			if sigErr := checkEntrySignature(ctx, art.Bytecode, want); sigErr != nil {
+				taxoWAT(wat, art, sigErr.Error()) // assembled, but type/stack/signature invalid
 				lastSigErr = sigErr
 				payload = signatureCorrectionDirective(want, sigErr)
 				continue
 			}
+			taxoWAT(wat, art, "")
 			return &SieveOutcome{Artifact: art, WAT: wat, Iterations: i, Raw: resp}, nil
 		}
+		taxoWAT(wat, art, "") // syntax fault — classified from the assembler artifact
 		payload = correctionDirective(art)
 	}
 

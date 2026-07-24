@@ -44,6 +44,7 @@ func RunAgenticSieve(ctx context.Context, model ToolReasoner, ledger *storage.Le
 	wat := extractWAT(resp)
 	art, cerr := cs.CompileGenotype(wat)
 	if cerr != nil || art == nil || !art.SyntaxPassed {
+		taxoWAT(wat, art, "") // agentic final WAT — folded into the compile-stage buckets
 		line, msg := 0, "unknown"
 		if art != nil {
 			line, msg = art.ErrorLine, art.ErrorContext
@@ -53,10 +54,12 @@ func RunAgenticSieve(ctx context.Context, model ToolReasoner, ledger *storage.Le
 	}
 	if contract != nil {
 		if sigErr := checkEntrySignature(ctx, art.Bytecode, contract); sigErr != nil {
+			taxoWAT(wat, art, sigErr.Error())
 			return &SieveOutcome{Artifact: art, WAT: wat, Raw: resp},
 				fmt.Errorf("agentic sieve: entry contract unmet: %v", sigErr)
 		}
 	}
+	taxoWAT(wat, art, "")
 	return &SieveOutcome{Artifact: art, WAT: wat, Iterations: 1, Raw: resp}, nil
 }
 
