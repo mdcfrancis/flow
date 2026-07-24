@@ -10,7 +10,6 @@ import (
 	"github.com/mdcfrancis/flow/codependency"
 	"github.com/mdcfrancis/flow/compiler"
 	"github.com/mdcfrancis/flow/engine"
-	"github.com/mdcfrancis/flow/flux"
 	"github.com/mdcfrancis/flow/inference"
 	"github.com/mdcfrancis/flow/manifest"
 	"github.com/mdcfrancis/flow/storage"
@@ -143,6 +142,27 @@ OUTPUT: only a single complete, valid WebAssembly Text (WAT) (module ...) form.
 No prose, no markdown fences.
 ` + buildExamples + `
 ` + Capabilities
+
+// FluxBuildPrompt is the system prompt for the Flux synthesis path (HDM_FLUX):
+// the builder authors a typed functional program, not WAT. It carries no WAT
+// examples/ABI — the grammar, the typed field list, and a worked example are
+// injected into the build seed (fluxSeedBlock), so nothing pulls the model back
+// toward WAT.
+const FluxBuildPrompt = `SYSTEM ROLE: HDM BUILDER (FLUX).
+You are given a cell's PLAN (the design to implement), the system it is part of,
+its shared-state fields, and its ACCEPTANCE CHECKS. IMPLEMENT THE PLAN as a FLUX
+functional program: write the cell's algorithm exactly as the plan's steps
+describe, reading and writing the shared fields it names. The acceptance checks
+VERIFY the plan — pass AS MANY as possible.
+
+Flux is a small, typed functional language: a cell is a PURE FUNCTION over shared
+state. You write ONLY the logic; a compiler lowers it to WASM and owns all memory,
+stack, and types — so you never write WAT, never manage a stack, never touch an
+offset. The exact grammar, your typed field list, and a worked example are in the
+build context below; follow them precisely.
+
+OUTPUT: only a single complete (cell …) Flux program. No prose, no markdown
+fences, and never WAT/WASM/(module …).`
 
 const (
 	// EntryPoint is the exported function the scheduler drives on each cell.
@@ -443,11 +463,7 @@ func (o *Orchestrator) synthesize(ctx context.Context, targetURN, intent, sysPro
 			return RunAgenticSieve(ctx, tr, o.ledger, sysPrompt, seed, kind, intent, contract)
 		}
 	}
-	var layout flux.Layout
-	if o.FluxEnabled {
-		layout = LayoutFromContract(LoadContract(o.ledger, AppNamespaceOf(targetURN)))
-	}
-	return RunSieveWithLayout(ctx, m, sysPrompt, seed, o.SieveMaxIters, layout, contract)
+	return RunSieveWithLayout(ctx, m, sysPrompt, seed, o.SieveMaxIters, o.fluxLayoutFor(targetURN), contract)
 }
 
 func (o *Orchestrator) resolver() CellResolver {
@@ -554,7 +570,11 @@ func (o *Orchestrator) RunFrame(ctx context.Context, targetURN string) (*FrameRe
 		o.event("mutate", targetURN, "structural escalation — refactor to a data structure")
 		o.phase("synthesizing", "structural refactor of "+targetURN+" (awaiting cognitive engine)", targetURN)
 	case building:
-		sysPrompt = ResolvePrompt(o.ledger, "build", DefaultBuildPrompt)
+		if o.fluxLayoutFor(targetURN) != nil {
+			sysPrompt = ResolvePrompt(o.ledger, "build-flux", FluxBuildPrompt)
+		} else {
+			sysPrompt = ResolvePrompt(o.ledger, "build", DefaultBuildPrompt)
+		}
 		seed = o.buildSeed(targetURN, desc.Semantics.FunctionalIntent, genotype, contract, suite)
 		o.event("mutate", targetURN, "building toward spec ("+contract.Name+")")
 		o.phase("synthesizing", "building a candidate for "+targetURN+" (awaiting cognitive engine)", targetURN)
@@ -797,10 +817,7 @@ func (o *Orchestrator) buildSeed(urn, intent, genotype string, contract *EntryCo
 	// is authored in Flux (a typed functional program lowered to WAT for the model)
 	// rather than raw WAT — so the tail of the seed instructs Flux authoring and the
 	// WAT-specific sections are suppressed.
-	var fluxLayout flux.Layout
-	if o.FluxEnabled {
-		fluxLayout = LayoutFromContract(LoadContract(o.ledger, ns))
-	}
+	fluxLayout := o.fluxLayoutFor(urn)
 	fluxOn := fluxLayout != nil
 	// PLAN-FIRST: lead with the design this cell implements. The plan is the "how"
 	// (its algorithm + how it connects to siblings); the acceptance checks below

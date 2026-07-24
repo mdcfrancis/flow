@@ -43,6 +43,16 @@ func LayoutFromContract(c *AppContract) flux.Layout {
 	return l
 }
 
+// fluxLayoutFor returns the Flux field layout for a cell's app when the Flux path
+// is enabled and the app has an addressable contract, or nil (which disables the
+// Flux path for that cell — it is synthesized as WAT, unchanged).
+func (o *Orchestrator) fluxLayoutFor(urn string) flux.Layout {
+	if !o.FluxEnabled {
+		return nil
+	}
+	return LayoutFromContract(LoadContract(o.ledger, AppNamespaceOf(urn)))
+}
+
 // candidateWAT converts one model response into WAT for the sieve to assemble.
 // With a layout and a Flux (cell …) form present, it lowers Flux → WAT and marks
 // the source Flux; otherwise it extracts WAT as before. A Flux compile error is
