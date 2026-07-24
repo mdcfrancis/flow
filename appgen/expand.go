@@ -421,6 +421,13 @@ func groundScenarios(scs []evolution.Scenario, c *evolution.AppContract, isUI bo
 			w.Field = ""
 		}
 	}
+	// The authored INITIALIZATION (mock world): every scalar field at its Init.
+	// Filled in below AFTER a scenario's own seeds and promotions, for the fields it
+	// did not itself seed — so a config field (screen_width) or a sibling-produced
+	// field the cell reads has a real value instead of zero, while the scenario's
+	// own seeds/promotions always win. This is the fix for cells that pass flux_run
+	// (which mocks its own inputs) but failed live acceptance (all zeros).
+	baseline := c.InitSeeds()
 	var out []evolution.Scenario
 	for _, sc := range scs {
 		// Rule 0 (entry-match, the structural guarantee): force every scenario's entry
@@ -487,6 +494,15 @@ func groundScenarios(scs []evolution.Scenario, c *evolution.AppContract, isUI bo
 			if (d.NearX != nil && !seedHasValue(sc.Seed, uint32(*d.NearX))) ||
 				(d.NearY != nil && !seedHasValue(sc.Seed, uint32(*d.NearY))) {
 				continue
+			}
+		}
+		// Fill the rest of the mock world: every contract field the scenario did not
+		// itself seed (or promote) gets its Init, so the cell reads real config /
+		// sibling values instead of zero. The scenario's own seeds are untouched, so
+		// position/promotion rules above are unaffected.
+		for _, b := range baseline {
+			if !hasSeedAt(sc.Seed, b.At) {
+				sc.Seed = append(sc.Seed, b)
 			}
 		}
 		// Keep: a draw/result scenario, a reads scenario targeting the contract, or a
@@ -589,11 +605,19 @@ Rules:
 - Region: offset >= 0x000B0000 and < 0x000C0000, 4-byte aligned. An "i32[N]" field
   occupies N consecutive i32 slots (N*4 bytes); the next field must start after it.
   (Offsets are re-packed for safety, but size arrays correctly.)
+- INIT: give every scalar field an "init" — its initial value at boot, forming a
+  single COHERENT, LIVE starting world: config fields set (e.g. a screen width
+  ~320, height ~240), positions placed INSIDE the window (not 0,0), and at least
+  one velocity/speed NON-ZERO so motion actually happens. This is the mock world
+  each cell is tested against, so a cell that reads a config or sibling field sees
+  a real value, never zero. Omit "init" for arrays.
 
 Output ONLY JSON, no prose or fences:
 {"fields":[
-  {"name":"escape_times","offset":720896,"type":"i32[3072]","desc":"escape iterations per grid cell, row-major 64x48, 0..maxIter"},
-  {"name":"max_iter","offset":733184,"type":"i32","desc":"iteration cap, e.g. 64"}
+  {"name":"ball_x","offset":720896,"type":"i32","desc":"ball x 0..319","init":160},
+  {"name":"ball_vx","offset":720900,"type":"i32","desc":"ball x velocity","init":3},
+  {"name":"screen_width","offset":720904,"type":"i32","desc":"canvas width","init":320},
+  {"name":"escape_times","offset":720912,"type":"i32[3072]","desc":"per-cell escape iterations, row-major"}
 ]}`
 
 // EnsureContract authors and persists an application's shared-state contract if
@@ -659,11 +683,71 @@ func (g *Grower) EnsureContract(ctx context.Context, namespace string) (bool, er
 		log.Printf("[GROW] contract %s: %d field(s) dropped — exceeded the contract region", namespace, before-len(ok))
 	}
 	c.Fields = ok
+	fillInit(&c) // deterministic backstop so the mock world is never broken (bounds set, motion nonzero)
 	if err := evolution.SaveContract(g.ledger, namespace, &c); err != nil {
 		return false, err
 	}
 	g.event("create", namespace, fmt.Sprintf("shared-state contract: %d fields", len(ok)))
 	return true, nil
+}
+
+// fillInit is the deterministic backstop for the authored initialization: it
+// guarantees a FUNCTIONAL mock world even if the model gave poor or zero inits —
+// screen bounds must be non-zero (else a bounds check collapses), positions start
+// inside the window, and at least the velocity/speed fields move (else the sim is
+// frozen from boot). It only fills fields the model left at 0; authored non-zero
+// inits are respected.
+func fillInit(c *evolution.AppContract) {
+	if c == nil {
+		return
+	}
+	screenW, screenH := 320, 240
+	for i := range c.Fields {
+		n := strings.ToLower(c.Fields[i].Name)
+		if c.Fields[i].Init == 0 {
+			if strings.Contains(n, "width") {
+				c.Fields[i].Init = 320
+			} else if strings.Contains(n, "height") {
+				c.Fields[i].Init = 240
+			}
+		}
+		if strings.Contains(n, "width") && c.Fields[i].Init > 0 {
+			screenW = c.Fields[i].Init
+		}
+		if strings.Contains(n, "height") && c.Fields[i].Init > 0 {
+			screenH = c.Fields[i].Init
+		}
+	}
+	for i := range c.Fields {
+		f := &c.Fields[i]
+		if f.Init != 0 || typeWords(f.Type) != 1 {
+			continue
+		}
+		n := strings.ToLower(f.Name)
+		switch {
+		case isVelocityName(n):
+			f.Init = 2 // small non-zero so motion animates from boot
+		case isYName(n):
+			f.Init = screenH / 2
+		case isXName(n):
+			f.Init = screenW / 2
+		}
+	}
+}
+
+func isVelocityName(n string) bool {
+	for _, k := range []string{"vel", "vx", "vy", "dx", "dy", "speed", "velocity"} {
+		if strings.Contains(n, k) {
+			return true
+		}
+	}
+	return false
+}
+func isXName(n string) bool {
+	return strings.HasSuffix(n, "_x") || n == "x" || strings.Contains(n, "pos_x") || strings.Contains(n, "posx")
+}
+func isYName(n string) bool {
+	return strings.HasSuffix(n, "_y") || n == "y" || strings.Contains(n, "pos_y") || strings.Contains(n, "posy")
 }
 
 // packOffsets re-addresses contract fields sequentially from the sandbox base so
