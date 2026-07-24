@@ -342,9 +342,13 @@ func (c *LocalModelClient) openaiVisionRequest(ctx context.Context, sysPrompt, q
 		parts = append(parts, map[string]any{"type": "image_url", "image_url": map[string]any{"url": uri}})
 	}
 	payload, err := json.Marshal(map[string]any{
-		"model":                c.model,
-		"temperature":          0.0,
-		"max_tokens":           512,
+		"model":       c.model,
+		"temperature": 0.0,
+		// Reasoning models (e.g. qwen3.6) spend the early budget on hidden
+		// reasoning tokens before any visible content; a tight cap starves the
+		// actual answer and returns empty. Give the vision critic room to think
+		// AND answer.
+		"max_tokens":           2048,
 		"chat_template_kwargs": disableThinking,
 		"messages": []any{
 			map[string]any{"role": "system", "content": sysPrompt},
