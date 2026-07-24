@@ -91,9 +91,11 @@ func lowerDraw(b *strings.Builder, d *Draw) error {
 			return errf(p.Pos, "no opcode for draw prim %q", p.Op)
 		}
 		rec := i * 24
-		// slots: op(0) a(4) b(8) c(12) d(16) rgba(20)
+		// slots: op(0) a(4) b(8) c(12) d(16) rgba(20). op = (layer<<8)|primitive;
+		// APP content draws on layer 1 (the widget/app canvas), not layer 0 (the
+		// static basemap) — the runtime and acceptance filter app draws by layer 1.
 		vals := make([]string, 6)
-		vals[0] = fmt.Sprintf("(i32.const %d)", op)
+		vals[0] = fmt.Sprintf("(i32.const %d)", (appDrawLayer<<8)|op)
 		vals[5] = "(i32.const 0)"
 		// geometry args are all but the last (color); last is rgba.
 		for gi := 0; gi < len(p.Args)-1; gi++ {
@@ -216,6 +218,10 @@ func selectMax(x, y string) string {
 	return fmt.Sprintf("(select %s %s (i32.gt_s %s %s))", x, y, x, y)
 }
 
-// drawOpcode maps a prim name to its opcode. The 24-byte record is
-// [op, a, b, c, d, rgba]; geometry fills a..d, color fills rgba.
+// drawOpcode maps a prim name to its primitive opcode (low byte). The 24-byte
+// record is [op, a, b, c, d, rgba]; geometry fills a..d, color fills rgba.
 var drawOpcode = map[string]int{"rect": 1, "line": 2, "circle": 3}
+
+// appDrawLayer is the compositing layer app cells draw on (op high byte): 1 =
+// widget/app canvas (0 is the static basemap, reserved for the host).
+const appDrawLayer = 1

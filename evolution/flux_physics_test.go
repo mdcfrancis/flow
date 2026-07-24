@@ -116,11 +116,14 @@ func TestFluxRendererTracksPositionOperationally(t *testing.T) {
 	bc := compileFluxCell(t, fluxRenderer, layout)
 
 	x := 250
-	scen := []Scenario{{Name: "draws_at_ball_x", Entry: "render-frame",
+	// App content must draw on LAYER 1 (the widget/app canvas). The layer:1 filter
+	// is the exact check the renderer failed before the lowerer emitted layer 1.
+	layer1 := 1
+	scen := []Scenario{{Name: "draws_at_ball_x_layer1", Entry: "render-frame",
 		Seed:   []SeedWrite{{At: "0xB0000", U32: []uint32{250}}},
-		Expect: ScenarioExpect{Draw: &DrawExpect{Op: "circle", MinRecords: 1, NearX: &x}}}}
+		Expect: ScenarioExpect{Draw: &DrawExpect{Layer: &layer1, Op: "circle", MinRecords: 1, NearX: &x}}}}
 
 	if pass, total := ScenarioScore(context.Background(), bc, scen, DefaultPayloadOffset, DefaultStateWindow, nil); pass != total {
-		t.Fatalf("Flux renderer passed only %d/%d operational scenarios", pass, total)
+		t.Fatalf("Flux renderer did not draw on layer 1 at the ball position: %d/%d", pass, total)
 	}
 }
