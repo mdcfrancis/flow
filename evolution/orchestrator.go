@@ -10,6 +10,7 @@ import (
 	"github.com/mdcfrancis/flow/codependency"
 	"github.com/mdcfrancis/flow/compiler"
 	"github.com/mdcfrancis/flow/engine"
+	"github.com/mdcfrancis/flow/flux"
 	"github.com/mdcfrancis/flow/inference"
 	"github.com/mdcfrancis/flow/manifest"
 	"github.com/mdcfrancis/flow/storage"
@@ -158,6 +159,11 @@ type Orchestrator struct {
 	mvcc          *engine.MVCCCoordinator
 	model         Reasoner
 	SieveMaxIters int
+	// FluxEnabled turns on the Flux functional-IR synthesis path: the sieve builds
+	// a field layout from the app contract and accepts a model that authors a Flux
+	// (cell …) program (lowered to WAT) as well as one that emits raw WAT. Opt-in
+	// (HDM_FLUX) so default behavior is unchanged. See docs/functional-ir.md.
+	FluxEnabled   bool
 	CompassPrompt string
 	// TapeCount caps the regression corpus size; PoolSize is how many candidate
 	// inputs are probed to fill it. The Discovery-Invariant compactor keeps only
@@ -437,7 +443,11 @@ func (o *Orchestrator) synthesize(ctx context.Context, targetURN, intent, sysPro
 			return RunAgenticSieve(ctx, tr, o.ledger, sysPrompt, seed, kind, intent, contract)
 		}
 	}
-	return RunSieve(ctx, m, sysPrompt, seed, o.SieveMaxIters, contract)
+	var layout flux.Layout
+	if o.FluxEnabled {
+		layout = LayoutFromContract(LoadContract(o.ledger, AppNamespaceOf(targetURN)))
+	}
+	return RunSieveWithLayout(ctx, m, sysPrompt, seed, o.SieveMaxIters, layout, contract)
 }
 
 func (o *Orchestrator) resolver() CellResolver {

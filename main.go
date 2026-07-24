@@ -2209,6 +2209,14 @@ func main() {
 	//    recording isolation passes.
 	orchestrator := evolution.NewOrchestrator(ledger, router)
 	orchestrator.Gravity = codependency.NewTracker(ledger)
+	// Flux functional-IR synthesis path (opt-in via HDM_FLUX): the sieve accepts a
+	// model that authors a Flux (cell …) program, lowered to WAT against the app
+	// contract. Off by default — raw-WAT synthesis is unchanged. See
+	// docs/functional-ir.md.
+	if os.Getenv("HDM_FLUX") != "" {
+		orchestrator.FluxEnabled = true
+		log.Printf("[FLUX] functional-IR synthesis path enabled (HDM_FLUX)")
+	}
 	// Route the evolution-loop sieve by the target cell's kind (render → vision,
 	// compute/leaf → code). Injected to avoid an evolution→appgen import cycle.
 	orchestrator.SieveModelType = func(urn string) inference.ModelType {

@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/mdcfrancis/flow/compiler"
+	"github.com/mdcfrancis/flow/flux"
 	"github.com/tetratelabs/wazero"
 	"github.com/tetratelabs/wazero/api"
 )
@@ -61,24 +62,45 @@ func entryContractFor(genotype string) *EntryContract {
 // candidate to export the named entry with the exact signature; a mismatch is
 // treated like a compile failure and fed back to the model for repair.
 func RunSieve(ctx context.Context, model Reasoner, systemPrompt, seedContext string, maxIters int, contract ...*EntryContract) (*SieveOutcome, error) {
-	if maxIters < 1 {
-		maxIters = 1
-	}
 	var want *EntryContract
 	if len(contract) > 0 {
 		want = contract[0]
 	}
+	return runSieve(ctx, model, systemPrompt, seedContext, maxIters, nil, want)
+}
+
+// RunSieveWithLayout is the Flux-aware inner loop: given a shared-state field
+// layout it accepts a model that authors a Flux (cell …) program (lowered to WAT
+// here) as well as one that emits raw WAT — both feed the identical downstream
+// verification. A nil layout is exactly RunSieve.
+func RunSieveWithLayout(ctx context.Context, model Reasoner, systemPrompt, seedContext string, maxIters int, layout flux.Layout, want *EntryContract) (*SieveOutcome, error) {
+	return runSieve(ctx, model, systemPrompt, seedContext, maxIters, layout, want)
+}
+
+func runSieve(ctx context.Context, model Reasoner, systemPrompt, seedContext string, maxIters int, layout flux.Layout, want *EntryContract) (*SieveOutcome, error) {
+	if maxIters < 1 {
+		maxIters = 1
+	}
 	cs := compiler.NewCompilerService()
 	payload := seedContext
 	var last *compiler.CompilationArtifact
-	var lastSigErr error
+	var lastSigErr, lastFluxErr error
 
 	for i := 1; i <= maxIters; i++ {
 		resp, err := model.InvokeReasoning(ctx, systemPrompt, payload)
 		if err != nil {
 			return nil, fmt.Errorf("sieve iteration %d: reasoning invocation failed: %w", i, err)
 		}
-		wat := extractWAT(resp)
+		wat, fluxSrc, ferr := candidateWAT(resp, layout)
+		if ferr != nil {
+			// The model authored Flux that did not compile — feed the semantic
+			// error back. No assembler artifact exists this round.
+			lastFluxErr = ferr
+			last = nil
+			taxoWAT(fluxSrc, nil, ferr.Error())
+			payload = fluxCorrectionDirective(ferr)
+			continue
+		}
 		art, cerr := cs.CompileGenotype(wat)
 		last = art
 		if cerr == nil && art != nil && art.SyntaxPassed {
@@ -103,6 +125,10 @@ func RunSieve(ctx context.Context, model Reasoner, systemPrompt, seedContext str
 	if lastSigErr != nil {
 		return &SieveOutcome{Artifact: last, Iterations: maxIters},
 			fmt.Errorf("sieve did not converge within %d iterations: entry contract unmet: %v", maxIters, lastSigErr)
+	}
+	if last == nil && lastFluxErr != nil {
+		return &SieveOutcome{Iterations: maxIters},
+			fmt.Errorf("sieve did not converge within %d iterations: flux did not compile: %v", maxIters, lastFluxErr)
 	}
 	line, msg := 0, "unknown"
 	if last != nil {
