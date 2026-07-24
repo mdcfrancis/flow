@@ -252,13 +252,18 @@ func runFluxCell(layout flux.Layout, src, inputsJSON string, steps int) (string,
 		}
 	}
 	sort.Slice(writables, func(i, j int) bool { return writables[i].name < writables[j].name })
-	expect := make([]SeedWrite, len(writables))
+	// Capture each writable field's value at EVERY tick (the trajectory), not just
+	// the final value — so multi-step behavior is visible: a field that reaches a
+	// wall and STOPS (clamp) reads differently from one that reverses (bounce), and
+	// a frozen cell shows a flat line. This is what lets the model validate the full
+	// goal behavior, not just that one tick moved something.
+	trajExp := make([]TrajectoryExpect, len(writables))
 	for i, w := range writables {
-		expect[i] = SeedWrite{At: fmt.Sprintf("0x%X", w.off)}
+		trajExp[i] = TrajectoryExpect{At: fmt.Sprintf("0x%X", w.off)}
 	}
 
-	sc := Scenario{Entry: entry, Steps: steps, Seed: seeds, Expect: ScenarioExpect{Reads: expect}}
-	_, frames, reads, _, _, rerr := execScenario(context.Background(), art.Bytecode, sc, DefaultPayloadOffset, DefaultStateWindow, nil)
+	sc := Scenario{Entry: entry, Steps: steps, Seed: seeds, Expect: ScenarioExpect{Trajectory: trajExp}}
+	_, frames, _, _, traj, rerr := execScenario(context.Background(), art.Bytecode, sc, DefaultPayloadOffset, DefaultStateWindow, nil)
 	if rerr != nil {
 		return "", rerr
 	}
@@ -282,16 +287,33 @@ func runFluxCell(layout flux.Layout, src, inputsJSON string, steps int) (string,
 		}
 		return strings.TrimRight(b.String(), "\n"), nil
 	}
-	parts := make([]string, len(writables))
+	fmt.Fprintf(&b, "trajectory over %d tick(s) — each field's value per tick (watch for clamp/stop vs reverse/bounce, and freezes):\n", steps)
+	lines := make([]string, len(writables))
 	for i, w := range writables {
-		v := int32(0)
-		if i < len(reads) && len(reads[i]) > 0 {
-			v = int32(reads[i][0])
+		var seq []uint32
+		if i < len(traj) {
+			seq = traj[i]
 		}
-		parts[i] = fmt.Sprintf("%s=%d", w.name, v)
+		lines[i] = fmt.Sprintf("  %s: %s", w.name, sampleSeq(seq))
 	}
-	fmt.Fprintf(&b, "after %d step(s), writable fields: %s", steps, strings.Join(parts, ", "))
+	b.WriteString(strings.Join(lines, "\n"))
 	return b.String(), nil
+}
+
+// sampleSeq renders a per-tick value sequence compactly: in full when short,
+// head…tail when long, so a long run stays readable while the shape is visible.
+func sampleSeq(seq []uint32) string {
+	toStr := func(sub []uint32) []string {
+		out := make([]string, len(sub))
+		for i, v := range sub {
+			out[i] = fmt.Sprintf("%d", int32(v))
+		}
+		return out
+	}
+	if len(seq) <= 16 {
+		return "[" + strings.Join(toStr(seq), ",") + "]"
+	}
+	return "[" + strings.Join(toStr(seq[:7]), ",") + ",…," + strings.Join(toStr(seq[len(seq)-7:]), ",") + "]"
 }
 
 // fluxCorrectionDirective renders the sieve repair prompt for a Flux compile

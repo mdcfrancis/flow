@@ -38,8 +38,9 @@ When finished, reply with ONLY the final complete (module ...) form — no tool 
 const fluxAgenticPreamble = `You author a cell in FLUX — a small typed functional language (its grammar, your exact typed fields, and a worked example are in the task below). You have TOOLS; USE them and ITERATE until the cell is correct — do not answer on the first draft.
 - find_docs / find_examples / read_doc: retrieve a relevant how-to or worked pattern.
 - flux_check(src): parse + type-check + lower your (cell …). It returns "ok" or the exact error (an unknown field, a type mismatch, a syntax slip). Fix EVERY error before running.
-- flux_run(src, inputs): RUN your cell in the real sandbox with inputs YOU choose and read the resulting field values (or drawn shapes) back. This is how you VERIFY behavior: pick inputs that exercise the goal AND the edge cases the acceptance checks describe (e.g. a value at a wall, a specific key), run, and confirm the outputs are exactly what the goal requires. If an output is wrong, fix the LOGIC and run again.
-Only after flux_run shows the correct behavior, reply with ONLY the final complete (cell …) program — no tool call, no prose, no WAT.
+- flux_run(src, inputs, steps): RUN your cell in the real sandbox for MANY ticks (set steps high enough — e.g. 30 — to reach the edge cases the GOAL implies) and read back each field's per-tick TRAJECTORY. This is how you VERIFY the FULL behavior over time, not just one tick.
+VALIDATE AGAINST THE GOAL, not only the acceptance checks: the checks are a floor, not the spec. Read the trajectory and confirm the cell does what the OBJECTIVE says — e.g. for "bounces off all four walls", run until the ball reaches a wall and confirm its position REVERSES (the trajectory turns around) and the velocity flips; it must NOT stop at the wall (clamp), freeze (flat line), or leave the screen. If the trajectory doesn't match the goal, fix the LOGIC and run again — even if the acceptance checks would already pass.
+Only after flux_run shows behavior that matches the GOAL, reply with ONLY the final complete (cell …) program — no tool call, no prose, no WAT.
 
 `
 
@@ -121,7 +122,7 @@ func buildAgenticTools(ledger *storage.LedgerEngine, cs *compiler.CompilerServic
 	if layout != nil {
 		defs = append(defs,
 			inference.ToolDef{Name: "flux_check", Description: "Parse, type-check, and lower a Flux (cell …) program; returns 'ok' or the exact error (unknown field, type mismatch, syntax). Use before flux_run.", Parameters: objSchema(map[string]string{"src": "the full (cell …) Flux program"}, []string{"src"})},
-			inference.ToolDef{Name: "flux_run", Description: "Run your Flux (cell …) in the real sandbox with inputs you choose, and get the resulting field values (or drawn shapes) back — verify behavior empirically before answering. inputs is a JSON object of field name to integer.", Parameters: objSchema(map[string]string{"src": "the full (cell …) Flux program", "inputs": "JSON object mapping field names to integers, e.g. {\"player_x\":100,\"hmi_key\":39}"}, []string{"src", "inputs"})},
+			inference.ToolDef{Name: "flux_run", Description: "Run your Flux (cell …) in the real sandbox for several ticks with inputs you choose, and get back each writable field's per-tick TRAJECTORY (or the drawn shapes) — so you can see the full behavior over time, not just one step. Use enough steps to reach the edge cases the GOAL implies (e.g. the ball hitting a wall) and confirm it behaves right (reverses/bounces, doesn't stop or leave the screen). inputs is a JSON object of field→integer; steps defaults to 12.", Parameters: objSchema(map[string]string{"src": "the full (cell …) Flux program", "inputs": "JSON object mapping field names to integers, e.g. {\"ball_x\":300,\"ball_vx\":5,\"screen_width\":320}", "steps": "how many ticks to run (integer; use enough to reach an edge case, e.g. 30)"}, []string{"src", "inputs"})},
 		)
 	}
 	exec := func(name, argsJSON string) string {
@@ -217,7 +218,13 @@ func buildAgenticTools(ledger *storage.LedgerEngine, cs *compiler.CompilerServic
 			if layout == nil {
 				return "flux_run is unavailable for this cell"
 			}
-			out, err := runFluxCell(layout, getStr("src"), getStr("inputs"), 1)
+			steps := 12
+			if v, ok := args["steps"].(float64); ok && v >= 1 {
+				if steps = int(v); steps > 64 {
+					steps = 64
+				}
+			}
+			out, err := runFluxCell(layout, getStr("src"), getStr("inputs"), steps)
 			if err != nil {
 				return "RUN ERROR: " + err.Error()
 			}
