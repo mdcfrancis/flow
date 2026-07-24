@@ -50,7 +50,12 @@ Only after flux_run shows the correct behavior, reply with ONLY the final comple
 // gates unchanged — the tools inform synthesis, they never bypass verification.
 func RunAgenticSieve(ctx context.Context, model ToolReasoner, ledger *storage.LedgerEngine, systemPrompt, seedContext, kind, intent string, layout flux.Layout, contract *EntryContract) (*SieveOutcome, error) {
 	cs := compiler.NewCompilerService()
-	tools, exec := buildAgenticTools(ledger, cs, kind, intent, layout)
+	// lastFlux captures the most recent (cell …) the model successfully checked or
+	// RAN via a tool. Models routinely do their real work in tool calls and then
+	// end with a summary/empty final message — without this, that verified program
+	// is thrown away ("empty source stream"). It is the fallback answer.
+	var lastFlux string
+	tools, exec := buildAgenticTools(ledger, cs, kind, intent, layout, &lastFlux)
 	preamble := agenticPreamble
 	if layout != nil {
 		preamble = fluxAgenticPreamble
@@ -60,8 +65,16 @@ func RunAgenticSieve(ctx context.Context, model ToolReasoner, ledger *storage.Le
 		return nil, fmt.Errorf("agentic sieve: %w", err)
 	}
 	// Flux-aware: with a layout the model may answer with a (cell …) program, which
-	// is lowered to WAT here — the same path as the standard sieve.
+	// is lowered to WAT here — the same path as the standard sieve. If the final
+	// message carries no usable program, fall back to the last one the model
+	// verified with a tool (its actual work).
 	wat, fluxSrc, ferr := candidateWAT(resp, layout)
+	if layout != nil && (ferr != nil || extractFlux(resp) == "") && lastFlux != "" {
+		if w, lerr := flux.Compile("cell", lastFlux, layout); lerr == nil {
+			log.Printf("[FLUX] agentic: final message had no program; using the last tool-verified (cell …)")
+			wat, fluxSrc, ferr = w, lastFlux, nil
+		}
+	}
 	if ferr != nil {
 		taxoWAT(fluxSrc, nil, ferr.Error())
 		return &SieveOutcome{WAT: fluxSrc, Raw: resp},
@@ -94,7 +107,7 @@ func RunAgenticSieve(ctx context.Context, model ToolReasoner, ledger *storage.Le
 // buildAgenticTools returns the tool definitions and a Go executor bound to the
 // knowledge base + compiler. Every tool is read-only except that compile_check runs the
 // assembler (no side effects); the model's produced WAT is still fully verified later.
-func buildAgenticTools(ledger *storage.LedgerEngine, cs *compiler.CompilerService, kind, intent string, layout flux.Layout) ([]inference.ToolDef, inference.ToolExec) {
+func buildAgenticTools(ledger *storage.LedgerEngine, cs *compiler.CompilerService, kind, intent string, layout flux.Layout, lastFlux *string) ([]inference.ToolDef, inference.ToolExec) {
 	defs := []inference.ToolDef{
 		{Name: "list_examples", Description: "List available worked WAT examples (id + one-line semantics) for this cell's kind.", Parameters: objSchema(nil, nil)},
 		{Name: "find_examples", Description: "Search worked WAT examples by a query; returns the best matches with their WAT.", Parameters: objSchema(map[string]string{"query": "what you want a worked example of"}, []string{"query"})},
@@ -196,6 +209,9 @@ func buildAgenticTools(ledger *storage.LedgerEngine, cs *compiler.CompilerServic
 			if _, err := flux.Compile("cell", getStr("src"), layout); err != nil {
 				return "FLUX ERROR: " + err.Error()
 			}
+			if lastFlux != nil {
+				*lastFlux = getStr("src") // a verified program — the fallback answer
+			}
 			return "ok: parses, type-checks, and lowers to WASM"
 		case "flux_run":
 			if layout == nil {
@@ -204,6 +220,9 @@ func buildAgenticTools(ledger *storage.LedgerEngine, cs *compiler.CompilerServic
 			out, err := runFluxCell(layout, getStr("src"), getStr("inputs"), 1)
 			if err != nil {
 				return "RUN ERROR: " + err.Error()
+			}
+			if lastFlux != nil {
+				*lastFlux = getStr("src") // ran successfully — the best fallback answer
 			}
 			return out
 		}
