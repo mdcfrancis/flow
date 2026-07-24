@@ -73,7 +73,16 @@ const (
 	InEventX    = InputBase + 0x18 // i32 cursor x at event time
 	InEventY    = InputBase + 0x1C // i32 cursor y at event time
 	InEventKey  = InputBase + 0x20 // u32 key code for key events (0 for mouse events)
+	// User-adjustable slider knobs: NumSliders contiguous i32 registers the operator
+	// sets from the console (POST /slider). They live in the same HMI input region so
+	// a cell reaches them through the same "HMI input" capability boundary as the
+	// mouse, and reads them read-only — the operator owns the value.
+	InSlider0 = InputBase + 0x24 // i32 slider 0; slider i is at InSlider0 + i*4
 )
+
+// NumSliders is the count of operator slider knobs exposed as hmi_slider0..N-1.
+// The last register (InSlider0 + (NumSliders-1)*4) must stay below InputEnd.
+const NumSliders = 8
 
 // Input event type codes shared with the edge Input Gateway.
 const (
@@ -1189,6 +1198,25 @@ func (rm *RuntimeManager) WriteInputEvent(ev InputEvent) error {
 		rm.writeU32(InEventY, uint32(ev.Y))
 		rm.writeU32(InEventKey, ev.Key)
 	}
+	return nil
+}
+
+// SetSlider writes one operator slider knob into the HMI input register. Sliders
+// are the user's continuous controls (speed, gravity, hue, …): a cell READS them
+// like any other HMI field but can never write them (they sit in the read-only
+// input region). index selects the slider in [0,NumSliders); out of range is a
+// no-op error. Serialized against trampoline execution like WriteInputEvent.
+func (rm *RuntimeManager) SetSlider(index int, value int32) error {
+	if index < 0 || index >= NumSliders {
+		return fmt.Errorf("slider index %d out of range [0,%d)", index, NumSliders)
+	}
+	rm.mu.Lock()
+	defer rm.mu.Unlock()
+	if rm.sharedMem == nil {
+		return fmt.Errorf("shared memory unavailable")
+	}
+	rm.inputActive = true
+	rm.writeU32(uint32(InSlider0+index*4), uint32(value))
 	return nil
 }
 

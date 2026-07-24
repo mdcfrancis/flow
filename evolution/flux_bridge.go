@@ -96,6 +96,19 @@ var hmiFields = map[string]flux.Field{
 	"hmi_key":        {Type: flux.TInt, Offset: 0x50020, ReadOnly: true}, // key code for key events
 }
 
+// Register the operator slider knobs (hmi_slider0..NumSliders-1): read-only i32
+// inputs the user drags from the console, so every cell can read a live knob
+// (speed, gravity, hue, …). Offsets mirror execution.InSlider0 (0x50024) and
+// NumSliders (8); TestHMISliderOffsetsMatchRuntime guards the mirror against drift.
+func init() {
+	const sliderBase, sliderCount = 0x50024, 8
+	for i := 0; i < sliderCount; i++ {
+		hmiFields[fmt.Sprintf("hmi_slider%d", i)] = flux.Field{
+			Type: flux.TInt, Offset: uint32(sliderBase + i*4), ReadOnly: true,
+		}
+	}
+}
+
 // LayoutFromContract turns the app's shared-state contract into a Flux field
 // Layout (name → type + offset). Only the scalar types Flux v1 lowers are
 // included; array/unknown fields are omitted (a Flux cell that reads one fails

@@ -123,6 +123,46 @@ func (is *InputServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// SliderServer is the edge half of the operator's slider controls: it accepts a
+// {index,value} pair over HTTP and writes it into the HMI slider register, where
+// guest cells poll it READ-ONLY. Unlike the mouse pipeline these are the user's
+// deliberate continuous knobs (speed, gravity, hue, …); a cell can read a live
+// value but never write it.
+type SliderServer struct {
+	rm   *execution.RuntimeManager
+	flow func(kind, source, summary string)
+}
+
+// NewSliderServer builds a slider gateway that writes into rm's HMI register.
+func NewSliderServer(rm *execution.RuntimeManager) *SliderServer { return &SliderServer{rm: rm} }
+
+// sliderWire is the JSON envelope the console posts when a knob moves.
+type sliderWire struct {
+	Index int   `json:"index"`
+	Value int32 `json:"value"`
+}
+
+// ServeHTTP decodes one slider change and latches it into the HMI register.
+func (ss *SliderServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "slider requires POST", http.StatusMethodNotAllowed)
+		return
+	}
+	var sw sliderWire
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<10)).Decode(&sw); err != nil {
+		http.Error(w, "bad slider: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	if err := ss.rm.SetSlider(sw.Index, sw.Value); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if ss.flow != nil {
+		ss.flow("input", "hmi", fmt.Sprintf("slider %d = %d", sw.Index, sw.Value))
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
 // CanvasUiEngine extracts vector draw streams from UI cells.
 type CanvasUiEngine struct {
 	rm *execution.RuntimeManager
@@ -358,6 +398,10 @@ li{padding:2px 0;font-family:ui-monospace,monospace;font-size:12px}
 <canvas id="c" width="320" height="240" tabindex="0" style="width:640px;height:480px;cursor:crosshair;outline:none"></canvas>
 <p id="s" class="muted"></p>
 <p class="muted">Click / move / type over the canvas — events route through the HMI input register.</p>
+<div id="sliderpanel">
+  <div id="sliders" class="row" style="flex-wrap:wrap;gap:14px;margin:6px 0"></div>
+  <p class="muted" style="font-size:12px;margin:2px 0">Operator sliders → HMI register; any cell can read them live as <code>hmi_slider0..7</code>.</p>
+</div>
 
 <h1>Cells</h1>
 <p class="muted" style="font-size:12px;margin:2px 0">Click a cell to inspect its tests &amp; constraints.</p>
@@ -431,6 +475,14 @@ cv.addEventListener('mouseup',e=>{const p=cxy(e);post({type:'up',x:p.x,y:p.y,but
 cv.addEventListener('click',e=>{cv.focus();const p=cxy(e);post({type:'click',x:p.x,y:p.y,buttons:1,mods:mods(e)});});
 cv.addEventListener('keydown',e=>{post({type:'keydown',x:0,y:0,key:e.keyCode,mods:mods(e)});if(e.key===' ')e.preventDefault();});
 cv.addEventListener('keyup',e=>{post({type:'keyup',x:0,y:0,key:e.keyCode,mods:mods(e)});});
+// Operator sliders: NSLIDERS knobs POSTed to /slider, latched into the HMI register
+// and readable by any cell as hmi_slider0..N. The user owns these values.
+(function(){const box=document.getElementById('sliders');for(let i=0;i<8;i++){
+  const wrap=document.createElement('label');wrap.style.cssText='display:flex;align-items:center;gap:6px;font-size:12px;color:#8fa0bf';
+  const out=document.createElement('span');out.textContent='0';out.style.cssText='width:30px;text-align:right;color:#cdd6e6';
+  const r=document.createElement('input');r.type='range';r.min='0';r.max='255';r.value='0';
+  r.addEventListener('input',()=>{out.textContent=r.value;fetch('/slider',{method:'POST',body:JSON.stringify({index:i,value:parseInt(r.value,10)}),headers:{'Content-Type':'application/json'}}).catch(()=>{});});
+  wrap.appendChild(document.createTextNode('s'+i));wrap.appendChild(r);wrap.appendChild(out);box.appendChild(wrap);}})();
 async function refreshCells(){
   try{
     const cells=await (await fetch('/cells',{cache:'no-store'})).json();
@@ -617,6 +669,7 @@ type Services struct {
 	Canvas  *CanvasServer
 	Build   *BuildServer
 	Input   *InputServer
+	Slider  *SliderServer
 	Cells   func() []string
 	Status  func() status.Snapshot
 	Flow    func(kind, source, summary string) // optional data-flow log sink
@@ -706,6 +759,10 @@ func Serve(ctx context.Context, addr string, s Services) *http.Server {
 	if s.Input != nil {
 		s.Input.flow = s.Flow
 		mux.Handle("/input", s.Input)
+	}
+	if s.Slider != nil {
+		s.Slider.flow = s.Flow
+		mux.Handle("/slider", s.Slider)
 	}
 	if s.Status != nil {
 		mux.HandleFunc("/status", func(w http.ResponseWriter, r *http.Request) {
