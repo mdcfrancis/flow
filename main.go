@@ -2299,6 +2299,7 @@ func main() {
 	}
 	grower := appgen.NewGrower(ledger, router)
 	grower.Activity = activity
+	grower.FluxEnabled = os.Getenv("HDM_FLUX") != "" // seed scaffolds as no-op Flux, not WAT
 
 	// Resume: re-enroll application subsystems grown in previous sessions so the
 	// loop picks up where it left off (the ledger persists them; the in-memory
