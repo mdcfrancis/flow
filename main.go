@@ -2744,6 +2744,18 @@ func main() {
 			enroll := func(urn string) {
 				registry.Add(urn)
 				activity.SetCell(urn, status.CellNew)
+				// Focus the canvas on the app's render cell the MOMENT it comes online —
+				// don't wait for the whole grow to finish. A single stuck sibling (e.g. a
+				// spurious input cell) would otherwise keep the app off-screen forever, and
+				// the frame loop only ticks the FOCUSED app, so the simulation would also
+				// stay frozen at its init state. Only claim focus from a non-app default
+				// view; never steal it from an app already on screen.
+				if appNamespace(canvasSrv.Active()) == "" {
+					if desc, lerr := repo.Load(urn); lerr == nil && appgen.IsUISubsystem(desc.Semantics.FunctionalIntent) {
+						canvasSrv.SetActive(urn)
+						log.Printf("[APP] focused canvas on %s (render cell live — app now animating)", urn)
+					}
+				}
 			}
 			// Retry until it lands: GrowConcurrent is idempotent (CompileEnvelope
 			// refines an existing envelope; scaffolding skips already-live cells),
