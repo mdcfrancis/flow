@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/mdcfrancis/flow/compiler"
+	"github.com/mdcfrancis/flow/flux"
 	"github.com/mdcfrancis/flow/inference"
 	"github.com/mdcfrancis/flow/storage"
 )
@@ -29,21 +30,63 @@ When finished, reply with ONLY the final complete (module ...) form — no tool 
 
 `
 
+// fluxAgenticPreamble drives TEST-DRIVEN Flux authoring: the model writes a
+// (cell …) program, checks it compiles, and — the key step — RUNS it in the real
+// sandbox on inputs it chooses, reads the outputs, and iterates until the behavior
+// matches the goal. This turns synthesis from "guess the syntax" into an empirical
+// loop, which is what lets a model that has the logic but not the grammar converge.
+const fluxAgenticPreamble = `You author a cell in FLUX — a small typed functional language (its grammar, your exact typed fields, and a worked example are in the task below). You have TOOLS; USE them and ITERATE until the cell is correct — do not answer on the first draft.
+- find_docs / find_examples / read_doc: retrieve a relevant how-to or worked pattern.
+- flux_check(src): parse + type-check + lower your (cell …). It returns "ok" or the exact error (an unknown field, a type mismatch, a syntax slip). Fix EVERY error before running.
+- flux_run(src, inputs, steps): RUN your cell in the real sandbox for MANY ticks (set steps high enough — e.g. 30 — to reach the edge cases the GOAL implies) and read back each field's per-tick TRAJECTORY. This is how you VERIFY the FULL behavior over time, not just one tick.
+VALIDATE AGAINST THE GOAL, not only the acceptance checks: the checks are a floor, not the spec. Read the trajectory and confirm the cell does what the OBJECTIVE says — e.g. for "bounces off all four walls", run until the ball reaches a wall and confirm its position REVERSES (the trajectory turns around) and the velocity flips; it must NOT stop at the wall (clamp), freeze (flat line), or leave the screen. If the trajectory doesn't match the goal, fix the LOGIC and run again — even if the acceptance checks would already pass.
+Only after flux_run shows behavior that matches the GOAL, reply with ONLY the final complete (cell …) program — no tool call, no prose, no WAT.
+
+`
+
 // RunAgenticSieve synthesizes a cell with the CLIENT-SIDE agentic loop: the model may
 // call knowledge-base + compiler tools (retrieve a worked example, read a how-to,
 // compile-check a draft) while it works. The final WAT is extracted, assembled, and
 // entry-checked exactly like RunSieve, so its outcome plugs into the same verification
 // gates unchanged — the tools inform synthesis, they never bypass verification.
-func RunAgenticSieve(ctx context.Context, model ToolReasoner, ledger *storage.LedgerEngine, systemPrompt, seedContext, kind, intent string, contract *EntryContract) (*SieveOutcome, error) {
+func RunAgenticSieve(ctx context.Context, model ToolReasoner, ledger *storage.LedgerEngine, systemPrompt, seedContext, kind, intent string, layout flux.Layout, contract *EntryContract) (*SieveOutcome, error) {
 	cs := compiler.NewCompilerService()
-	tools, exec := buildAgenticTools(ledger, cs, kind, intent)
-	resp, err := model.InvokeTools(ctx, agenticPreamble+systemPrompt, seedContext, tools, exec, agenticMaxSteps)
+	// lastFlux captures the most recent (cell …) the model successfully checked or
+	// RAN via a tool. Models routinely do their real work in tool calls and then
+	// end with a summary/empty final message — without this, that verified program
+	// is thrown away ("empty source stream"). It is the fallback answer.
+	var lastFlux string
+	tools, exec := buildAgenticTools(ledger, cs, kind, intent, layout, &lastFlux)
+	preamble := agenticPreamble
+	if layout != nil {
+		preamble = fluxAgenticPreamble
+	}
+	resp, err := model.InvokeTools(ctx, preamble+systemPrompt, seedContext, tools, exec, agenticMaxSteps)
 	if err != nil {
 		return nil, fmt.Errorf("agentic sieve: %w", err)
 	}
-	wat := extractWAT(resp)
+	// Flux-aware: with a layout the model may answer with a (cell …) program, which
+	// is lowered to WAT here — the same path as the standard sieve. If the final
+	// message carries no usable program, fall back to the last one the model
+	// verified with a tool (its actual work).
+	wat, fluxSrc, ferr := candidateWAT(resp, layout)
+	if layout != nil && (ferr != nil || extractFlux(resp) == "") && lastFlux != "" {
+		if w, lerr := flux.Compile("cell", lastFlux, layout); lerr == nil {
+			log.Printf("[FLUX] agentic: final message had no program; using the last tool-verified (cell …)")
+			wat, fluxSrc, ferr = w, lastFlux, nil
+		}
+	}
+	if ferr != nil {
+		taxoWAT(fluxSrc, nil, ferr.Error())
+		return &SieveOutcome{WAT: fluxSrc, Raw: resp},
+			fmt.Errorf("agentic sieve: flux did not compile: %v", ferr)
+	}
+	if fluxSrc != "" {
+		log.Printf("[FLUX] agentic: lowered a model-authored (cell …) to WAT")
+	}
 	art, cerr := cs.CompileGenotype(wat)
 	if cerr != nil || art == nil || !art.SyntaxPassed {
+		taxoWAT(wat, art, "") // agentic final WAT — folded into the compile-stage buckets
 		line, msg := 0, "unknown"
 		if art != nil {
 			line, msg = art.ErrorLine, art.ErrorContext
@@ -53,17 +96,19 @@ func RunAgenticSieve(ctx context.Context, model ToolReasoner, ledger *storage.Le
 	}
 	if contract != nil {
 		if sigErr := checkEntrySignature(ctx, art.Bytecode, contract); sigErr != nil {
+			taxoWAT(wat, art, sigErr.Error())
 			return &SieveOutcome{Artifact: art, WAT: wat, Raw: resp},
 				fmt.Errorf("agentic sieve: entry contract unmet: %v", sigErr)
 		}
 	}
-	return &SieveOutcome{Artifact: art, WAT: wat, Iterations: 1, Raw: resp}, nil
+	taxoWAT(wat, art, "")
+	return &SieveOutcome{Artifact: art, WAT: wat, Flux: fluxSrc, Iterations: 1, Raw: resp}, nil
 }
 
 // buildAgenticTools returns the tool definitions and a Go executor bound to the
 // knowledge base + compiler. Every tool is read-only except that compile_check runs the
 // assembler (no side effects); the model's produced WAT is still fully verified later.
-func buildAgenticTools(ledger *storage.LedgerEngine, cs *compiler.CompilerService, kind, intent string) ([]inference.ToolDef, inference.ToolExec) {
+func buildAgenticTools(ledger *storage.LedgerEngine, cs *compiler.CompilerService, kind, intent string, layout flux.Layout, lastFlux *string) ([]inference.ToolDef, inference.ToolExec) {
 	defs := []inference.ToolDef{
 		{Name: "list_examples", Description: "List available worked WAT examples (id + one-line semantics) for this cell's kind.", Parameters: objSchema(nil, nil)},
 		{Name: "find_examples", Description: "Search worked WAT examples by a query; returns the best matches with their WAT.", Parameters: objSchema(map[string]string{"query": "what you want a worked example of"}, []string{"query"})},
@@ -71,6 +116,14 @@ func buildAgenticTools(ledger *storage.LedgerEngine, cs *compiler.CompilerServic
 		{Name: "find_docs", Description: "Search how-to documents on architectural patterns; returns titles + bodies.", Parameters: objSchema(map[string]string{"query": "the topic to look up"}, []string{"query"})},
 		{Name: "read_doc", Description: "Return the full body of one document by id.", Parameters: objSchema(map[string]string{"id": "the document id"}, []string{"id"})},
 		{Name: "compile_check", Description: "Assemble a WAT (module ...) through the HDM assembler; returns 'ok' or the exact error. Use before finalizing.", Parameters: objSchema(map[string]string{"wat": "the full WAT module source"}, []string{"wat"})},
+	}
+	// In Flux mode, add the test-driven authoring tools: check a (cell …) program
+	// and RUN it in the real sandbox on chosen inputs to verify behavior.
+	if layout != nil {
+		defs = append(defs,
+			inference.ToolDef{Name: "flux_check", Description: "Parse, type-check, and lower a Flux (cell …) program; returns 'ok' or the exact error (unknown field, type mismatch, syntax). Use before flux_run.", Parameters: objSchema(map[string]string{"src": "the full (cell …) Flux program"}, []string{"src"})},
+			inference.ToolDef{Name: "flux_run", Description: "Run your Flux (cell …) in the real sandbox for several ticks with inputs you choose, and get back each writable field's per-tick TRAJECTORY (or the drawn shapes) — so you can see the full behavior over time, not just one step. Use enough steps to reach the edge cases the GOAL implies (e.g. the ball hitting a wall) and confirm it behaves right (reverses/bounces, doesn't stop or leave the screen). inputs is a JSON object of field→integer; steps defaults to 12.", Parameters: objSchema(map[string]string{"src": "the full (cell …) Flux program", "inputs": "JSON object mapping field names to integers, e.g. {\"ball_x\":300,\"ball_vx\":5,\"screen_width\":320}", "steps": "how many ticks to run (integer; use enough to reach an edge case, e.g. 30)"}, []string{"src", "inputs"})},
+		)
 	}
 	exec := func(name, argsJSON string) string {
 		args := map[string]any{}
@@ -126,7 +179,19 @@ func buildAgenticTools(ledger *storage.LedgerEngine, cs *compiler.CompilerServic
 			}
 			return "no document with that id"
 		case "compile_check":
-			art, err := cs.CompileGenotype(getStr("wat"))
+			src := getStr("wat")
+			// Flux-aware: if the model checks a (cell …) program, lower it first so the
+			// error it gets back is the Flux (semantic) error, not "expected module".
+			if layout != nil {
+				if f := extractFlux(src); f != "" {
+					w, lerr := flux.Compile("cell", f, layout)
+					if lerr != nil {
+						return "FLUX COMPILE ERROR: " + lerr.Error()
+					}
+					src = w
+				}
+			}
+			art, err := cs.CompileGenotype(src)
 			if err != nil || art == nil || !art.SyntaxPassed {
 				line, msg := 0, "unknown"
 				if art != nil {
@@ -138,6 +203,35 @@ func buildAgenticTools(ledger *storage.LedgerEngine, cs *compiler.CompilerServic
 				return fmt.Sprintf("COMPILE ERROR (line %d): %s", line, msg)
 			}
 			return "ok: assembles cleanly"
+		case "flux_check":
+			if layout == nil {
+				return "flux_check is unavailable for this cell"
+			}
+			if _, err := flux.Compile("cell", getStr("src"), layout); err != nil {
+				return "FLUX ERROR: " + err.Error()
+			}
+			if lastFlux != nil {
+				*lastFlux = getStr("src") // a verified program — the fallback answer
+			}
+			return "ok: parses, type-checks, and lowers to WASM"
+		case "flux_run":
+			if layout == nil {
+				return "flux_run is unavailable for this cell"
+			}
+			steps := 12
+			if v, ok := args["steps"].(float64); ok && v >= 1 {
+				if steps = int(v); steps > 64 {
+					steps = 64
+				}
+			}
+			out, err := runFluxCell(layout, getStr("src"), getStr("inputs"), steps)
+			if err != nil {
+				return "RUN ERROR: " + err.Error()
+			}
+			if lastFlux != nil {
+				*lastFlux = getStr("src") // ran successfully — the best fallback answer
+			}
+			return out
 		}
 		return "unknown tool: " + name
 	}

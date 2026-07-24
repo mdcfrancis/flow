@@ -98,7 +98,7 @@ func (c *LocalModelClient) InvokeTools(ctx context.Context, sysPrompt, userCtx s
 // toolRound issues one chat-completions request (with the reconnect/retry window) and
 // returns the assistant message (content + any tool_calls).
 func (c *LocalModelClient) toolRound(ctx context.Context, messages, tools []any) (respMessage, error) {
-	body := map[string]any{"model": c.model, "temperature": 0.0, "max_tokens": 4096, "messages": messages}
+	body := map[string]any{"model": c.model, "temperature": 0.0, "max_tokens": 4096, "messages": messages, "chat_template_kwargs": disableThinking}
 	if len(tools) > 0 {
 		body["tools"] = tools
 	}

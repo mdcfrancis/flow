@@ -166,7 +166,7 @@ PARTNER %s:
 		return fr, nil
 	}
 
-	newDescHash, _, err := o.repo.PutCell(target, sieve.WAT, sieve.Artifact.Bytecode, tDesc.Semantics, tDesc.Saliency)
+	newDescHash, _, err := o.repo.PutCell(target, sieve.Genotype(), sieve.Artifact.Bytecode, tDesc.Semantics, tDesc.Saliency)
 	if err != nil {
 		return nil, fmt.Errorf("persist fused descriptor: %w", err)
 	}

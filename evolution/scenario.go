@@ -342,35 +342,8 @@ func matchRead(rd SeedWrite, before, after []uint32) bool {
 
 // matchScenario reports whether the observed output satisfies the expectation.
 func matchScenario(sc Scenario, results []uint64, frames [][]DrawRecord, reads, pre, traj [][]uint32) bool {
-	e := sc.Expect
-	// Shared-memory postconditions (contract coordination).
-	for i, rd := range e.Reads {
-		if i >= len(reads) {
-			return false
-		}
-		var before []uint32
-		if i < len(pre) {
-			before = pre[i]
-		}
-		if !matchRead(rd, before, reads[i]) {
-			return false
-		}
-	}
-	if e.Result != nil {
-		if len(results) == 0 || int32(uint32(results[0])) != *e.Result {
-			return false
-		}
-	}
-	if e.Draw != nil && !matchDraw(*e.Draw, frames) {
-		return false
-	}
-	// Trajectory postconditions: whole-path properties across the run.
-	for i, t := range e.Trajectory {
-		if i >= len(traj) || !matchTrajectory(t, traj[i]) {
-			return false
-		}
-	}
-	return true
+	ok, _ := matchScenarioReason(sc, results, frames, reads, pre, traj)
+	return ok
 }
 
 // matchTrajectory evaluates one trajectory assertion against the per-step value

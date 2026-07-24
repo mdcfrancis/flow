@@ -246,6 +246,13 @@ const maxIdleBackoff = 8
 // (a var, not a const), so it can be refined toward the correct+efficient objective.
 var maxStallRetries = 3
 
+// maxIterateCap is the hard ceiling on judge-extended iterations: once the base
+// retry budget is spent, an LLM judge decides per-frame whether the working draft
+// is still progressing (keep deepening) or blocked (unwind). This caps how far the
+// judge can extend iteration before the cell is unwound regardless, so a cell the
+// judge keeps calling "progressing" can never loop forever.
+var maxIterateCap = 8
+
 // applyPolicy loads the evolvable Policy and applies its tunable judgement calls to the
 // running loop. Called at startup and each fixpoint so a tuned policy takes effect. The
 // vision interval keeps its env override (HDM_VISION_INTERVAL) precedence.
@@ -520,7 +527,26 @@ func retryStalled(ctx context.Context, orch *evolution.Orchestrator, all []strin
 			n++
 			continue
 		}
-		// Budget exhausted: maybe the TESTS are wrong, not the cell. Re-judge the
+		// DFS unwind decision: the base retry budget is spent, but rather than
+		// unwinding immediately, ask the LLM JUDGE whether the working DRAFT is still
+		// progressing toward the goal. Keep DEEPENING iteration on the draft while it
+		// is (up to the hard cap); only UNWIND — clear the draft, so synthesis
+		// restarts from the last commit, and advance the recovery ladder — when the
+		// judge says the draft is BLOCKED.
+		if fs.Retries < maxIterateCap {
+			if prog, why := orch.JudgeProgress(ctx, u); prog {
+				persist(u, evolution.FrictionState{Retries: fs.Retries + 1, Root: root})
+				activity.Event("mutate", u, "judged progressing — deepening iteration")
+				log.Printf("[JUDGE] %s progressing — deepening iteration (attempt %d/%d): %s", u, fs.Retries+1, maxIterateCap, why)
+				n++
+				continue
+			} else {
+				orch.UnwindDraft(u)
+				persist(u, evolution.FrictionState{Retries: maxIterateCap, Root: root}) // stop re-judging; hand off to the ladder
+				log.Printf("[JUDGE] %s blocked — unwinding to last commit before recertify/boundary/fracture: %s", u, why)
+			}
+		}
+		// Budget exhausted (or judged blocked): maybe the TESTS are wrong, not the cell. Re-judge the
 		// suite against the goal; if unfaithful checks are dropped, restart it.
 		if kept, dropped, err := orch.RecertifySuite(ctx, u); err == nil && dropped > 0 {
 			persist(u, evolution.FrictionState{Root: root}) // reset retries, un-park
@@ -943,6 +969,22 @@ func appNamespace(urn string) string {
 		return ""
 	}
 	return prefix + rest
+}
+
+// isRenderCell reports whether a cell draws to the canvas — the signal the canvas
+// uses to auto-focus a freshly-grown app. It matches the same intent predicate the
+// frame loop trusts (IsUISubsystem), but also falls back to the ground truth in the
+// genotype — a render cell exports "render-frame" (WAT) or declares a Flux "(draw"
+// block — so a render cell whose intent text happens to miss the keyword list still
+// brings the app on-screen rather than leaving it invisible behind a default view.
+func isRenderCell(repo *manifest.Repository, desc *manifest.NodeDescriptor) bool {
+	if appgen.IsUISubsystem(desc.Semantics.FunctionalIntent) {
+		return true
+	}
+	if src, err := repo.Genotype(desc); err == nil {
+		return strings.Contains(src, "render-frame") || strings.Contains(src, "(draw")
+	}
+	return false
 }
 
 // challengeArchitectures asks, for each fully-complete grown application, whether
@@ -2209,6 +2251,14 @@ func main() {
 	//    recording isolation passes.
 	orchestrator := evolution.NewOrchestrator(ledger, router)
 	orchestrator.Gravity = codependency.NewTracker(ledger)
+	// Flux functional-IR synthesis path (opt-in via HDM_FLUX): the sieve accepts a
+	// model that authors a Flux (cell …) program, lowered to WAT against the app
+	// contract. Off by default — raw-WAT synthesis is unchanged. See
+	// docs/functional-ir.md.
+	if os.Getenv("HDM_FLUX") != "" {
+		orchestrator.FluxEnabled = true
+		log.Printf("[FLUX] functional-IR synthesis path enabled (HDM_FLUX)")
+	}
 	// Route the evolution-loop sieve by the target cell's kind (render → vision,
 	// compute/leaf → code). Injected to avoid an evolution→appgen import cycle.
 	orchestrator.SieveModelType = func(urn string) inference.ModelType {
@@ -2249,6 +2299,7 @@ func main() {
 	}
 	grower := appgen.NewGrower(ledger, router)
 	grower.Activity = activity
+	grower.FluxEnabled = os.Getenv("HDM_FLUX") != "" // seed scaffolds as no-op Flux, not WAT
 
 	// Resume: re-enroll application subsystems grown in previous sessions so the
 	// loop picks up where it left off (the ledger persists them; the in-memory
@@ -2401,6 +2452,26 @@ func main() {
 		Status:  activity.Snapshot,
 		Flow:    activity.Flow,
 		Inspect: func(urn string) any { return inspectCell(ctx, ledger, orchestrator, urn) },
+		Flux: func(urn string) string {
+			// The cell's source genome — its Flux (cell …) program (or WAT).
+			genome := ""
+			if desc, err := repo.Load(urn); err == nil {
+				if src, err := repo.Genotype(desc); err == nil {
+					genome = src
+				}
+			}
+			// A committed Flux genome is authoritative — show it.
+			if strings.HasPrefix(strings.TrimSpace(genome), "(cell") {
+				return genome
+			}
+			// Otherwise the cell is still a WAT stub (not yet Flux-converged). Show
+			// the latest Flux the model authored for it, clearly marked, so the
+			// console reflects the Flux work-in-progress rather than the stub.
+			if draft := evolution.LoadFluxDraft(ledger, urn); draft != "" {
+				return "; ⚠ latest Flux draft — NOT yet committed (the running cell is still WAT below the fold)\n" + draft
+			}
+			return genome
+		},
 		Objective: func() string {
 			ns := appNamespace(canvasSrv.Active())
 			if ns == "" {
@@ -2690,6 +2761,18 @@ func main() {
 			enroll := func(urn string) {
 				registry.Add(urn)
 				activity.SetCell(urn, status.CellNew)
+				// Focus the canvas on the app's render cell the MOMENT it comes online —
+				// don't wait for the whole grow to finish. A single stuck sibling (e.g. a
+				// spurious input cell) would otherwise keep the app off-screen forever, and
+				// the frame loop only ticks the FOCUSED app, so the simulation would also
+				// stay frozen at its init state. Only claim focus from a non-app default
+				// view; never steal it from an app already on screen.
+				if appNamespace(canvasSrv.Active()) == "" {
+					if desc, lerr := repo.Load(urn); lerr == nil && isRenderCell(repo, desc) {
+						canvasSrv.SetActive(urn)
+						log.Printf("[APP] focused canvas on %s (render cell live — app now animating)", urn)
+					}
+				}
 			}
 			// Retry until it lands: GrowConcurrent is idempotent (CompileEnvelope
 			// refines an existing envelope; scaffolding skips already-live cells),

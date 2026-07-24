@@ -3,9 +3,11 @@ package evolution
 import (
 	"context"
 	"fmt"
+	"log"
 	"strings"
 
 	"github.com/mdcfrancis/flow/compiler"
+	"github.com/mdcfrancis/flow/flux"
 	"github.com/tetratelabs/wazero"
 	"github.com/tetratelabs/wazero/api"
 )
@@ -18,10 +20,24 @@ type Reasoner interface {
 
 // SieveOutcome reports the result of the inner recursive synthesis loop.
 type SieveOutcome struct {
-	Artifact   *compiler.CompilationArtifact
-	WAT        string
+	Artifact *compiler.CompilationArtifact
+	WAT      string
+	// Flux is the model's Flux source when the cell was authored in Flux. It is
+	// the GENOME for such cells (WAT is a derived artifact): stored on commit and
+	// shown back to the next solver frame so synthesis refines it, not restarts.
+	Flux       string
 	Iterations int
 	Raw        string // the model's full final response (for structural NEW-PRIMITIVE extraction)
+}
+
+// Genotype is the source to persist as the cell's genome: the Flux program when
+// authored in Flux, otherwise the WAT. The phenotype (bytecode) is identical
+// either way — Flux is lowered to that WAT.
+func (s *SieveOutcome) Genotype() string {
+	if s.Flux != "" {
+		return s.Flux
+	}
+	return s.WAT
 }
 
 // EntryContract is the exact signature a synthesized cell's entry export must
@@ -46,6 +62,14 @@ var (
 // thus entry-agnostic — a cell is evolved against whichever monadic entry it
 // implements.
 func entryContractFor(genotype string) *EntryContract {
+	// A Flux genome names its shape by its terminal: a view cell has a (draw …),
+	// a compute cell a (write …). WAT names it by the export.
+	if strings.Contains(genotype, "(cell") {
+		if strings.Contains(genotype, "(draw") {
+			return RenderFrameContract
+		}
+		return RunTickContract
+	}
 	if strings.Contains(genotype, `"render-frame"`) {
 		return RenderFrameContract
 	}
@@ -61,44 +85,77 @@ func entryContractFor(genotype string) *EntryContract {
 // candidate to export the named entry with the exact signature; a mismatch is
 // treated like a compile failure and fed back to the model for repair.
 func RunSieve(ctx context.Context, model Reasoner, systemPrompt, seedContext string, maxIters int, contract ...*EntryContract) (*SieveOutcome, error) {
-	if maxIters < 1 {
-		maxIters = 1
-	}
 	var want *EntryContract
 	if len(contract) > 0 {
 		want = contract[0]
 	}
+	return runSieve(ctx, model, systemPrompt, seedContext, maxIters, nil, want)
+}
+
+// RunSieveWithLayout is the Flux-aware inner loop: given a shared-state field
+// layout it accepts a model that authors a Flux (cell …) program (lowered to WAT
+// here) as well as one that emits raw WAT — both feed the identical downstream
+// verification. A nil layout is exactly RunSieve.
+func RunSieveWithLayout(ctx context.Context, model Reasoner, systemPrompt, seedContext string, maxIters int, layout flux.Layout, want *EntryContract) (*SieveOutcome, error) {
+	return runSieve(ctx, model, systemPrompt, seedContext, maxIters, layout, want)
+}
+
+func runSieve(ctx context.Context, model Reasoner, systemPrompt, seedContext string, maxIters int, layout flux.Layout, want *EntryContract) (*SieveOutcome, error) {
+	if maxIters < 1 {
+		maxIters = 1
+	}
 	cs := compiler.NewCompilerService()
 	payload := seedContext
 	var last *compiler.CompilationArtifact
-	var lastSigErr error
+	var lastSigErr, lastFluxErr error
 
 	for i := 1; i <= maxIters; i++ {
 		resp, err := model.InvokeReasoning(ctx, systemPrompt, payload)
 		if err != nil {
 			return nil, fmt.Errorf("sieve iteration %d: reasoning invocation failed: %w", i, err)
 		}
-		wat := extractWAT(resp)
+		wat, fluxSrc, ferr := candidateWAT(resp, layout)
+		if ferr != nil {
+			// The model authored Flux that did not compile — feed the semantic
+			// error back. No assembler artifact exists this round.
+			lastFluxErr = ferr
+			last = nil
+			log.Printf("[FLUX] model authored a (cell …) that did not compile: %v", ferr)
+			taxoWAT(fluxSrc, nil, ferr.Error())
+			payload = fluxCorrectionDirective(ferr)
+			continue
+		}
+		if fluxSrc != "" {
+			log.Printf("[FLUX] lowered a model-authored (cell …) to WAT for synthesis")
+		}
 		art, cerr := cs.CompileGenotype(wat)
 		last = art
 		if cerr == nil && art != nil && art.SyntaxPassed {
 			// Syntax cleared; now enforce the entry contract if one was given.
 			if want == nil {
-				return &SieveOutcome{Artifact: art, WAT: wat, Iterations: i, Raw: resp}, nil
+				taxoWAT(wat, art, "")
+				return &SieveOutcome{Artifact: art, WAT: wat, Flux: fluxSrc, Iterations: i, Raw: resp}, nil
 			}
 			if sigErr := checkEntrySignature(ctx, art.Bytecode, want); sigErr != nil {
+				taxoWAT(wat, art, sigErr.Error()) // assembled, but type/stack/signature invalid
 				lastSigErr = sigErr
 				payload = signatureCorrectionDirective(want, sigErr)
 				continue
 			}
-			return &SieveOutcome{Artifact: art, WAT: wat, Iterations: i, Raw: resp}, nil
+			taxoWAT(wat, art, "")
+			return &SieveOutcome{Artifact: art, WAT: wat, Flux: fluxSrc, Iterations: i, Raw: resp}, nil
 		}
+		taxoWAT(wat, art, "") // syntax fault — classified from the assembler artifact
 		payload = correctionDirective(art)
 	}
 
 	if lastSigErr != nil {
 		return &SieveOutcome{Artifact: last, Iterations: maxIters},
 			fmt.Errorf("sieve did not converge within %d iterations: entry contract unmet: %v", maxIters, lastSigErr)
+	}
+	if last == nil && lastFluxErr != nil {
+		return &SieveOutcome{Iterations: maxIters},
+			fmt.Errorf("sieve did not converge within %d iterations: flux did not compile: %v", maxIters, lastFluxErr)
 	}
 	line, msg := 0, "unknown"
 	if last != nil {

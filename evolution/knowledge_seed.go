@@ -25,6 +25,32 @@ const seedDrawAtPositionWAT = `(module
 // seedDocs is the starter DOCUMENT set — the ABI/pattern knowledge that today lives only
 // inside evolution.Capabilities and the prompts, lifted into the retrievable store.
 var seedDocs = []Document{
+	// System-level DESIGN docs — no Kinds, so they are relevant to every retrieval
+	// and, in particular, surface for the whole-app design pass (AuthorPlan), which
+	// reasons across components rather than about one entry. These describe HOW to
+	// decompose and connect an app, not how to write one cell.
+	{Topic: "tick-loop-architecture", Title: "Decompose a real-time app into a tick loop of single-job cells",
+		Provenance: "seed",
+		Body: "A live app is a set of cells that all run every tick/frame and coordinate ONLY through " +
+			"shared-state fields — never by calling each other. The canonical decomposition: an INPUT cell " +
+			"reads the HMI register and writes control fields (e.g. player_x); one or more COMPUTE cells read " +
+			"state, advance the simulation (positions, velocities, collisions, score) and write it back; a " +
+			"RENDER cell reads the state and draws every entity at the value it reads. Give each cell ONE entry " +
+			"and ONE job — if a cell would both simulate and draw, split it into a compute cell and a render cell."},
+	{Topic: "coordinate-through-state", Title: "Connect components as an ordered sequence of shared-field handoffs",
+		Provenance: "seed",
+		Body: "Design the choreography as: which field is written first each tick, and which cell reads it next. " +
+			"A writer stores a field at an offset; its reader loads the SAME offset. State written this tick is " +
+			"visible next tick, so order the sequence input → physics → render. Name every handoff explicitly " +
+			"(input writes player_x; physics reads player_x and the ball, updates ball_x/ball_y; render reads all " +
+			"of them and draws). A field with a writer but no reader, or a reader with no writer, is a design bug."},
+	{Topic: "simulate-then-view", Title: "Separate the model (state) from the view (drawing)",
+		Provenance: "seed",
+		Body: "Keep the simulation and the rendering in different cells. The simulation owns the truth: it " +
+			"integrates positions and velocities, resolves collisions, and updates score/lives, writing all of " +
+			"it to shared state. The view is a pure function of that state — each frame it reads the fields and " +
+			"draws, holding no state of its own and moving nothing. This makes motion verifiable: the physics " +
+			"cell is checked on the state trajectory, the view on drawing AT the state it reads."},
 	{Topic: "draw-at-position", Title: "Read a contract field and draw at it",
 		Kinds:      []string{"render"},
 		Provenance: "seed",

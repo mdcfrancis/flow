@@ -21,6 +21,30 @@ type ContractField struct {
 	Offset int    `json:"offset"` // absolute shared-memory offset (sandbox region)
 	Type   string `json:"type"`   // e.g. "i32", "i32[40]"
 	Desc   string `json:"desc"`
+	// Init is the field's initial value — the MOCK/boot state authored during the
+	// specification phase. It is what every cell is tested against (a scenario
+	// baseline) and what the live app boots from, so a cell that reads a config
+	// field (e.g. screen_width) or a sibling-produced field sees a real value
+	// instead of zero. A test case overrides it for the specific field it exercises.
+	Init int `json:"init,omitempty"`
+}
+
+// InitSeeds renders the contract's initialization as a baseline set of seeds — one
+// per scalar field at its Init value. Prepended to a scenario's own seeds it mocks
+// the whole world the cell runs in; overlaid on live boot it starts the app in a
+// valid, moving state. Array fields are skipped (no scalar init).
+func (c *AppContract) InitSeeds() []SeedWrite {
+	if c == nil {
+		return nil
+	}
+	var out []SeedWrite
+	for _, f := range c.Fields {
+		if typeWords(f.Type) != 1 { // scalars only
+			continue
+		}
+		out = append(out, SeedWrite{At: fmt.Sprintf("0x%X", f.Offset), U32: []uint32{uint32(int32(f.Init))}})
+	}
+	return out
 }
 
 // AppContract is the shared-state layout every subsystem of an app agrees on.

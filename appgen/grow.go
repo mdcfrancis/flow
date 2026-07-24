@@ -266,6 +266,11 @@ type Grower struct {
 	sieve     *compiler.CompilerService
 	model     Reasoner
 	SieveIter int
+	// FluxEnabled mirrors the orchestrator's Flux path: when on, a freshly
+	// scaffolded cell is seeded with a no-op FLUX program (not a WAT skeleton), so
+	// the stored genome is Flux from birth and the synthesis loop iterates on a
+	// Flux draft ("improve THIS") instead of building from scratch atop WAT.
+	FluxEnabled bool
 	// Activity, when set, receives growth progress so the console can show the
 	// app being scaffolded subsystem by subsystem. Optional; nil-safe.
 	Activity evolution.ActivitySink
@@ -640,7 +645,7 @@ func (g *Grower) scaffold(ctx context.Context, env *AppEnvelope, sub Subsystem) 
 		// static scene and nothing moves. Author them from the contract and append
 		// to the draw-floor scenarios.
 		if contract != nil {
-			if coord := g.authorCoordination(ctx, sub.Semantics, contract, env.ApplicationNamespace, true); coord != nil && len(coord.Scenarios) > 0 {
+			if coord := g.authorCoordination(ctx, sub.Semantics, contract, env.ApplicationNamespace, true, sub.Writes); coord != nil && len(coord.Scenarios) > 0 {
 				if suite == nil {
 					suite = &evolution.AcceptanceSuite{}
 				}
@@ -649,7 +654,7 @@ func (g *Grower) scaffold(ctx context.Context, env *AppEnvelope, sub Subsystem) 
 		}
 	default:
 		if contract != nil {
-			suite = g.authorCoordination(ctx, sub.Semantics, contract, env.ApplicationNamespace, false)
+			suite = g.authorCoordination(ctx, sub.Semantics, contract, env.ApplicationNamespace, false, sub.Writes)
 		}
 		if suiteCount(suite) == 0 { // no contract, or authoring produced nothing
 			suite = g.acceptance(ctx, sub)
@@ -920,6 +925,16 @@ Output ONLY a single (module ...) form — no prose, no markdown fences.
 // (render-frame) or compute (run-tick) contract from its semantics, and falling
 // back to a minimal valid skeleton if the model cannot produce a compilable one.
 func (g *Grower) genesis(ctx context.Context, env *AppEnvelope, sub Subsystem, wit string) (string, []byte) {
+	// Flux mode: seed a deterministic no-op FLUX cell so the genome is Flux from
+	// birth and the synthesis loop iterates on a Flux draft rather than a WAT
+	// skeleton. Falls through to WAT genesis when the app has no Flux-addressable
+	// contract (or the no-op doesn't compile) — exactly where the orchestrator's
+	// Flux path also falls back to WAT.
+	if g.FluxEnabled {
+		if src, bc, ok := g.seedNoopFlux(env, sub); ok {
+			return src, bc
+		}
+	}
 	ui := kindOf(sub) == KindRender
 	contract := `export a function named exactly "run-tick" with signature (param i32 i32) (result i32)`
 	if ui {

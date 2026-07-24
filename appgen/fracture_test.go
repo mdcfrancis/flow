@@ -77,12 +77,26 @@ func TestAuthorCoordinationProducesScenarios(t *testing.T) {
 		{Name: "player_x", Offset: 0xB0000, Type: "i32"},
 		{Name: "player_input", Offset: 0xB0004, Type: "i32"},
 	}}
-	suite := g.authorCoordination(context.Background(), "update player_x from player_input", c, "urn:hdm:apps:si", false)
-	if suite == nil || len(suite.Scenarios) != 1 || suite.Scenarios[0].Name != "moves_right" {
-		t.Fatalf("authorCoordination = %+v, want 1 scenario 'moves_right'", suite)
+	suite := g.authorCoordination(context.Background(), "update player_x from player_input", c, "urn:hdm:apps:si", false, []string{"player_x"})
+	if suite == nil {
+		t.Fatal("authorCoordination returned nil")
 	}
-	if len(suite.Scenarios[0].Expect.Reads) != 1 {
-		t.Fatalf("scenario should carry a reads postcondition, got %+v", suite.Scenarios[0].Expect)
+	names := map[string]bool{}
+	for _, s := range suite.Scenarios {
+		names[s.Name] = true
+	}
+	// The model's coordination scenario is kept...
+	if !names["moves_right"] {
+		t.Fatalf("model coordination scenario 'moves_right' missing: %+v", suite.Scenarios)
+	}
+	// ...and a DIRECTIONAL motion scenario is generated for the written state field
+	// (so a state cell is graded on behavior, not its return value).
+	if !names["moves_player_x"] {
+		t.Fatalf("directional motion scenario 'moves_player_x' missing: %+v", suite.Scenarios)
+	}
+	// A state-writing cell must not carry scalar int-in/int-out tests.
+	if len(suite.Tests) != 0 {
+		t.Fatalf("state-writing cell must drop scalar tests, got %+v", suite.Tests)
 	}
 }
 

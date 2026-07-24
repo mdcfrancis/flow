@@ -32,6 +32,10 @@ implementation of it. Output ONLY JSON, no prose or fences:
   ]
 }
 Rules:
+- If ARCHITECTURAL GUIDANCE is provided, follow it — it is proven design knowledge
+  for this runtime (how to decompose the tick loop, coordinate through shared state,
+  and separate simulation from view). Make your choreography and steps consistent
+  with it.
 - Every step must be concrete enough to implement directly (name the exact shared
   field, the condition, and the update — e.g. "if the HMI keydown is 'd' (68),
   add the step to player_x, then clamp player_x to [0, 300]").
@@ -58,8 +62,9 @@ writes. Output ONLY JSON, no prose or fences:
   "steps": ["<ordered, directly-implementable algorithm step naming exact fields>"],
   "interactions": ["<handoff to/from a sibling via a shared field>"],
   "invariants": ["<a condition that must always hold>"] }
-Every step must name the exact shared field and the concrete update. A view/render
-component reads the state and draws entities AT the values it reads. A component that
+If ARCHITECTURAL GUIDANCE is provided, follow it — it is proven design knowledge for
+this runtime. Every step must name the exact shared field and the concrete update. A
+view/render component reads the state and draws entities AT the values it reads. A component that
 COLORS by a scalar value must map it to a HIGH-CONTRAST color — a sentinel/extreme
 value (e.g. max iterations = "in the set") is BLACK, others sweep a bright gradient —
 spanning dark→bright so the structure is visible, never a near-uniform fill.`
@@ -88,6 +93,7 @@ func (g *Grower) AuthorPlan(ctx context.Context, namespace string) error {
 	}
 	user, _ := json.Marshal(map[string]any{
 		"objective": env.Objective, "shared_state": contractText(contract), "components": comps,
+		"architectural_guidance": g.planKnowledge(planIntent(env), 4),
 	})
 	g.phase("planning", "designing the application plan for "+namespace, namespace)
 	resp, err := g.model.InvokeReasoning(ctx, g.prompt("plan", planPrompt), string(user))
@@ -173,6 +179,7 @@ func (g *Grower) authorComponentPlan(ctx context.Context, p *evolution.AppPlan, 
 			"identity": sub.Identity, "role": sub.Semantics,
 			"reads": sub.Reads, "writes": sub.Writes,
 		},
+		"architectural_guidance": g.planKnowledge(sub.Semantics+" "+strings.Join(append(sub.Reads, sub.Writes...), " "), 2),
 	})
 	resp, err := g.model.InvokeReasoning(ctx, g.prompt("component-plan", componentPlanPrompt), string(user))
 	if err != nil {
@@ -190,6 +197,37 @@ func (g *Grower) authorComponentPlan(ctx context.Context, p *evolution.AppPlan, 
 	base.Steps, base.Interactions, base.Invariants = got.Steps, got.Interactions, got.Invariants
 	base.Notes = "designed on architecture change"
 	return base
+}
+
+// planKnowledge retrieves the architectural design docs most relevant to the
+// intent and renders them for the design prompt. It is kind-agnostic ("" matches
+// every doc), so system-level design docs (which declare no Kinds) surface here
+// even though cell synthesis retrieves kind-filtered — the design pass reasons
+// across the whole app, not one entry. Best-effort: no docs ⇒ empty string.
+func (g *Grower) planKnowledge(intent string, k int) string {
+	docs := evolution.FindDocuments(g.ledger, "", intent, k)
+	if len(docs) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("ARCHITECTURAL GUIDANCE (design knowledge retrieved for this app — apply it):\n")
+	for _, d := range docs {
+		fmt.Fprintf(&b, "• %s — %s\n", d.Title, d.Body)
+	}
+	return b.String()
+}
+
+// planIntent builds the retrieval query for the whole-app design pass from the
+// objective plus every component's role and ports, so both architectural docs and
+// any implementation docs whose vocabulary overlaps the app are surfaced.
+func planIntent(env *AppEnvelope) string {
+	parts := []string{env.Objective}
+	for _, s := range env.SubsystemRequirements {
+		parts = append(parts, s.Semantics)
+		parts = append(parts, s.Reads...)
+		parts = append(parts, s.Writes...)
+	}
+	return strings.Join(parts, " ")
 }
 
 // groundPlanPorts overrides each component plan's reads/writes/entry with the

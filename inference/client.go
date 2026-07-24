@@ -32,7 +32,19 @@ type InferenceRequest struct {
 	Messages    []ChatMessage `json:"messages"`
 	Temperature float32       `json:"temperature"`
 	MaxTokens   int           `json:"max_tokens"`
+	// ChatTemplateKwargs passes template flags to the local server; we use it to
+	// suppress a reasoning model's chain-of-thought (see disableThinking).
+	ChatTemplateKwargs map[string]any `json:"chat_template_kwargs,omitempty"`
 }
+
+// disableThinking suppresses a reasoning model's chain-of-thought on the local
+// OpenAI-compatible server. Qwen3 "thinking" variants otherwise dump a long
+// reasoning trace that exhausts the token budget (never reaching the answer) and
+// exceeds the request timeout — the "malformed completion / unexpected end of
+// JSON" failure. It is the nested chat_template flag (a top-level enable_thinking
+// is ignored), and it is harmless to non-thinking models, which ignore the
+// unknown template key.
+var disableThinking = map[string]any{"enable_thinking": false}
 
 // ChatMessage represents a single message in the conversation array.
 type ChatMessage struct {
@@ -116,6 +128,17 @@ func NewLocalModelClient(baseURL, model string) *LocalModelClient {
 			reconnect = d
 		}
 	}
+	// Per-request HTTP timeout. Non-streaming completions return headers only when
+	// the whole generation is done, so a slow REASONING model (e.g. qwen3.6, which
+	// emits hundreds of hidden reasoning tokens before any content) can exceed the
+	// default on a large prompt and fail "awaiting headers". Raise it with
+	// HDM_LLM_TIMEOUT (e.g. 600s) for such models.
+	timeout := 120 * time.Second
+	if v := os.Getenv("HDM_LLM_TIMEOUT"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d > 0 {
+			timeout = d
+		}
+	}
 	return &LocalModelClient{
 		provider:  providerOpenAI,
 		baseURL:   baseURL,
@@ -123,7 +146,7 @@ func NewLocalModelClient(baseURL, model string) *LocalModelClient {
 		apiKey:    apiKey,
 		reconnect: reconnect,
 		client: &http.Client{
-			Timeout: 120 * time.Second,
+			Timeout: timeout,
 		},
 	}
 }
@@ -303,6 +326,7 @@ func (c *LocalModelClient) openaiRequest(ctx context.Context, sysPrompt, userCtx
 			{Role: "system", Content: sysPrompt},
 			{Role: "user", Content: userCtx},
 		},
+		ChatTemplateKwargs: disableThinking,
 	})
 	if err != nil {
 		return nil, err
@@ -331,7 +355,12 @@ func (c *LocalModelClient) openaiVisionRequest(ctx context.Context, sysPrompt, q
 	payload, err := json.Marshal(map[string]any{
 		"model":       c.model,
 		"temperature": 0.0,
-		"max_tokens":  512,
+		// Reasoning models (e.g. qwen3.6) spend the early budget on hidden
+		// reasoning tokens before any visible content; a tight cap starves the
+		// actual answer and returns empty. Give the vision critic room to think
+		// AND answer.
+		"max_tokens":           2048,
+		"chat_template_kwargs": disableThinking,
 		"messages": []any{
 			map[string]any{"role": "system", "content": sysPrompt},
 			map[string]any{"role": "user", "content": parts},

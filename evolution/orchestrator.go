@@ -143,6 +143,27 @@ No prose, no markdown fences.
 ` + buildExamples + `
 ` + Capabilities
 
+// FluxBuildPrompt is the system prompt for the Flux synthesis path (HDM_FLUX):
+// the builder authors a typed functional program, not WAT. It carries no WAT
+// examples/ABI — the grammar, the typed field list, and a worked example are
+// injected into the build seed (fluxSeedBlock), so nothing pulls the model back
+// toward WAT.
+const FluxBuildPrompt = `SYSTEM ROLE: HDM BUILDER (FLUX).
+You are given a cell's PLAN (the design to implement), the system it is part of,
+its shared-state fields, and its ACCEPTANCE CHECKS. IMPLEMENT THE PLAN as a FLUX
+functional program: write the cell's algorithm exactly as the plan's steps
+describe, reading and writing the shared fields it names. The acceptance checks
+VERIFY the plan — pass AS MANY as possible.
+
+Flux is a small, typed functional language: a cell is a PURE FUNCTION over shared
+state. You write ONLY the logic; a compiler lowers it to WASM and owns all memory,
+stack, and types — so you never write WAT, never manage a stack, never touch an
+offset. The exact grammar, your typed field list, and a worked example are in the
+build context below; follow them precisely.
+
+OUTPUT: only a single complete (cell …) Flux program. No prose, no markdown
+fences, and never WAT/WASM/(module …).`
+
 const (
 	// EntryPoint is the exported function the scheduler drives on each cell.
 	EntryPoint = "run-tick"
@@ -158,6 +179,11 @@ type Orchestrator struct {
 	mvcc          *engine.MVCCCoordinator
 	model         Reasoner
 	SieveMaxIters int
+	// FluxEnabled turns on the Flux functional-IR synthesis path: the sieve builds
+	// a field layout from the app contract and accepts a model that authors a Flux
+	// (cell …) program (lowered to WAT) as well as one that emits raw WAT. Opt-in
+	// (HDM_FLUX) so default behavior is unchanged. See docs/functional-ir.md.
+	FluxEnabled   bool
 	CompassPrompt string
 	// TapeCount caps the regression corpus size; PoolSize is how many candidate
 	// inputs are probed to fill it. The Discovery-Invariant compactor keeps only
@@ -426,18 +452,33 @@ func (o *Orchestrator) sieveModel(urn string) Reasoner {
 // Every other cell uses the standard one-shot sieve. Both feed the identical
 // verification gates; the agentic tools inform synthesis, they never bypass it.
 func (o *Orchestrator) synthesize(ctx context.Context, targetURN, intent, sysPrompt, seed string, contract *EntryContract) (*SieveOutcome, error) {
+	// The working draft is saved in acceptanceFrame (only when non-regressing), so
+	// the DFS iteration base is always the best WIP — not overwritten by a worse
+	// attempt. synthesize itself no longer saves it.
+	return o.synthesizeInner(ctx, targetURN, intent, sysPrompt, seed, contract)
+}
+
+func (o *Orchestrator) synthesizeInner(ctx context.Context, targetURN, intent, sysPrompt, seed string, contract *EntryContract) (*SieveOutcome, error) {
 	m := o.sieveModel(targetURN)
-	if o.escalation[targetURN] >= sieveEscalateThreshold {
+	layout := o.fluxLayoutFor(targetURN)
+	// Flux cells are authored test-driven and agentic BY DEFAULT (the model checks
+	// and RUNS its cell via tools) — not only on escalation. Raw-WAT cells stay
+	// agentic only after they stall, as before.
+	if layout != nil || o.escalation[targetURN] >= sieveEscalateThreshold {
 		if tr, ok := m.(ToolReasoner); ok {
 			kind := ""
 			if contract == RenderFrameContract {
 				kind = "render"
 			}
-			log.Printf("[MODEL] %s — agentic synthesis (knowledge + compiler tools)", targetURN)
-			return RunAgenticSieve(ctx, tr, o.ledger, sysPrompt, seed, kind, intent, contract)
+			if layout != nil {
+				log.Printf("[FLUX] %s — agentic Flux synthesis (flux_check + flux_run)", targetURN)
+			} else {
+				log.Printf("[MODEL] %s — agentic synthesis (knowledge + compiler tools)", targetURN)
+			}
+			return RunAgenticSieve(ctx, tr, o.ledger, sysPrompt, seed, kind, intent, layout, contract)
 		}
 	}
-	return RunSieve(ctx, m, sysPrompt, seed, o.SieveMaxIters, contract)
+	return RunSieveWithLayout(ctx, m, sysPrompt, seed, o.SieveMaxIters, layout, contract)
 }
 
 func (o *Orchestrator) resolver() CellResolver {
@@ -544,7 +585,11 @@ func (o *Orchestrator) RunFrame(ctx context.Context, targetURN string) (*FrameRe
 		o.event("mutate", targetURN, "structural escalation — refactor to a data structure")
 		o.phase("synthesizing", "structural refactor of "+targetURN+" (awaiting cognitive engine)", targetURN)
 	case building:
-		sysPrompt = ResolvePrompt(o.ledger, "build", DefaultBuildPrompt)
+		if o.fluxLayoutFor(targetURN) != nil {
+			sysPrompt = ResolvePrompt(o.ledger, "build-flux", FluxBuildPrompt)
+		} else {
+			sysPrompt = ResolvePrompt(o.ledger, "build", DefaultBuildPrompt)
+		}
 		seed = o.buildSeed(targetURN, desc.Semantics.FunctionalIntent, genotype, contract, suite)
 		o.event("mutate", targetURN, "building toward spec ("+contract.Name+")")
 		o.phase("synthesizing", "building a candidate for "+targetURN+" (awaiting cognitive engine)", targetURN)
@@ -669,7 +714,7 @@ func (o *Orchestrator) RunFrame(ctx context.Context, targetURN string) (*FrameRe
 
 	// 4. Atomic reference commit: persist the new genotype+phenotype as a fresh
 	//    descriptor and hot-swap under an optimistic concurrency check.
-	newDescHash, _, err := o.repo.PutCell(targetURN, sieve.WAT, sieve.Artifact.Bytecode, desc.Semantics, desc.Saliency)
+	newDescHash, _, err := o.repo.PutCell(targetURN, sieve.Genotype(), sieve.Artifact.Bytecode, desc.Semantics, desc.Saliency)
 	if err != nil {
 		return nil, fmt.Errorf("persist evolved descriptor: %w", err)
 	}
@@ -726,7 +771,7 @@ func (o *Orchestrator) compactCorpus(ctx context.Context, baseline []byte) ([]Re
 // under the MVCC optimistic-concurrency check.
 func (o *Orchestrator) commit(ctx context.Context, fr *FrameResult, baseRoot, targetURN string, desc *manifest.NodeDescriptor, sieve *SieveOutcome, reason string) (*FrameResult, error) {
 	delete(o.escalation, targetURN) // progress: reset the cost-driven escalation counter
-	newDescHash, _, err := o.repo.PutCell(targetURN, sieve.WAT, sieve.Artifact.Bytecode, desc.Semantics, desc.Saliency)
+	newDescHash, _, err := o.repo.PutCell(targetURN, sieve.Genotype(), sieve.Artifact.Bytecode, desc.Semantics, desc.Saliency)
 	if err != nil {
 		return nil, fmt.Errorf("persist evolved descriptor: %w", err)
 	}
@@ -783,6 +828,12 @@ func (o *Orchestrator) buildSeed(urn, intent, genotype string, contract *EntryCo
 	fmt.Fprintf(&b, "Build cell %s.\nGOAL: %s\n\n", urn, intent)
 	fmt.Fprintf(&b, "Export %q with signature (param i32 i32) (result i32).\n\n", contract.Name)
 	ns := AppNamespaceOf(urn)
+	// When the Flux path is on and the app has an addressable contract, this cell
+	// is authored in Flux (a typed functional program lowered to WAT for the model)
+	// rather than raw WAT — so the tail of the seed instructs Flux authoring and the
+	// WAT-specific sections are suppressed.
+	fluxLayout := o.fluxLayoutFor(urn)
+	fluxOn := fluxLayout != nil
 	// PLAN-FIRST: lead with the design this cell implements. The plan is the "how"
 	// (its algorithm + how it connects to siblings); the acceptance checks below
 	// merely VERIFY that the plan was implemented. Without this the model reinvents
@@ -860,11 +911,30 @@ func (o *Orchestrator) buildSeed(urn, intent, genotype string, contract *EntryCo
 	// Advertise the reusable data-structure primitives to compute (run-tick) cells, so synthesis
 	// dispatches to a shared primitive instead of re-deriving a scan/loop. UI (render-frame)
 	// cells don't get it — it's noise for a draw path.
-	if contract == RunTickContract {
+	if contract == RunTickContract && !fluxOn {
 		b.WriteString(PrimitiveVocabulary)
 		b.WriteString("\n")
 	}
-	fmt.Fprintf(&b, "\nCURRENT GENOTYPE (improve it to pass more checks):\n%s", genotype)
+	if fluxOn {
+		// Author in Flux: the grammar + typed field list + a worked example, and an
+		// explicit instruction to output only a (cell …) program. The lowerer owns
+		// the encoding, so the model only writes logic.
+		b.WriteString(fluxSeedBlock(contract, fluxLayout))
+		// DFS iteration: refine the model's latest working DRAFT (its most recent
+		// non-regressing attempt), not the last commit — so synthesis goes deeper on
+		// the candidate it was building instead of restarting each frame. Fall back to
+		// the committed Flux genome, then to nothing (a fresh start after an unwind,
+		// which clears the draft).
+		wip := LoadFluxDraft(o.ledger, urn)
+		if wip == "" && strings.HasPrefix(strings.TrimSpace(genotype), "(cell") {
+			wip = genotype
+		}
+		if wip != "" {
+			fmt.Fprintf(&b, "CURRENT PROGRAM — improve THIS, do not restart from scratch. Keep what already works; change only what the acceptance checks and any critic feedback above require:\n%s\n", wip)
+		}
+	} else {
+		fmt.Fprintf(&b, "\nCURRENT GENOTYPE (improve it to pass more checks):\n%s", genotype)
+	}
 	return b.String()
 }
 
@@ -877,15 +947,32 @@ func (o *Orchestrator) acceptanceFrame(ctx context.Context, fr *FrameResult, bas
 	basePass, total := ScoreSuite(ctx, baseline, contract.Name, suite, o.PayloadOffset, o.StateWindow, o.resolver())
 	candPass, _ := ScoreSuite(ctx, candidate, contract.Name, suite, o.PayloadOffset, o.StateWindow, o.resolver())
 	fr.AcceptBase, fr.AcceptCand, fr.AcceptTotal = basePass, candPass, total
+	// DFS iteration: keep the model's latest NON-REGRESSING Flux as the working
+	// draft, so the next frame refines THIS candidate (goes deeper) instead of
+	// restarting from the last commit. A regression is not a valid deeper node, so
+	// it never overwrites the draft — the base stays the best WIP so far.
+	if sieve.Flux != "" && candPass >= basePass {
+		_ = SaveFluxDraft(o.ledger, targetURN, sieve.Flux)
+	}
+	// Diagnostics (HDM_ACCEPT_DEBUG): when a candidate fails to beat the baseline,
+	// log WHY each scenario failed — the concrete check + expected vs actual — so a
+	// stall is traceable to a cause instead of a bare score.
+	if acceptDebug && candPass <= basePass {
+		for _, r := range SuiteFailureReasons(ctx, candidate, contract.Name, suite, o.PayloadOffset, o.StateWindow, o.resolver()) {
+			log.Printf("[ACCEPT] %s %d/%d: %s", shortName(targetURN), candPass, total, r)
+		}
+	}
 
 	switch {
 	case candPass < basePass:
+		taxoAccept("regress")
 		fr.Reason = fmt.Sprintf("acceptance regression: %d->%d/%d", basePass, candPass, total)
 		return fr, nil
 
 	case candPass > basePass:
 		// Correctness progress: behavior legitimately changes toward spec, so
 		// the tape-reproduction gate does not apply.
+		taxoAccept("progress")
 		return o.commit(ctx, fr, baseRoot, targetURN, desc, sieve,
 			fmt.Sprintf("correctness %d->%d/%d", basePass, candPass, total))
 
@@ -898,6 +985,7 @@ func (o *Orchestrator) acceptanceFrame(ctx context.Context, fr *FrameResult, bas
 		if basePass < total {
 			// Stall: the synthesis made no acceptance headway. Count it toward
 			// escalation — once past the threshold the next sieve uses the reasoner.
+			taxoAccept("stall")
 			o.escalation[targetURN]++
 			if o.escalation[targetURN] == sieveEscalateThreshold {
 				log.Printf("[MODEL] %s stalled %dx at %d/%d — escalating synthesis to the reasoner", targetURN, o.escalation[targetURN], basePass, total)
@@ -909,6 +997,7 @@ func (o *Orchestrator) acceptanceFrame(ctx context.Context, fr *FrameResult, bas
 		// gauntlet below replays run-tick regression tapes — which only applies to
 		// run-tick cells. A complete render-frame (UI) cell has no such tapes, so
 		// it rests here (built; the scenarios anchor its behavior).
+		taxoAccept("complete")
 		if contract == RenderFrameContract {
 			fr.Reason = fmt.Sprintf("complete (%d/%d); UI cell rests — no run-tick optimization", candPass, total)
 			return fr, nil
