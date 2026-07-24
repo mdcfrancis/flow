@@ -2,6 +2,7 @@ package evolution
 
 import (
 	"context"
+	"encoding/binary"
 	"fmt"
 	"os"
 	"strings"
@@ -22,6 +23,23 @@ func SuiteFailureReasons(ctx context.Context, phenotype []byte, entry string, su
 		return nil
 	}
 	var out []string
+	// Scalar tests: int-in / int-out on the entry's RETURN value. For a
+	// state-transforming run-tick cell this grades the wrong thing (it returns a
+	// status and mutates shared state), so a failing scalar test on such a cell is
+	// itself a spec smell — surface it explicitly.
+	for _, tc := range suite.Tests {
+		payload := make([]byte, 4)
+		binary.LittleEndian.PutUint32(payload, uint32(tc.Input))
+		env := replayEnv{payloadOffset: payloadOffset, payload: payload, stateWindow: stateWindow, resolver: resolver}
+		res, err := execReplay(ctx, phenotype, entry, env, uint64(payloadOffset), uint64(len(payload)))
+		if err != nil || len(res.Results) == 0 {
+			out = append(out, fmt.Sprintf("test %q: input=%d no result (%v)", tc.Name, tc.Input, err))
+			continue
+		}
+		if uint32(res.Results[0]) != uint32(tc.Expected) {
+			out = append(out, fmt.Sprintf("test %q: run-tick(%d) returned %d, expected %d", tc.Name, tc.Input, int32(uint32(res.Results[0])), tc.Expected))
+		}
+	}
 	for _, sc := range suite.Scenarios {
 		results, frames, reads, pre, traj, err := execScenario(ctx, phenotype, sc, payloadOffset, stateWindow, resolver)
 		if err != nil {
