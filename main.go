@@ -2411,15 +2411,23 @@ func main() {
 		Inspect: func(urn string) any { return inspectCell(ctx, ledger, orchestrator, urn) },
 		Flux: func(urn string) string {
 			// The cell's source genome — its Flux (cell …) program (or WAT).
-			desc, err := repo.Load(urn)
-			if err != nil {
-				return ""
+			genome := ""
+			if desc, err := repo.Load(urn); err == nil {
+				if src, err := repo.Genotype(desc); err == nil {
+					genome = src
+				}
 			}
-			src, err := repo.Genotype(desc)
-			if err != nil {
-				return ""
+			// A committed Flux genome is authoritative — show it.
+			if strings.HasPrefix(strings.TrimSpace(genome), "(cell") {
+				return genome
 			}
-			return src
+			// Otherwise the cell is still a WAT stub (not yet Flux-converged). Show
+			// the latest Flux the model authored for it, clearly marked, so the
+			// console reflects the Flux work-in-progress rather than the stub.
+			if draft := evolution.LoadFluxDraft(ledger, urn); draft != "" {
+				return "; ⚠ latest Flux draft — NOT yet committed (the running cell is still WAT below the fold)\n" + draft
+			}
+			return genome
 		},
 		Objective: func() string {
 			ns := appNamespace(canvasSrv.Active())

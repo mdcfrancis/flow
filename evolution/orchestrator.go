@@ -452,6 +452,16 @@ func (o *Orchestrator) sieveModel(urn string) Reasoner {
 // Every other cell uses the standard one-shot sieve. Both feed the identical
 // verification gates; the agentic tools inform synthesis, they never bypass it.
 func (o *Orchestrator) synthesize(ctx context.Context, targetURN, intent, sysPrompt, seed string, contract *EntryContract) (*SieveOutcome, error) {
+	out, err := o.synthesizeInner(ctx, targetURN, intent, sysPrompt, seed, contract)
+	// Record the latest Flux the model authored (committed or not), so the console
+	// can show a cell's Flux even while it is still building on a WAT stub.
+	if out != nil && out.Flux != "" {
+		_ = SaveFluxDraft(o.ledger, targetURN, out.Flux)
+	}
+	return out, err
+}
+
+func (o *Orchestrator) synthesizeInner(ctx context.Context, targetURN, intent, sysPrompt, seed string, contract *EntryContract) (*SieveOutcome, error) {
 	m := o.sieveModel(targetURN)
 	layout := o.fluxLayoutFor(targetURN)
 	// Flux cells are authored test-driven and agentic BY DEFAULT (the model checks

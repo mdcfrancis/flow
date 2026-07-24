@@ -9,7 +9,43 @@ import (
 
 	"github.com/mdcfrancis/flow/compiler"
 	"github.com/mdcfrancis/flow/flux"
+	"github.com/mdcfrancis/flow/storage"
 )
+
+// Flux DRAFT store: the most recent Flux program the model authored for a cell,
+// whether or not it committed. The committed genome is the source of truth (P0),
+// but a cell shows its WAT stub until a Flux candidate commits — so for the
+// console we also keep the latest draft, to display the Flux the model is
+// actively writing even while a cell is still building.
+func fluxDraftRef(urn string) string { return urn + ":flux-draft" }
+
+// SaveFluxDraft records the latest Flux source authored for a cell.
+func SaveFluxDraft(ledger *storage.LedgerEngine, urn, src string) error {
+	if ledger == nil || strings.TrimSpace(src) == "" {
+		return nil
+	}
+	h, err := ledger.WriteBlock([]byte(src))
+	if err != nil {
+		return err
+	}
+	return ledger.UpdateRef(fluxDraftRef(urn), h)
+}
+
+// LoadFluxDraft returns the latest Flux draft for a cell, or "".
+func LoadFluxDraft(ledger *storage.LedgerEngine, urn string) string {
+	if ledger == nil {
+		return ""
+	}
+	h, err := ledger.GetRef(fluxDraftRef(urn))
+	if err != nil {
+		return ""
+	}
+	raw, err := ledger.ReadBlock(h)
+	if err != nil {
+		return ""
+	}
+	return string(raw)
+}
 
 // This file bridges the Flux functional IR (docs/functional-ir.md) into the
 // operational synthesis path. When a layout is available, the sieve accepts a
