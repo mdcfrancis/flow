@@ -70,6 +70,21 @@ func noopFlux(sub Subsystem, layout flux.Layout) (src string, ok bool) {
 		name, list, list, pairs.String()), true
 }
 
+// fluxInterfaceSpec renders a cell's DERIVED interface contract from its Flux
+// genome — the entry it implements (its primary interface) plus its declared ports.
+// In Flux mode this replaces the model-authored WIT: the interface is a property of
+// the cell's shape, owned by the lowerer, not a separate artifact the model writes.
+// Nothing downstream parses this yet; it is the human-facing record for the map.
+func fluxInterfaceSpec(sub Subsystem, genome string) string {
+	entry, role := "run-tick", "tick"
+	if e, err := flux.EntryOf(genome); err == nil && e == "render-frame" {
+		entry, role = "render-frame", "view"
+	}
+	return fmt.Sprintf(
+		"// DERIVED interface for %s (see docs/flux-interfaces.md)\ninterface %s {\n    %s: func(base: u32, cap: u32) -> s32;\n}\n// reads:  %s\n// writes: %s\n",
+		sub.Identity, role, entry, strings.Join(sub.Reads, ", "), strings.Join(sub.Writes, ", "))
+}
+
 // seedNoopFlux returns the no-op Flux genome + its compiled bytecode for a
 // subsystem, or ok=false if the app has no Flux-addressable layout or the no-op
 // does not compile (so genesis keeps the WAT path). The layout comes from the

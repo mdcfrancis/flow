@@ -599,13 +599,21 @@ func (g *Grower) scaffold(ctx context.Context, env *AppEnvelope, sub Subsystem) 
 		return g.scaffoldComposition(ctx, env, sub)
 	}
 	g.phase("growing", "synthesizing subsystem "+sub.Identity, sub.Identity)
-	// Stage 2: draft and persist the WIT interface contract.
-	wit := g.wit(ctx, env, sub)
+	// Stage 2+3: the interface contract and the seed genome. In Flux mode the
+	// interface is DERIVED from the cell's shape (its primary interface + ports) —
+	// no per-cell model round-trip — so genesis seeds the no-op Flux first and the
+	// spec is read off it. In WAT mode the model drafts a WIT and genesis conforms.
+	var wit string
+	if !g.FluxEnabled {
+		wit = g.wit(ctx, env, sub)
+	}
+	wat, bc := g.genesis(ctx, env, sub, wit)
+	if g.FluxEnabled {
+		wit = fluxInterfaceSpec(sub, wat)
+	}
 	if h, err := g.ledger.WriteBlock([]byte(wit)); err == nil {
 		_ = g.ledger.UpdateRef(sub.Identity+":wit", h)
 	}
-	// Stage 3: Genesis Pass — synthesize a skeleton conforming to the WIT.
-	wat, bc := g.genesis(ctx, env, sub, wit)
 	sem := manifest.SemanticManifest{
 		FunctionalIntent: sub.Semantics,
 		DomainTags:       []string{nsTag(env.ApplicationNamespace), "genesis"},
