@@ -547,6 +547,13 @@ func groundScenarios(scs []evolution.Scenario, c *evolution.AppContract, isUI bo
 			}
 			sc.Expect.Reads = keptReads
 			sc.Expect.Trajectory = nil
+			// A render-frame's RETURN VALUE is the draw-stream byte length (an
+			// internal detail), not a semantic result. Models copy the compute-cell
+			// pattern and assert result:0, which fails EVERY renderer that draws
+			// anything (got=byte-count != 0) even when the draw is perfect — the true
+			// cause of a correct renderer stalling at 1/N. The draw assertion
+			// (op/nearX/nearY/layer/minRecords) is the meaningful check; drop result.
+			sc.Expect.Result = nil
 		}
 		if d := sc.Expect.Draw; d != nil {
 			// Rule 3: draw target must be inside the window (when bounds are known).

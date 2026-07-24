@@ -60,6 +60,38 @@ func TestGroundScenariosDropsUnresolvedSeed(t *testing.T) {
 	}
 }
 
+// A render-frame's return value is the draw-stream byte length, not a semantic
+// result — so a result assertion (which models copy from compute cells) must be
+// stripped on render cells, else a correct renderer that draws a circle returns
+// the byte count and fails the "result: expected 0" check on every scenario.
+func TestGroundScenariosDropsResultOnRenderer(t *testing.T) {
+	c := &evolution.AppContract{Fields: []evolution.ContractField{
+		{Name: "ball_x", Offset: 0xB0000, Type: "i32"},
+		{Name: "ball_y", Offset: 0xB0004, Type: "i32"},
+	}}
+	nx, ny := 320, 240
+	zero := int32(0)
+	scs := []evolution.Scenario{{
+		Name:  "render_ball_at_center",
+		Entry: "render-frame",
+		Seed:  []evolution.SeedWrite{{At: "0xB0000", U32: []uint32{320}}, {At: "0xB0004", U32: []uint32{240}}},
+		Expect: evolution.ScenarioExpect{
+			Result: &zero, // bogus on a renderer — must be dropped
+			Draw:   &evolution.DrawExpect{NearX: &nx, NearY: &ny},
+		},
+	}}
+	out := groundScenarios(scs, c, true) // renderer
+	if len(out) != 1 {
+		t.Fatalf("expected the position scenario kept, got %d", len(out))
+	}
+	if out[0].Expect.Result != nil {
+		t.Error("a result assertion must be stripped from a render-cell scenario")
+	}
+	if out[0].Expect.Draw == nil || out[0].Expect.Draw.NearX == nil {
+		t.Error("the draw position assertion must be preserved")
+	}
+}
+
 // Rule 4: a draw / render-frame scenario on a non-rendering (run-tick) cell can
 // never pass, so it must be dropped (the physics-cell-gets-a-render-check bug).
 func TestGroundScenariosDropsDrawChecksOnNonRenderer(t *testing.T) {
