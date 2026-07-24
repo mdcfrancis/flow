@@ -527,16 +527,26 @@ func groundScenarios(scs []evolution.Scenario, c *evolution.AppContract, isUI bo
 		if !readsOK {
 			continue
 		}
-		// Rule 1: for a renderer, an exact reads-postcondition is really a seed —
-		// the renderer doesn't produce the value, so control it, then assert the draw.
+		// Rule 1: a renderer writes NO shared state — it only draws. So a reads
+		// postcondition on a render cell is valid only as an EXACT value (which is
+		// really a seed: control the value, then assert the draw at it). A
+		// RELATIVE/directional read (increased/decreased/changed/gt/lt/…) asserts a
+		// STATE CHANGE the renderer can never produce, so it is dropped — otherwise a
+		// correct renderer is failed by a check for physics behavior it doesn't do
+		// (the renderer wall: "render-ball-after-physics-bounce: ball_vx decreased").
+		// Likewise a state trajectory belongs to the writer, not the view.
 		if isRender {
+			var keptReads []evolution.SeedWrite
 			for _, r := range sc.Expect.Reads {
-				if (r.Cmp == "" || r.Cmp == "eq") && len(r.U32) > 0 {
-					if !hasSeedAt(sc.Seed, r.At) {
+				if r.Cmp == "" || r.Cmp == "eq" {
+					if len(r.U32) > 0 && !hasSeedAt(sc.Seed, r.At) {
 						sc.Seed = append(sc.Seed, evolution.SeedWrite{At: r.At, U32: r.U32})
 					}
+					keptReads = append(keptReads, r) // an eq read holds — a view doesn't change it
 				}
 			}
+			sc.Expect.Reads = keptReads
+			sc.Expect.Trajectory = nil
 		}
 		if d := sc.Expect.Draw; d != nil {
 			// Rule 3: draw target must be inside the window (when bounds are known).
