@@ -853,8 +853,11 @@ discarded. (Seeds may use a raw "at" for the HMI input register offsets below.)
 Set "entry" to the cell's export (run-tick for compute, render-frame for UI).
 HMI input register (seed these u32 offsets to mock input):
   0x50000 mouseX  0x50004 mouseY  0x50008 buttons(bit0 left)  0x5000C modifiers
-  0x50010 eventSeq(nonzero=new)  0x50014 eventType(2 down,3 up,4 click,5 keydown,6 keyup)
+  0x50010 eventSeq(nonzero=new)  0x50014 eventType(2 down,3 up,4 click,5 keydown,6 keyup,7 slider)
   0x50018 eventX  0x5001C eventY  0x50020 keyCode
+  0x50024..0x50040 slider0..slider7 (operator knobs; slider i at 0x50024+i*4). To test a
+  cell that reads a slider (e.g. hmi_slider0), seed its offset (0x50024) AND eventSeq nonzero,
+  then assert the shared field it drives.
 Draw records carry a layer in the op high byte (0 basemap, 1 widget/app, 2 overlay).
 COORDINATION: to test that a cell reads/writes SHARED STATE (see the shared-state
 contract if given), use "reads" to assert a shared field AFTER the run. Each read
