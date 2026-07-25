@@ -265,3 +265,37 @@ capabilities it **provides** (a produced field; later `display`, `terminal-out`)
 input capability." Next: the **binding model** (§decision 2/3) — local binding first,
 with the cross-box capability resolver as an explicit seam, mirroring how
 private-pages shipped the window/mapping before live migration.
+
+### 8.1 Node availability — capabilities are node-scoped
+
+A capability is not universally available: each **node advertises** which
+capabilities it provides. The cluster's **IO node** (the box holding the operator's
+peripherals) is initially the sole provider of `scalar`/`toggle`/`trigger` (and, at
+register level, `pointer`/`keys`); headless compute nodes provide none. So
+`(requires (scalar …))` is also a **placement constraint** — an adapter can only be
+bound to, and must run on, a node whose advertised capabilities cover its
+requirements. Its output field replicates to the compute nodes (the shared-state /
+private-pages migration seam), where consumers read it with no capability of their
+own.
+
+This splits cells into two placement classes:
+- **pure compute/view** — location-free, migratable anywhere (what private-pages
+  already buys);
+- **capability-requiring adapters** — pinned to nodes that provide their
+  capabilities.
+
+The adapters anchor to hardware; everything else floats — which is exactly why the
+adapter boundary is essential, not incidental: it's the only cell that *can't* move.
+
+Invariant: **a capability is consumed locally by its adapter; only the result (a
+shared field) crosses nodes.** A raw capability is never forwarded over the wire —
+that would defeat the locality; the adapter co-locates with the resource and the
+replicated field carries the value everywhere else.
+
+The model generalizes with no new machinery: as capabilities grow (an incoming
+network stream, a sensor), they are advertised by whatever node hosts them (an
+ingest node, a sensor node), and the same placement rule applies. "IO node" is just
+today's degenerate case where every operator capability happens to live on one box.
+The binding model (next) is therefore a **matcher**: resolve each required
+capability against the nodes advertising it, place the adapter on a provider, bind
+the resource there.
