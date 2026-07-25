@@ -173,6 +173,26 @@ independently get right. Folding them into interface satisfaction is the point.
 - **Naming.** `<urn>:wit` becomes a derived artifact; renaming to `<urn>:iface`
   clarifies intent but touches the ledger key — cosmetic, do it in P1 or never.
 
+## 6.5 Status (landed)
+
+- **P1 — landed.** `flux/interface.go` (`Interface`, `Registry`, `DeriveInterfaces`,
+  `PrimaryEntry`, `EntryOf`); the lowerer emits the entry via `PrimaryEntry`;
+  `entryContractFor` derives via `flux.EntryOf`; the per-cell WIT model call is
+  dropped in Flux mode and a derived interface spec is persisted instead.
+- **input-source grounding — landed, the robust way.** Rather than auto-generate
+  fragile directional checks, the fix was to ground the model: subsystems declare
+  reads as the generic `"HMI input"` pseudo-field, and the scenario-authoring prompt
+  now includes the slider register map (`0x50024..0x50040`) — so the model seeds the
+  right offset. **Proven end-to-end:** a "slider controls ball speed" grow converged
+  its `input` cell 4/4 with correct `hmi_slider0` seeding, and the `renderer` 7/7.
+- **Open — the `stateful` implication (grade-on-writes).** A cell must only be graded
+  on fields it WRITES. Observed gap: `input_slider_*` scenarios asserting `ball_speed`
+  were mis-assigned to the `physics` cell (which reads but does not write it),
+  leaving it unwinnable at 4/6. The fix — drop a coordination reads-postcondition on
+  a field the cell does not write — belongs in `groundScenarios`, but that primitive
+  is shared across all authoring paths and has suite-erosion hazards, so it needs a
+  careful, reviewed change rather than an inline one.
+
 ## 7. Recommendation
 
 Do **P1** first: it deletes a redundant per-cell model call and unifies two ad-hoc
