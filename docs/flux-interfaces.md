@@ -374,3 +374,32 @@ The stack: **capability** (the primitive) → **locality** (a node's named bundl
 match). Location independence (private-pages) and cardinality independence
 (groups + combinators) sit on top: the app names neither a node nor a count, only
 capabilities and group shapes.
+
+### 8.4 First slice — what landed, and what the live grow taught
+
+**Landed (tested):** the capability *substrate*. `(requires (scalar alias min max))`
+parses, checks (alias bound read-only, treated as a read — so lowering, read-only
+enforcement, and input-source derivation all apply unchanged), and lowers to a load
+from the bound offset; `flux.Requirements` extracts requirements layout-free;
+`bindCapabilities` does LOCAL SINGLETON binding (each scalar → the next slider
+register). Unit-proven end to end.
+
+**Live-grow finding:** teaching the *authoring prompt* the capability form is NOT
+enough on its own. A grow showed the model neither authored `(requires …)` nor
+converged — and the envelope had decomposed degenerately (an `input` cell reading
+AND writing the same field, with no operator source). Two lessons:
+
+1. Relying on the model to *both* decompose correctly *and* discover the capability
+   form is unreliable (compounding variance).
+2. Hiding the raw slider registers from the seed removed the register path that
+   previously converged, without a reliable replacement — a regression risk. So the
+   authoring-prompt change was backed out; only the substrate remains.
+
+**The robust path (next):** declare the capability at the **envelope/contract**
+level, not the cell. Then scaffold *seeds* the `(requires …)` adapter (the no-op
+seed is already the answer for a pure forwarder) and *injects* its scenario (seed
+the bound register, assert the field it drives). The model fills only logic. This
+also (a) fixes degenerate input decompositions, and (b) resolves the
+scenario-authoring chicken-egg (scenarios are authored at scaffold, before a cell's
+draft exists — so the capability must be known there). It aligns with the earlier
+"who declares an input" call: the contract author declares it; the cell consumes it.
