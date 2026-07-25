@@ -339,3 +339,38 @@ The unification: single-player, single-IO-node, and N-player multiplayer are the
 gave *location* independence (a compute cell names no node); capability groups +
 combinators give *cardinality* independence (app logic names no player count). The
 runtime populates the group; the app aggregates over it.
+
+### 8.3 Capability locality — a node is a named bundle of capabilities
+
+§8.1 has each node advertising capabilities; a **locality** names a reusable
+*bundle* of them — the node's profile/class — so a cluster is described by a handful
+of localities instead of ad-hoc per-node sets:
+
+- `compute` — `{compute}` — a headless worker: runs cells, touches nothing outside.
+- `user` — `{compute, scalar, toggle, trigger, display}` — a player's box: input +
+  output + compute.
+- `io` — `{compute, scalar, toggle, trigger, pointer, keys, display}` — the operator
+  console.
+
+`compute` is the **baseline** every node provides (the ability to run cells at all);
+I/O capabilities are **additive**. Deny-by-default is then *structural*: a `compute`
+locality provides only compute, so it can never host an input/output adapter — the
+headless/edge split is a property of the capability set, not policy.
+
+Locality grounds both placement facts:
+- **Placement is a subset match** — a cell runs on any locality whose set ⊇ its
+  required capabilities. A pure compute/view cell (`{compute}`) runs anywhere; a
+  `scalar` adapter runs only on `user`/`io`.
+- **Groups (§8.2) form across localities** — the "player input" group is every
+  `user` node; per-member fan-out drops one adapter on each.
+
+So the app names no node: it declares capability requirements per cell, and their
+union (with group cardinalities) determines the localities the deployment must
+supply — "one `io` + N `user`" for multiplayer, "one `io` + M `compute`" for a
+single-operator compute-heavy sim.
+
+The stack: **capability** (the primitive) → **locality** (a node's named bundle) →
+**group** (the runtime set of nodes providing a capability) → **placement** (subset
+match). Location independence (private-pages) and cardinality independence
+(groups + combinators) sit on top: the app names neither a node nor a count, only
+capabilities and group shapes.
