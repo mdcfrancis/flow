@@ -203,3 +203,65 @@ the obligations are already scattered across boundary + scenario code as
 special-cases; the registry is where they belong. **P3** follows the language
 roadmap (Char/sequences, effects, foreign) and turns each new capability into "add
 an interface" rather than "add a special case."
+
+## 8. Input capabilities — the monadic input taxonomy (decided)
+
+The input adapter is the **authentic boundary**: the one cell that touches the
+outside world and writes a shared field siblings consume. Keep it. The problem was
+never that it exists — it's that it was typed by a *register* (`hmi_slider0` @
+`0x50024`), an explicit-type binding pinned to one box. Instead, an adapter declares
+a **capability** and the system binds it to a concrete resource. Capability, not
+explicit type: the same adapter is satisfied by a real slider, a value arriving from
+another box, or a test injector — it's typed by what it can *do*, not what it's
+wired to. This is the I/O analogue of the private-pages memory seam (address a
+virtual thing; the runtime maps the physical behind it → location independence).
+
+Classify by **interaction shape**, never by device. v1 is the "operator parameter"
+tier — held magnitudes, held booleans, momentary events:
+
+| Capability | Shape | Value | Persists? | Widget | Fulfilled by |
+|---|---|---|---|---|---|
+| `scalar`  | held bounded magnitude | `Int` in `[min,max]` | yes | slider / dial | the `hmi_slider` register pool |
+| `toggle`  | held boolean           | `Bool`               | yes | switch         | a bool register |
+| `trigger` | momentary event        | `Bool`, true only the firing tick | **no** (one-shot) | button | edge off the event latch |
+
+Declaration + use (Flux):
+
+```lisp
+(cell speed-adapter
+  (requires (scalar operator "speed" 0 255))   ; kind, alias, label, params
+  (writes ball_speed)
+  (write (ball_speed operator)))                 ; `operator` = bound, read-only value
+```
+
+The system allocates a resource, binds a labeled widget, drives the value, and hands
+the cell the alias as a read-only typed value. A **scenario satisfies the
+capability** — `given operator = 137, assert ball_speed = 137` — never seeds a
+register. This is what dissolves, authentically, the four failures we hit (register
+in the prompt, adapter-can't-converge, raw-offset seeding, mis-assigned scenarios):
+the adapter stays, but nothing names an address, and it's tested by injection.
+
+`trigger` is one-shot (true only the tick it fired, then auto-cleared) — it
+**retires the ad-hoc `hmi_event_seq` gating** (`(if (> hmi_event_seq 0) …)`): a cell
+reads a `Bool` that is true exactly when the button fired, instead of reasoning about
+a monotonic counter. It is the one carrying real runtime subtlety (edge detect +
+one-shot clear), and formalizing it is a core part of the value.
+
+Value types lower in today's Flux: `scalar`→`Int` (Float scalars wait for Flux
+Float), `toggle`→`Bool`, `trigger`→`Bool`.
+
+**Stays register-level for now** (promote to capabilities later, same framework):
+`pointer` (mouse/touch x,y,buttons) and `keys` (keyboard) — spatial/temporal
+*streams* a cell processes reactively, not parameters the operator holds. Modeling
+them as capabilities means modeling streams, not values — beyond the first cut.
+
+**Deferred**: `selector` (one-of-N; expressible as a `scalar` with an integer range +
+labels for now), `vector2` (two `scalar`s), and text (the `[Char]`/terminal work).
+
+On the interface model: a cell's interface = the entry it implements (`tick`/`view`)
++ the capabilities it **requires** (`scalar`/`toggle`/`trigger`, …) + the
+capabilities it **provides** (a produced field; later `display`, `terminal-out`).
+`input-source` generalizes from "reads a read-only `hmi_*` field" to "requires ≥1
+input capability." Next: the **binding model** (§decision 2/3) — local binding first,
+with the cross-box capability resolver as an explicit seam, mirroring how
+private-pages shipped the window/mapping before live migration.
