@@ -56,9 +56,39 @@ func ClearFluxDraft(ledger *storage.LedgerEngine, urn string) {
 	}
 }
 
+// bindCapabilities augments a layout with a cell's monadic input capabilities: each
+// required capability is allocated a concrete resource and added as a read-only
+// field under its alias, so the cell reads the bound value without ever naming a
+// register. v1 is LOCAL, SINGLETON binding — each scalar takes the next slider
+// register (the fulfillment substrate we already ship); node placement and
+// capability groups are later layers (docs/flux-interfaces.md §8.1–8.3). Returns the
+// layout unchanged when nothing is required; never mutates the caller's map.
+func bindCapabilities(layout flux.Layout, src string) flux.Layout {
+	caps, err := flux.Requirements(src)
+	if err != nil || len(caps) == 0 {
+		return layout
+	}
+	out := make(flux.Layout, len(layout)+len(caps))
+	for k, v := range layout {
+		out[k] = v
+	}
+	slider := 0
+	for _, cap := range caps {
+		if cap.Kind != "scalar" {
+			continue // v1: scalar only; toggle/trigger next
+		}
+		if off, ok := HMIFieldOffset(fmt.Sprintf("hmi_slider%d", slider)); ok {
+			out[cap.Alias] = flux.Field{Type: flux.TInt, Offset: off, ReadOnly: true}
+			slider++
+		}
+	}
+	return out
+}
+
 // lowerFluxToBytecode lowers a Flux program to wasm bytecode (for judging a draft
 // without committing it), or an error if it does not compile.
 func lowerFluxToBytecode(layout flux.Layout, src string) ([]byte, error) {
+	layout = bindCapabilities(layout, src)
 	wat, err := flux.Compile("cell", src, layout)
 	if err != nil {
 		return nil, err
@@ -178,7 +208,7 @@ func (o *Orchestrator) fluxLayoutFor(urn string) flux.Layout {
 func candidateWAT(resp string, layout flux.Layout) (wat, fluxSrc string, err error) {
 	if layout != nil {
 		if src := extractFlux(resp); src != "" {
-			w, cerr := flux.Compile("cell", src, layout)
+			w, cerr := flux.Compile("cell", src, bindCapabilities(layout, src))
 			if cerr != nil {
 				return "", src, cerr
 			}
@@ -293,6 +323,7 @@ func fluxSeedBlock(contract *EntryContract, layout flux.Layout) string {
 // the authoring model TEST its cell empirically — set inputs, see outputs, iterate
 // — instead of guessing. inputsJSON is a JSON object of field name → integer.
 func runFluxCell(layout flux.Layout, src, inputsJSON string, steps int) (string, error) {
+	layout = bindCapabilities(layout, src)
 	wat, err := flux.Compile("cell", src, layout)
 	if err != nil {
 		return "", err

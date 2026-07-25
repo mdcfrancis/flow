@@ -104,6 +104,67 @@ func EntryOf(src string) (string, error) {
 	return "run-tick", nil
 }
 
+// Requirements parses the capability requirements a cell declares in its
+// (requires …) clause, WITHOUT a layout — the system calls this to bind each
+// capability to a resource (a register on a providing node) BEFORE the cell is
+// checked and lowered. Returns nil when the cell requires nothing.
+func Requirements(src string) ([]Capability, error) {
+	f, err := Parse("cell", src)
+	if err != nil {
+		return nil, err
+	}
+	for _, form := range f.Forms {
+		if form.Head() == "cell" {
+			return capabilitiesOf(form)
+		}
+	}
+	return nil, nil
+}
+
+// capabilitiesOf extracts the capability forms from a cell's (requires …) clause.
+func capabilitiesOf(cell *List) ([]Capability, error) {
+	req := cell.Sub("requires")
+	if req == nil {
+		return nil, nil
+	}
+	var out []Capability
+	for _, it := range req.Items[1:] {
+		if it.List == nil {
+			return nil, errf(posOf(req), "each (requires …) entry must be a capability form, e.g. (scalar speed 0 255)")
+		}
+		cap, err := capabilityFromList(it.List)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, cap)
+	}
+	return out, nil
+}
+
+// capabilityFromList parses one capability form. v1: (scalar <alias> <min> <max>) —
+// the alias doubles as the UI label (Flux has no string literal), min/max are the
+// declared range. toggle/trigger follow the same shape.
+func capabilityFromList(l *List) (Capability, error) {
+	switch kind := l.Head(); kind {
+	case "scalar":
+		if len(l.Items) != 4 {
+			return Capability{}, errf(posOf(l), "(scalar name min max) needs an alias, a min, and a max")
+		}
+		alias := symOf(l.Items[1])
+		if alias == "" {
+			return Capability{}, errf(posOf(l), "scalar capability needs an alias name")
+		}
+		min, err1 := intOf(l.Items[2])
+		max, err2 := intOf(l.Items[3])
+		if err1 != nil || err2 != nil {
+			return Capability{}, errf(posOf(l), "scalar min and max must be integers")
+		}
+		return Capability{Kind: "scalar", Alias: alias, Min: min, Max: max, Pos: posOf(l)}, nil
+	default:
+		return Capability{}, errf(posOf(l), "unknown capability %q (v1 supports: scalar)", kind)
+	}
+}
+
 // containsHead reports whether l or any nested list has the given head symbol — used
 // to find a cell's terminal (a (draw …) marks a view) through its let-wrapping.
 func containsHead(l *List, head string) bool {
