@@ -1,7 +1,7 @@
 package evolution
 
 // The KNOWLEDGE BASE is the system's growable, two-tier memory for synthesis:
-//   - Example  (episodic): a concrete worked WAT solution — "here is code that passes."
+//   - Example  (episodic): a concrete worked cell (Flux) solution — "here is code that passes."
 //     Captured from the system's own green cells (plus a few hand-written seeds).
 //   - Document (semantic): reusable prose on how to build an architectural concept —
 //     "here is how/why to approach this class of problem."
@@ -25,7 +25,7 @@ const (
 	docsRef     = "urn:hdm:docs"
 )
 
-// Example is a captured worked WAT solution.
+// Example is a captured worked cell solution — its genome (Flux, or WAT for legacy captures).
 type Example struct {
 	ID         string   `json:"id"`
 	Kind       string   `json:"kind"`  // compute|render|input|leaf (string; no appgen dep)
@@ -33,7 +33,7 @@ type Example struct {
 	Semantics  string   `json:"semantics"`
 	Reads      []string `json:"reads,omitempty"`
 	Writes     []string `json:"writes,omitempty"`
-	WAT        string   `json:"wat"`
+	Genotype   string   `json:"genotype"`   // the worked cell's genome — Flux (or WAT, legacy)
 	Score      string   `json:"score"`      // "5/5" — proof it is a WORKED example
 	Provenance string   `json:"provenance"` // source cell URN / objective / "seed"
 	Tags       []string `json:"tags,omitempty"`
@@ -108,11 +108,11 @@ func SaveDocuments(ledger *storage.LedgerEngine, ds []Document) error {
 // (higher-passing, then smaller) solution for a shape already present. This keeps the
 // library sharp so retrieval stays high-signal. Returns whether it was stored.
 func AddExample(ledger *storage.LedgerEngine, e Example) (bool, error) {
-	if strings.TrimSpace(e.WAT) == "" {
+	if strings.TrimSpace(e.Genotype) == "" {
 		return false, nil
 	}
 	if e.ID == "" {
-		e.ID = contentID(e.Kind, e.Semantics, e.WAT)
+		e.ID = contentID(e.Kind, e.Semantics, e.Genotype)
 	}
 	xs := LoadExamples(ledger)
 	for i, x := range xs {
@@ -164,7 +164,7 @@ func betterExample(e, x Example) bool {
 	if en > 0 && xn > 0 && ep*xn != xp*en {
 		return ep*xn > xp*en // higher pass ratio
 	}
-	return len(e.WAT) < len(x.WAT)
+	return len(e.Genotype) < len(x.Genotype)
 }
 
 func scoreFrac(s string) (pass, total int) {

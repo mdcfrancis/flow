@@ -817,7 +817,7 @@ func (o *Orchestrator) renderKnowledge(contract *EntryContract, intent string) s
 		fmt.Fprintf(&b, "• %s — %s\n", d.Title, d.Body)
 	}
 	for _, e := range exs {
-		fmt.Fprintf(&b, "WORKED EXAMPLE (%s, %s):\n%s\n", e.Kind, e.Semantics, e.WAT)
+		fmt.Fprintf(&b, "WORKED EXAMPLE (%s, %s):\n%s\n", e.Kind, e.Semantics, e.Genotype)
 	}
 	b.WriteString("\n")
 	return b.String()

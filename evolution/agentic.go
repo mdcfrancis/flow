@@ -23,7 +23,7 @@ type ToolReasoner interface {
 }
 
 const agenticPreamble = `You have TOOLS. Use them before you finalize:
-- find_docs / find_examples: retrieve the how-to pattern and a WORKED WAT example for what you are building.
+- find_docs / find_examples: retrieve the how-to pattern and a WORKED Flux example for what you are building.
 - inspect_example / read_doc: fetch the full text of a specific one by id.
 - compile_check: assemble a draft WAT through the real HDM assembler and get the exact error back. ALWAYS compile_check your candidate and fix any error before answering.
 When finished, reply with ONLY the final complete (module ...) form — no tool call, no prose.
@@ -110,19 +110,23 @@ func RunAgenticSieve(ctx context.Context, model ToolReasoner, ledger *storage.Le
 // assembler (no side effects); the model's produced WAT is still fully verified later.
 func buildAgenticTools(ledger *storage.LedgerEngine, cs *compiler.CompilerService, kind, intent string, layout flux.Layout, lastFlux *string) ([]inference.ToolDef, inference.ToolExec) {
 	defs := []inference.ToolDef{
-		{Name: "list_examples", Description: "List available worked WAT examples (id + one-line semantics) for this cell's kind.", Parameters: objSchema(nil, nil)},
-		{Name: "find_examples", Description: "Search worked WAT examples by a query; returns the best matches with their WAT.", Parameters: objSchema(map[string]string{"query": "what you want a worked example of"}, []string{"query"})},
-		{Name: "inspect_example", Description: "Return the full WAT of one example by id.", Parameters: objSchema(map[string]string{"id": "the example id"}, []string{"id"})},
+		{Name: "list_examples", Description: "List available worked Flux examples (id + one-line semantics) for this cell's kind.", Parameters: objSchema(nil, nil)},
+		{Name: "find_examples", Description: "Search worked Flux examples by a query; returns the best matches with their Flux.", Parameters: objSchema(map[string]string{"query": "what you want a worked example of"}, []string{"query"})},
+		{Name: "inspect_example", Description: "Return the full source of one example by id.", Parameters: objSchema(map[string]string{"id": "the example id"}, []string{"id"})},
 		{Name: "find_docs", Description: "Search how-to documents on architectural patterns; returns titles + bodies.", Parameters: objSchema(map[string]string{"query": "the topic to look up"}, []string{"query"})},
 		{Name: "read_doc", Description: "Return the full body of one document by id.", Parameters: objSchema(map[string]string{"id": "the document id"}, []string{"id"})},
-		{Name: "compile_check", Description: "Assemble a WAT (module ...) through the HDM assembler; returns 'ok' or the exact error. Use before finalizing.", Parameters: objSchema(map[string]string{"wat": "the full WAT module source"}, []string{"wat"})},
 	}
-	// In Flux mode, add the test-driven authoring tools: check a (cell …) program
-	// and RUN it in the real sandbox on chosen inputs to verify behavior.
 	if layout != nil {
+		// Flux mode: the test-driven authoring tools — check a (cell …) program and RUN
+		// it in the real sandbox. No raw-WAT tool: the model authors Flux, not WAT.
 		defs = append(defs,
 			inference.ToolDef{Name: "flux_check", Description: "Parse, type-check, and lower a Flux (cell …) program; returns 'ok' or the exact error (unknown field, type mismatch, syntax). Use before flux_run.", Parameters: objSchema(map[string]string{"src": "the full (cell …) Flux program"}, []string{"src"})},
 			inference.ToolDef{Name: "flux_run", Description: "Run your Flux (cell …) in the real sandbox for several ticks with inputs you choose, and get back each writable field's per-tick TRAJECTORY (or the drawn shapes) — so you can see the full behavior over time, not just one step. Use enough steps to reach the edge cases the GOAL implies (e.g. the ball hitting a wall) and confirm it behaves right (reverses/bounces, doesn't stop or leave the screen). inputs is a JSON object of field→integer; steps defaults to 12.", Parameters: objSchema(map[string]string{"src": "the full (cell …) Flux program", "inputs": "JSON object mapping field names to integers, e.g. {\"ball_x\":300,\"ball_vx\":5,\"screen_width\":320}", "steps": "how many ticks to run (integer; use enough to reach an edge case, e.g. 30)"}, []string{"src", "inputs"})},
+		)
+	} else {
+		// WAT mode (legacy, no layout): assemble a raw module.
+		defs = append(defs,
+			inference.ToolDef{Name: "compile_check", Description: "Assemble a WAT (module ...) through the HDM assembler; returns 'ok' or the exact error. Use before finalizing.", Parameters: objSchema(map[string]string{"wat": "the full WAT module source"}, []string{"wat"})},
 		)
 	}
 	exec := func(name, argsJSON string) string {
@@ -149,14 +153,14 @@ func buildAgenticTools(ledger *storage.LedgerEngine, cs *compiler.CompilerServic
 			}
 			var b strings.Builder
 			for _, e := range FindExamples(ledger, kind, q, nil, nil, 3) {
-				fmt.Fprintf(&b, "EXAMPLE (%s, score %s):\n%s\n\n", e.Semantics, e.Score, e.WAT)
+				fmt.Fprintf(&b, "EXAMPLE (%s, score %s):\n%s\n\n", e.Semantics, e.Score, e.Genotype)
 			}
 			return orNone(b.String(), "no matching examples")
 		case "inspect_example":
 			id := getStr("id")
 			for _, e := range LoadExamples(ledger) {
 				if e.ID == id {
-					return e.WAT
+					return e.Genotype
 				}
 			}
 			return "no example with that id"

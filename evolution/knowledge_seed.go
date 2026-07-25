@@ -3,24 +3,23 @@ package evolution
 import (
 	"log"
 
-	"github.com/mdcfrancis/flow/compiler"
+	"github.com/mdcfrancis/flow/flux"
 	"github.com/mdcfrancis/flow/storage"
 )
 
-// seedDrawAtPositionWAT is a WORKED render cell: it reads ball_x (0xB0000) and ball_y
-// (0xB0004) from the shared contract and emits ONE circle record at those coordinates —
-// the exact "read a field, draw there" pattern the single-ball renderer kept missing. A
-// circle record is op=3 with a=cx, b=cy, c=radius; the 24-byte stream is [op,a,b,c,d,rgba].
-const seedDrawAtPositionWAT = `(module
-  (import "hdm:kernel/hardware-io" "shared-cluster-memory" (memory 100))
-  (func (export "render-frame") (param $base i32) (param $cap i32) (result i32)
-    local.get $base i32.const 3 i32.store
-    local.get $base i32.const 4 i32.add i32.const 0xB0000 i32.load i32.store
-    local.get $base i32.const 8 i32.add i32.const 0xB0004 i32.load i32.store
-    local.get $base i32.const 12 i32.add i32.const 8 i32.store
-    local.get $base i32.const 16 i32.add i32.const 0 i32.store
-    local.get $base i32.const 20 i32.add i32.const 0xFFCC33FF i32.store
-    i32.const 24))`
+// The seed EXAMPLES are worked FLUX cells — Flux is the language the model authors in,
+// so its worked examples are Flux too (not WAT). seedDrawAtPositionFlux is the "read a
+// field, draw there" render pattern the single-ball renderer kept missing;
+// seedWallBounceFlux is the compute pattern: integrate, reflect at the walls, clamp.
+const seedDrawAtPositionFlux = `(cell renderer (reads ball_x ball_y) (draw (circle ball_x ball_y 8 #xFFCC33FF)))`
+
+const seedWallBounceFlux = `(cell physics
+  (reads ball_x ball_y vel_x vel_y screen_w screen_h)
+  (writes ball_x ball_y vel_x vel_y)
+  (let ([nx (+ ball_x vel_x)] [ny (+ ball_y vel_y)]
+        [bx (or (< nx 0) (>= nx screen_w))] [by (or (< ny 0) (>= ny screen_h))])
+    (write (vel_x (if bx (neg vel_x) vel_x)) (vel_y (if by (neg vel_y) vel_y))
+           (ball_x (clamp nx 0 (- screen_w 1))) (ball_y (clamp ny 0 (- screen_h 1))))))`
 
 // seedDocs is the starter DOCUMENT set — the ABI/pattern knowledge that today lives only
 // inside evolution.Capabilities and the prompts, lifted into the retrievable store.
@@ -82,13 +81,15 @@ var seedDocs = []Document{
 			"canvas draw-output; 0xB0000+ dynamic sandbox — shared app state that PERSISTS across " +
 			"ticks. Application contract fields live in the sandbox; a writer and its reader must " +
 			"use the SAME offset."},
-	{Topic: "wat-abi", Title: "WAT ABI + assembler constraints",
+	{Topic: "flux-authoring", Title: "You write Flux; the lowerer owns the ABI",
 		Provenance: "seed",
-		Body: "Import the shared memory as (import \"hdm:kernel/hardware-io\" \"shared-cluster-memory\" " +
-			"(memory 100)). Export exactly ONE entry: run-tick(i32,i32)->i32 (compute) or " +
-			"render-frame(i32,i32)->i32 (UI). The hand-written assembler is strict: at most ONE " +
-			"table per module; keep types consistent (i32 throughout — do not mix i64 into an i32 " +
-			"op like i32.div_s); put all (local ...) at the top of the function; balance parens."},
+		Body: "Author cells in FLUX — a typed (cell NAME …) S-expression, never WAT or (module …). " +
+			"A cell is a PURE FUNCTION over shared state: (reads …)/(writes …) with a body ending in " +
+			"(write (field expr) …) for compute, or (reads …)(draw …) for a view. You write ONLY logic. " +
+			"The lowerer owns everything else — the module wrapper, the memory import, the entry export " +
+			"(run-tick for compute, render-frame for a view), locals, field addressing, the draw-record " +
+			"ABI, and all stack/type discipline. Types are Int/Float/Bool/Color and never implicitly " +
+			"coerce; comparisons yield Bool. Declare operator knobs as capabilities: (requires (scalar NAME MIN MAX))."},
 }
 
 // SeedKnowledge idempotently seeds the starter documents and any compilable seed
@@ -102,16 +103,26 @@ func SeedKnowledge(ledger *storage.LedgerEngine) {
 	for _, d := range seedDocs {
 		_ = AddDocument(ledger, d)
 	}
-	svc := compiler.NewCompilerService()
 	seedExamples := []Example{
 		{Kind: "render", Entry: "render-frame", Semantics: "read ball_x and ball_y and draw a filled circle at that position",
 			Reads: []string{"ball_x", "ball_y"}, Tags: []string{"draw-at-position"},
-			WAT: seedDrawAtPositionWAT, Score: "seed", Provenance: "seed"},
+			Genotype: seedDrawAtPositionFlux, Score: "seed", Provenance: "seed"},
+		{Kind: "compute", Entry: "run-tick", Semantics: "integrate a position and reflect it at the walls, clamping inside",
+			Reads: []string{"ball_x", "ball_y", "vel_x", "vel_y", "screen_w", "screen_h"},
+			Writes: []string{"ball_x", "ball_y", "vel_x", "vel_y"}, Tags: []string{"wall-bounce"},
+			Genotype: seedWallBounceFlux, Score: "seed", Provenance: "seed"},
+	}
+	// The seed genomes are FLUX, so validate them through the Flux front end (parse +
+	// type-check + lower) against a small layout covering the fields they reference.
+	seedLayout := flux.Layout{
+		"ball_x": {Type: flux.TInt, Offset: 0xB0000}, "ball_y": {Type: flux.TInt, Offset: 0xB0004},
+		"vel_x": {Type: flux.TInt, Offset: 0xB0008}, "vel_y": {Type: flux.TInt, Offset: 0xB000C},
+		"screen_w": {Type: flux.TInt, Offset: 0xB0010}, "screen_h": {Type: flux.TInt, Offset: 0xB0014},
 	}
 	kept := 0
 	for _, e := range seedExamples {
-		if art, err := svc.CompileGenotype(e.WAT); err != nil || art == nil || !art.SyntaxPassed {
-			log.Printf("[DOC] seed example %q skipped (did not compile)", e.Semantics)
+		if _, err := flux.Compile("seed", e.Genotype, seedLayout); err != nil {
+			log.Printf("[DOC] seed example %q skipped (did not compile: %v)", e.Semantics, err)
 			continue
 		}
 		if ok, _ := AddExample(ledger, e); ok {
