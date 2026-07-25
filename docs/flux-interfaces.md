@@ -299,3 +299,43 @@ today's degenerate case where every operator capability happens to live on one b
 The binding model (next) is therefore a **matcher**: resolve each required
 capability against the nodes advertising it, place the adapter on a provider, bind
 the resource there.
+
+### 8.2 Capability groups — one capability, many providers
+
+A capability is not, in general, provided by a single node — it is provided by the
+**set of nodes advertising it** (the group). The single IO node of §8.1 is just a
+group of one. Multiplayer is the driving case: each player's box advertises the
+operator-input capability, so "player input" is a capability *group* spanning all
+player nodes.
+
+A requirement then carries a **multiplicity**:
+- **singleton** — bind one provider (today's slider: one operator, one node);
+- **per-member** — instantiate the adapter *once per group member* (one input
+  adapter per player), each pinned to its own node.
+
+Per-member fan-out produces **identity-keyed shared state**: each adapter instance
+writes its member's slot — an array indexed by member (player) id. That is exactly
+the array shape the `sys:map` combinator / cell-dispatch already operate over:
+
+- the group's contributions **are** a collection,
+- the per-member adapters **are** a map producing it,
+- the game logic **is** a map/fold over it.
+
+So multiplayer aggregation needs **no new machinery** — it is the combinator layer
+applied to a capability group. The app is written against the *group* ("fold over
+players"), never a node or a fixed player count.
+
+Outputs are symmetric: a display is a capability group (each player's screen), so a
+render adapter fans out per member — each player node renders its own view from the
+replicated shared state. Input adapters map *into* the shared collection; output
+adapters map *out of* it; compute folds over it.
+
+Membership can be dynamic (players join/leave → the group grows/shrinks → adapters
+spawned/reaped); v1 can bound it (max N members, pre-allocated slots) with dynamic
+membership as a later layer.
+
+The unification: single-player, single-IO-node, and N-player multiplayer are the
+**same model at different group cardinalities and multiplicities**. Private-pages
+gave *location* independence (a compute cell names no node); capability groups +
+combinators give *cardinality* independence (app logic names no player count). The
+runtime populates the group; the app aggregates over it.
