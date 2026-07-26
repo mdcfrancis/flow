@@ -33,12 +33,15 @@ type Task struct {
 
 // Variant is a candidate language: it produces the grammar that constrains
 // generation for a task and validates a generated program. For a grammar-only change
-// Valid is nil and the shared Flux checker is used; a variant that alters the
-// surface or semantics supplies its own validator.
+// Valid/Syntax are nil and the shared S-expr Flux checker is used; a variant with a
+// different SURFACE (e.g. Forth) supplies its own Valid (parses+type-checks to the
+// IR) and Syntax (parses only) so the rates are measured in that surface, not s-expr.
 type Variant struct {
-	Name    string
-	Grammar func(Layout, CellKind) string
-	Valid   func(src string, layout Layout) bool
+	Name     string
+	Grammar  func(Layout, CellKind) string
+	Valid    func(src string, layout Layout) bool // nil → parse + type-check s-expr
+	Syntax   func(src string, layout Layout) bool // nil → parse s-expr
+	Preamble string                               // surface description prepended to the task (the "atomic building blocks" the model composes)
 }
 
 // Generator produces one completion for a prompt under a grammar constraint,
@@ -82,19 +85,27 @@ func RunScoreboard(gen Generator, tasks []Task, variants []Variant, samples int)
 		if validFn == nil {
 			validFn = defaultValid
 		}
+		syntaxFn := v.Syntax
+		if syntaxFn == nil {
+			syntaxFn = func(src string, _ Layout) bool { return parses(src) }
+		}
 		var totalSyntax, totalValid, totalSamples, tokenN int
 		var tokenSum, canonAcc float64
 		var canonTasks int
 		for _, task := range tasks {
 			g := v.Grammar(task.Layout, task.Kind)
 			var validSrcs []string
+			prompt := task.Prompt
+			if v.Preamble != "" {
+				prompt = v.Preamble + "\n\n" + task.Prompt
+			}
 			for i := 0; i < samples; i++ {
 				totalSamples++
-				src, toks, err := gen.Generate(task.Prompt, g)
+				src, toks, err := gen.Generate(prompt, g)
 				if err != nil {
 					continue
 				}
-				if parses(src) {
+				if syntaxFn(src, task.Layout) {
 					totalSyntax++
 				}
 				if !validFn(src, task.Layout) {
@@ -186,6 +197,40 @@ func DefaultBenchmark() []Task {
 			Prompt: "Draw the ball as a circle at its position."},
 	}
 }
+
+// SurfaceVariants are the two SURFACES over the same IR — the S-expression baseline
+// and the concatenative Forth surface — to be A/B'd for LLM efficiency
+// (docs/flux-surface-ir.md). Forth supplies its own Valid/Syntax because its source
+// is a word stream, not an S-expression; both lower through the identical invariant,
+// so anything either emits is behavior-safe by BehaviorHash.
+func SurfaceVariants() []Variant {
+	return []Variant{
+		{Name: "sexpr", Grammar: GBNF, Preamble: sexprPreamble},
+		{
+			Name:     "forth",
+			Grammar:  GBNFForth,
+			Valid:    func(src string, l Layout) bool { _, err := (Forth{}).Read("m", src, l); return err == nil },
+			Syntax:   func(src string, l Layout) bool { _, err := forthToSexpr(src, l); return err == nil },
+			Preamble: forthPreamble,
+		},
+	}
+}
+
+const sexprPreamble = `FLUX (S-EXPRESSION) — write (cell c (reads …) (writes …) BODY).
+BODY = (let ([t0 expr] …) (write (field expr) …))  or, for a view, (draw (circle cx cy r #xRRGGBBAA) …).
+Operators are PREFIX: (+ a b) (- a b) (clamp x lo hi) (if cond then else) (< a b) (or a b) (neg x).
+Example:  (cell c (reads ball_x vel_x) (writes ball_x) (write (ball_x (+ ball_x vel_x))))`
+
+const forthPreamble = `FLUX (FORTH) — write a cell as a POSTFIX word stream over a stack:
+- a field or local name pushes its value; a number / #xRRGGBBAA / true / false pushes itself.
+- operators pop their args and push the result (postfix):  a b +  means a+b.
+    arithmetic: + - * / mod    compare: < <= > >= = !=    logic: and or not   unary: neg abs
+    min max        clamp: x lo hi clamp        if: cond then else ?   (both branches are evaluated)
+- ` + "`" + `expr =: t0` + "`" + ` pops the value and names it t0 — a PROLOGUE local; use these to keep each stack shallow (2–3 deep).
+- ` + "`" + `expr -> field` + "`" + ` pops the value and writes it to a shared field.
+- for a view cell:  cx cy r color circle   (or rect/line) emits a draw.
+Reads and writes are inferred — do NOT declare them.
+Example:  ball_x vel_x + =: t0   t0 0 screen_w 1 - clamp -> ball_x`
 
 // FluxV1Variants are the language variants measured so far: the baseline grammar
 // (with reads/writes clauses), the terse (clause-less, derived) candidate — the first
