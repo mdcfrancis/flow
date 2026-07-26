@@ -75,7 +75,7 @@ func forthToSexpr(src string, layout Layout) (string, error) {
 	var stack []string
 	var lets [][2]string   // ordered (localName, exprSexpr)
 	var writes [][2]string // ordered (field, exprSexpr)
-	var draws []string      // rendered draw prims
+	var draws []string     // rendered draw prims
 	locals := map[string]bool{}
 
 	pop := func() (string, error) {

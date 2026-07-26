@@ -16,7 +16,7 @@ import (
 const surfaceRef = "urn:hdm:language:surface"
 
 var (
-	surfaceMu     sync.RWMutex
+	surfaceMu         sync.RWMutex
 	activeSurfaceName = "sexpr" // set by InstallSurface at boot; overridden during a promotion rebuild
 )
 
