@@ -141,6 +141,31 @@ model iteration) is built and ready, but the grammar lever alone reached valid=1
 so the agentic loop is now insurance for the harder residual (behavioral correctness,
 rare unbound-local cases), not required for validity.
 
+### Wired operationally (HDM_FLUX_SURFACE=forth) — verified live
+
+The winning surface is now selectable in the real synthesis path: the sieve (one-shot
+AND agentic) authors cells in type-stratified Forth, validated by the agentic
+`ForthDiagnose` loop, and the derived vocabulary (neg/abs/min/max/clamp) is distilled
+into an evolvable prologue so only the minimal core reaches the backend. A live grow
+committed this `bounce:physics` genome — stored as Forth, the evolved language:
+
+```
+ball_x ball_vx + =: i0
+ball_y ball_vy + =: i1
+i0 0 < i0 screen_width >= or =: b0
+i1 0 < i1 screen_height >= or =: b1
+b0 ball_vx neg ball_vx ? =: i2
+b1 ball_vy neg ball_vy ? =: i3
+i0 0 screen_width clamp -> ball_x
+i1 0 screen_height clamp -> ball_y
+i2 -> ball_vx
+i3 -> ball_vy
+```
+
+Type-stratified locals (i-pool / b-pool), shallow prologue-bound stacks, words for
+neg/clamp/?, `-> field` writes — the science-loop-evolved language, running in the
+system for identical external behavior.
+
 ## Where this goes
 
 - **Now**: the surface is a swappable `Surface` in Go; a language experiment is a new
