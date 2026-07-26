@@ -10,14 +10,20 @@ import (
 	"time"
 )
 
-// TestGBNFEvolutionMeasure is the north-star scoreboard: it A/Bs the baseline
-// grammar (with reads/writes clauses) against the evolved terse grammar
-// (clause-less, derived) on the two fitness axes we can measure here —
-// syntax-valid rate (must stay ~100%: both are grammar-constrained) and TOKEN COST.
-// The evolution wins if, at equal validity, it costs fewer tokens. Skipped unless
-// HDM_LIVE_GBNF=1. Run:
+// TestGBNFEvolutionMeasure is the north-star scoreboard run live: it A/Bs the
+// language variants (baseline grammar with reads/writes clauses vs the evolved terse
+// clause-less grammar) on the canonical benchmark and ranks them by generation
+// fitness — the cheap micro-tier of language-evolution exploration (see
+// flux/scoreboard.go, docs/language-evolution.md). Skipped unless HDM_LIVE_GBNF=1.
+// Run:
 //
 //	HDM_LIVE_GBNF=1 HDM_LLM_API_KEY=$(cat .hdm_api_key) go test ./flux/ -run EvolutionMeasure -v
+//
+// Sampling at temperature>0 with N samples is what makes CANONICALITY observable: a
+// deterministic decode would trivially score 1. The baseline (clauses) must be
+// valid-by-construction; the terse variant was measured a NEGATIVE (fewer clause
+// tokens but the clauses anchor concision + field vocabulary, so the body bloats and
+// invents names). See docs/grammar-constrained-flux.md.
 func TestGBNFEvolutionMeasure(t *testing.T) {
 	if os.Getenv("HDM_LIVE_GBNF") == "" {
 		t.Skip("set HDM_LIVE_GBNF=1 to run the live grammar A/B measurement")
@@ -26,65 +32,53 @@ func TestGBNFEvolutionMeasure(t *testing.T) {
 	if url == "" {
 		url = "http://localhost:8000"
 	}
-	key := os.Getenv("HDM_LLM_API_KEY")
 	model := os.Getenv("HDM_LLM_MODEL")
 	if model == "" {
 		model = "Qwen3.6-27B-oQ4"
 	}
-	layout := Layout{
-		"ball_x": {Type: TInt, Offset: 0xB0000}, "ball_y": {Type: TInt, Offset: 0xB0004},
-		"ball_vx": {Type: TInt, Offset: 0xB0008}, "ball_vy": {Type: TInt, Offset: 0xB000C},
-		"screen_w": {Type: TInt, Offset: 0xB0010}, "screen_h": {Type: TInt, Offset: 0xB0014},
+	samples := 5
+
+	gen := &httpGenerator{url: url, key: os.Getenv("HDM_LLM_API_KEY"), model: model, temperature: 0.7}
+	board := RunScoreboard(gen, DefaultBenchmark(), FluxV1Variants(), samples)
+
+	t.Logf("=== language A/B scoreboard (%d samples/task) ===", samples)
+	for rank, s := range board {
+		t.Logf("#%d %-18s fitness=%.3f | valid=%.2f tokens=%.1f canon=%.2f",
+			rank+1, s.Variant, s.Fitness(), s.ValidRate, s.MeanTokens, s.Canonicality)
 	}
-	objectives := []struct {
-		name, prompt string
-		kind         CellKind
-	}{
-		{"physics", "Move the ball: add each velocity to each position, and reflect the velocity at the walls.", KindCompute},
-		{"input", "Set ball_vx to ball_vx and ball_x to ball_x plus ball_vx.", KindCompute},
-		{"view", "Draw the ball as a circle at its position.", KindView},
-	}
-	// The measured WIN is validity-by-construction: the strict grammar (with clauses)
-	// must produce valid Flux for every objective. The terse (clause-less) variant is
-	// reported for comparison — it was found to be a NEGATIVE (fewer clause tokens but
-	// the clauses anchor concision + field vocabulary, so the body bloats and invents
-	// names). See docs/grammar-constrained-flux.md.
-	for _, o := range objectives {
-		base := gen(t, url, key, model, o.prompt, GBNF(layout, o.kind))
-		terse := gen(t, url, key, model, o.prompt, GBNFTerse(layout, o.kind))
-		baseOK := valid(base.src, layout)
-		terseOK := valid(terse.src, layout)
-		t.Logf("%-8s  strict(clauses): %3d tok valid=%v | terse(no clauses): %3d tok valid=%v",
-			o.name, base.tokens, baseOK, terse.tokens, terseOK)
-		if !baseOK {
-			t.Errorf("%s: the strict grammar must produce VALID Flux by construction:\n%s", o.name, base.src)
+	// The baseline grammar must produce valid Flux by construction.
+	for _, s := range board {
+		if s.Variant == "baseline(clauses)" && s.ValidRate < 0.99 {
+			t.Errorf("baseline grammar must be valid-by-construction, got valid rate %.2f", s.ValidRate)
 		}
 	}
 }
 
-type genResult struct {
-	src    string
-	tokens int
+// httpGenerator is the live Generator: it calls the OpenAI-compatible oMLX endpoint
+// with a guided_grammar constraint (the enforced path; see
+// docs/grammar-constrained-flux.md) and returns the completion + its token count.
+type httpGenerator struct {
+	url, key, model string
+	temperature     float64
 }
 
-func gen(t *testing.T, url, key, model, prompt, grammar string) genResult {
-	t.Helper()
+func (g *httpGenerator) Generate(prompt, grammar string) (string, int, error) {
 	body, _ := json.Marshal(map[string]any{
-		"model":                model,
+		"model":                g.model,
 		"messages":             []any{map[string]string{"role": "user", "content": prompt}},
 		"max_tokens":           400,
-		"temperature":          0.0,
+		"temperature":          g.temperature,
 		"guided_grammar":       grammar,
 		"chat_template_kwargs": map[string]any{"enable_thinking": false},
 	})
-	req, _ := http.NewRequest(http.MethodPost, url+"/v1/chat/completions", bytes.NewReader(body))
+	req, _ := http.NewRequest(http.MethodPost, g.url+"/v1/chat/completions", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
-	if key != "" {
-		req.Header.Set("Authorization", "Bearer "+key)
+	if g.key != "" {
+		req.Header.Set("Authorization", "Bearer "+g.key)
 	}
 	resp, err := (&http.Client{Timeout: 120 * time.Second}).Do(req)
 	if err != nil {
-		t.Fatalf("request: %v", err)
+		return "", 0, err
 	}
 	defer resp.Body.Close()
 	raw, _ := io.ReadAll(resp.Body)
@@ -99,16 +93,7 @@ func gen(t *testing.T, url, key, model, prompt, grammar string) genResult {
 		} `json:"usage"`
 	}
 	if err := json.Unmarshal(raw, &out); err != nil || len(out.Choices) == 0 {
-		t.Fatalf("decode: %v (%s)", err, string(raw)[:min(200, len(raw))])
+		return "", 0, err
 	}
-	return genResult{src: out.Choices[0].Message.Content, tokens: out.Usage.CompletionTokens}
-}
-
-func valid(src string, layout Layout) bool {
-	f, err := Parse("m", src)
-	if err != nil {
-		return false
-	}
-	_, err = Check(f, layout)
-	return err == nil
+	return out.Choices[0].Message.Content, out.Usage.CompletionTokens, nil
 }
