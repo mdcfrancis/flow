@@ -205,14 +205,27 @@ func DefaultBenchmark() []Task {
 // so anything either emits is behavior-safe by BehaviorHash.
 func SurfaceVariants() []Variant {
 	return []Variant{
-		{Name: "sexpr", Grammar: GBNF, Preamble: sexprPreamble},
-		{
-			Name:     "forth",
-			Grammar:  GBNFForth,
-			Valid:    func(src string, l Layout) bool { _, err := (Forth{}).Read("m", src, l); return err == nil },
-			Syntax:   func(src string, l Layout) bool { _, err := forthToSexpr(src, l); return err == nil },
-			Preamble: forthPreamble,
-		},
+		SExprVariant(),
+		ForthVariant("forth", forthMaxDepth),
+	}
+}
+
+// SExprVariant is the S-expression baseline surface.
+func SExprVariant() Variant {
+	return Variant{Name: "sexpr", Grammar: GBNF, Preamble: sexprPreamble}
+}
+
+// ForthVariant builds a Forth scoreboard variant at a given stack-depth bound — the
+// lever under test: a tighter bound forbids deeper inline expressions, forcing more
+// intermediates into the `=:` prologue (shallower, more inspectable stacks), which we
+// measure against validity (docs/flux-surface-ir.md).
+func ForthVariant(name string, maxDepth int) Variant {
+	return Variant{
+		Name:     name,
+		Grammar:  func(l Layout, k CellKind) string { return gbnfForth(l, k, maxDepth) },
+		Valid:    func(src string, l Layout) bool { _, err := (Forth{}).Read("m", src, l); return err == nil },
+		Syntax:   func(src string, l Layout) bool { _, err := forthToSexpr(src, l); return err == nil },
+		Preamble: forthPreamble,
 	}
 }
 
@@ -221,16 +234,24 @@ BODY = (let ([t0 expr] …) (write (field expr) …))  or, for a view, (draw (ci
 Operators are PREFIX: (+ a b) (- a b) (clamp x lo hi) (if cond then else) (< a b) (or a b) (neg x).
 Example:  (cell c (reads ball_x vel_x) (writes ball_x) (write (ball_x (+ ball_x vel_x))))`
 
-const forthPreamble = `FLUX (FORTH) — write a cell as a POSTFIX word stream over a stack:
-- a field or local name pushes its value; a number / #xRRGGBBAA / true / false pushes itself.
-- operators pop their args and push the result (postfix):  a b +  means a+b.
-    arithmetic: + - * / mod    compare: < <= > >= = !=    logic: and or not   unary: neg abs
-    min max        clamp: x lo hi clamp        if: cond then else ?   (both branches are evaluated)
-- ` + "`" + `expr =: t0` + "`" + ` pops the value and names it t0 — a PROLOGUE local; use these to keep each stack shallow (2–3 deep).
-- ` + "`" + `expr -> field` + "`" + ` pops the value and writes it to a shared field.
-- for a view cell:  cx cy r color circle   (or rect/line) emits a draw.
-Reads and writes are inferred — do NOT declare them.
-Example:  ball_x vel_x + =: t0   t0 0 screen_w 1 - clamp -> ball_x`
+const forthPreamble = `FLUX (FORTH) — write a cell as a POSTFIX word stream over a stack. Operands come
+BEFORE the operator, which pops them and pushes its result. Word stack-effects
+( inputs -- output ):
+    +  ( a b -- a+b )    -  ( a b -- a-b )    *  ( a b -- a*b )    /  ( a b -- a/b )    mod ( a b -- a%b )
+    <  ( a b -- flag )   <= > >= = !=  (same shape)     and or ( a b -- flag )     not neg abs ( a -- x )
+    min max ( a b -- x )     clamp ( x lo hi -- x' )     ?  ( cond then else -- picked )   [both branches evaluated]
+    =: NAME   ( v -- )  binds the top value to a local NAME (t0..t7)
+    -> FIELD  ( v -- )  writes the top value to a shared field
+    circle    ( cx cy r color -- )   also rect/line ( x y w h color -- )   emit a draw (view cells)
+RULES:
+1. Keep every stack SHALLOW. The moment a value is reused or an expression is more than ~2 words deep, bind it: ` + "`" + `… =: t0` + "`" + ` then use ` + "`" + `t0` + "`" + `.
+2. Reads and writes are inferred — do NOT declare them.
+3. Compute the shared updates with ` + "`" + `-> field` + "`" + `; a view draws with circle/rect/line.
+Example (note how each intermediate is named so no stack is deep):
+    ball_x vel_x + =: t0
+    ball_y vel_y + =: t1
+    t0 0 screen_w 1 - clamp -> ball_x
+    t1 0 screen_h 1 - clamp -> ball_y`
 
 // FluxV1Variants are the language variants measured so far: the baseline grammar
 // (with reads/writes clauses), the terse (clause-less, derived) candidate — the first

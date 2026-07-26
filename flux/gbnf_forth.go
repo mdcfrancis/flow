@@ -15,13 +15,23 @@ import (
 // GBNF.
 const forthMaxDepth = 3
 
-// GBNFForth is the guided grammar for the Forth surface (flux/forth.go): a bounded,
-// stack-balanced word stream. Each statement is a depth-bounded postfix expression
-// consumed by `=: local` (a prologue binding) or `-> field` (a write) or a draw word,
-// so the stream is always balanced at statement boundaries. Atoms are the enumerated
-// fields, a fixed local pool (t0…), and literals — no free identifiers. Returns ""
-// when there is nothing to constrain.
+// GBNFForth is the guided grammar for the Forth surface at the default depth. A
+// bounded, stack-balanced word stream: each statement is a depth-bounded postfix
+// expression consumed by `=: local` (a prologue binding) or `-> field` (a write) or a
+// draw word, so the stream is always balanced at statement boundaries. Atoms are the
+// enumerated fields, a fixed local pool (t0…), and literals — no free identifiers.
 func GBNFForth(layout Layout, kind CellKind) string {
+	return gbnfForth(layout, kind, forthMaxDepth)
+}
+
+// gbnfForth is GBNFForth with an explicit depth bound, so a language experiment can
+// A/B how TIGHT the bound is: a smaller maxDepth forbids deeper inline expressions,
+// forcing more intermediates into the `=:` prologue — shallower, more inspectable
+// stacks (the validity lever for the Forth surface, docs/flux-surface-ir.md).
+func gbnfForth(layout Layout, kind CellKind, maxDepth int) string {
+	if maxDepth < 1 {
+		maxDepth = 1
+	}
 	var reads, writes []string
 	for n, f := range layout {
 		reads = append(reads, n)
@@ -57,12 +67,12 @@ func GBNFForth(layout Layout, kind CellKind) string {
 	// Stratified POSTFIX expression with exact per-op arities (binop=2, unop=1,
 	// clamp/`?`=3) — the operator trails its operands. Depth-0 is an atom.
 	b.WriteString("expr0 ::= atom\n")
-	for d := 1; d <= forthMaxDepth; d++ {
+	for d := 1; d <= maxDepth; d++ {
 		p := fmt.Sprintf("expr%d", d-1)
 		fmt.Fprintf(&b, "expr%d ::= atom | %s \" \" %s \" \" binop | %s \" \" unop | %s \" \" %s \" \" %s \" ?\" | %s \" \" %s \" \" %s \" clamp\"\n",
 			d, p, p, p, p, p, p, p, p, p)
 	}
-	fmt.Fprintf(&b, "expr ::= expr%d\n", forthMaxDepth)
+	fmt.Fprintf(&b, "expr ::= expr%d\n", maxDepth)
 
 	switch kind {
 	case KindView:

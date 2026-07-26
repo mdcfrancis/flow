@@ -28,14 +28,23 @@ func TestSurfaceAB(t *testing.T) {
 	gen := &httpGenerator{url: url, key: os.Getenv("HDM_LLM_API_KEY"), model: model, temperature: 0.7}
 	samples := 5
 
-	board := RunScoreboard(gen, DefaultBenchmark(), SurfaceVariants(), samples)
+	// The lever under test: the Forth stack-depth bound. A tighter bound (d2) forces
+	// more `=:` prologue locals — shallower stacks — which should recover validity
+	// while keeping the token/canonicality wins. Sharpened dictionary preamble applies
+	// to both Forth variants.
+	variants := []Variant{
+		SExprVariant(),
+		ForthVariant("forth-d3", 3),
+		ForthVariant("forth-d2", 2),
+	}
+	board := RunScoreboard(gen, DefaultBenchmark(), variants, samples)
 	t.Logf("=== surface A/B (%d samples/task, temp 0.7) ===", samples)
 	for rank, s := range board {
-		t.Logf("#%d %-8s fitness=%.3f | syntax=%.2f valid=%.2f tokens=%.1f canon=%.2f",
+		t.Logf("#%d %-9s fitness=%.3f | syntax=%.2f valid=%.2f tokens=%.1f canon=%.2f",
 			rank+1, s.Variant, s.Fitness(), s.SyntaxRate, s.ValidRate, s.MeanTokens, s.Canonicality)
 	}
-	if len(board) != 2 {
-		t.Fatalf("expected two surfaces, got %d", len(board))
+	if len(board) != len(variants) {
+		t.Fatalf("expected %d surfaces, got %d", len(variants), len(board))
 	}
 	for _, s := range board {
 		if s.Samples == 0 {
