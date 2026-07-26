@@ -65,6 +65,25 @@ Verified: for view, compute-with-`let`, and nested-expression programs, `text �
 text → IR` lowers to identical WAT (`TestSurfaceRoundTripPreservesBehavior`), and
 `Render` is idempotent.
 
+## First A/B result (live, Qwen3.6-27B-oQ4, 5 samples/task)
+
+| surface | syntax | valid | tokens | canonicality | fitness |
+|---------|:------:|:-----:|:------:|:------------:|:-------:|
+| sexpr   | 1.00   | 1.00  | 112.2  | 0.40         | 0.976   |
+| forth   | 0.80   | 0.60  | **23.3** | **0.62**   | 0.866   |
+
+The concatenative surface generates in **~5× fewer tokens** and is **substantially
+more canonical** (0.62 vs 0.40 — the model converges on one program far more often).
+Both are behavior-safe by `BehaviorHash`. The cost is **validity**: type-valid rate
+falls to 0.60 (grammar-valid-but-mis-stacked programs), which — because valid-rate is
+the floor — leaves net fitness just behind s-expr.
+
+So the surface war is not settled; it is *localized*. Forth wins big on the axes that
+matter (tokens, canonicality) and the whole gap is validity — exactly what the
+**prologue-locals / depth-bound** lever targets (`forthMaxDepth`, `=:` bindings).
+Tightening the depth bound to force more named intermediates, and sharpening the
+dictionary preamble, are the next hypotheses — now measurable on the same board.
+
 ## Where this goes
 
 - **Now**: the surface is a swappable `Surface` in Go; a language experiment is a new

@@ -32,7 +32,7 @@ func TestSurfaceAB(t *testing.T) {
 	t.Logf("=== surface A/B (%d samples/task, temp 0.7) ===", samples)
 	for rank, s := range board {
 		t.Logf("#%d %-8s fitness=%.3f | syntax=%.2f valid=%.2f tokens=%.1f canon=%.2f",
-			rank+1, s.Variant, s.Fitness(), s.SyntaxRate, s.MeanTokens, s.ValidRate, s.Canonicality)
+			rank+1, s.Variant, s.Fitness(), s.SyntaxRate, s.ValidRate, s.MeanTokens, s.Canonicality)
 	}
 	if len(board) != 2 {
 		t.Fatalf("expected two surfaces, got %d", len(board))
