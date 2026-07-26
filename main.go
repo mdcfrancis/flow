@@ -2143,6 +2143,9 @@ func main() {
 	if err := evolution.InstallPrologue(ledger); err != nil {
 		log.Fatalf("install prologue: %v", err)
 	}
+	// Install the promoted default authoring surface (sexpr until a PromoteSurface
+	// epoch flips it to forth). HDM_FLUX_SURFACE still overrides for a trial.
+	evolution.InstallSurface(ledger)
 
 	// 2. Wire the cognitive engine. Two backends: the local OpenAI-compatible MLX
 	//    server (default) or the Google Gemini API. Selecting Gemini needs no

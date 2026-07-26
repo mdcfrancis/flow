@@ -20,10 +20,16 @@ import (
 // invariant, so the choice only changes what the model generates. Opt-in via
 // HDM_FLUX_SURFACE so default behavior is unchanged.
 func fluxSurfaceName() string {
-	if strings.EqualFold(strings.TrimSpace(os.Getenv("HDM_FLUX_SURFACE")), "forth") {
+	// An explicit env override wins (for testing a surface without promoting it);
+	// otherwise the promoted default from the ledger (currentSurface), set at boot by
+	// InstallSurface and flipped by a successful PromoteSurface epoch.
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("HDM_FLUX_SURFACE"))) {
+	case "forth":
 		return "forth"
+	case "sexpr":
+		return "sexpr"
 	}
-	return "sexpr"
+	return currentSurface()
 }
 
 func fluxIsForth() bool { return fluxSurfaceName() == "forth" }

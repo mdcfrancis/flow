@@ -1014,7 +1014,9 @@ func (o *Orchestrator) authoringLineage(urn, ns string, contract *EntryContract,
 			kind = flux.KindView
 		}
 		// Same IR (so the language version is unchanged), but the SURFACE the model
-		// decodes under differs — record the active surface's grammar.
+		// decodes under differs — record the active surface + its grammar so a surface
+		// change is a rebuild dimension the epoch gate can act on.
+		l.Surface = fluxSurfaceName()
 		if fluxIsForth() {
 			l.Grammar = hashStr(flux.GBNFForthTyped(layout, kind))
 		} else {

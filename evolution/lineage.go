@@ -58,6 +58,7 @@ type Lineage struct {
 	Result    string   `json:"result"`              // genotype hash of the derived cell (the key)
 	URN       string   `json:"urn,omitempty"`       // cell identity (provenance)
 	Language  string   `json:"language,omitempty"`  // hash of the language front-end / version
+	Surface   string   `json:"surface,omitempty"`   // the surface it was authored in (sexpr | forth)
 	Grammar   string   `json:"grammar,omitempty"`   // hash of the GBNF it was decoded under
 	Prompt    string   `json:"prompt,omitempty"`    // hash of the prompt TEMPLATE (not inlined Flux)
 	Model     string   `json:"model,omitempty"`     // model id + decode params
@@ -79,6 +80,7 @@ func (l Lineage) InputsHash() string {
 	sort.Strings(lv)
 	parts := []string{
 		"lang=" + l.Language,
+		"surface=" + l.Surface,
 		"grammar=" + l.Grammar,
 		"prompt=" + l.Prompt,
 		"model=" + l.Model,

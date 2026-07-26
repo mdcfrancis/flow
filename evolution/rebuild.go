@@ -24,6 +24,7 @@ import (
 // a cache HIT.
 type CurrentInputs struct {
 	Language string // the current language version (e.g. after a ΔL)
+	Surface  string // the current surface (sexpr | forth); a surface change is a rebuild too
 }
 
 // langFamily is the language identity without its version — the part before the
@@ -41,10 +42,16 @@ func langFamily(v string) string {
 // cell during a Flux language change), with no language edge, or when no target
 // language is set, is never stale on this dimension.
 func (cur CurrentInputs) stale(l Lineage) bool {
-	if cur.Language == "" || l.Language == "" {
-		return false
+	if cur.Language != "" && l.Language != "" &&
+		langFamily(l.Language) == langFamily(cur.Language) && l.Language != cur.Language {
+		return true
 	}
-	return langFamily(l.Language) == langFamily(cur.Language) && l.Language != cur.Language
+	// A surface change (e.g. sexpr → forth) re-authors the cell too — same IR, but the
+	// model must generate it in the new surface.
+	if cur.Surface != "" && l.Surface != "" && l.Surface != cur.Surface {
+		return true
+	}
+	return false
 }
 
 // migrated returns what a node's derivation inputs BECOME under cur: the language
@@ -54,6 +61,9 @@ func (cur CurrentInputs) migrated(l Lineage) Lineage {
 	m := l
 	if cur.Language != "" {
 		m.Language = cur.Language
+	}
+	if cur.Surface != "" {
+		m.Surface = cur.Surface
 	}
 	m.Result = "" // the migrated result is not known until it is re-derived
 	return m

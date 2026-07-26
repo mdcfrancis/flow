@@ -119,3 +119,60 @@ func restoreRefs(ledger *storage.LedgerEngine, snap map[string]string) {
 		_ = ledger.UpdateRef(urn, h)
 	}
 }
+
+// SurfaceChangeReport summarizes a proposed surface promotion.
+type SurfaceChangeReport struct {
+	From, To string
+	Rebuilt  int  // cells re-authored in the new surface
+	Reused   int  // cache hits (already in the target surface / memo)
+	AllGreen bool // every re-authored cell passed its unchanged scenarios
+	Promoted bool // accepted → the new surface is the live default
+}
+
+// PromoteSurface runs a whole-stack epoch to make `to` the default authoring surface
+// (docs/language-evolution.md §3 applied to a surface change). The surface is known to
+// be more LLM-efficient (the scoreboard proved it); the gate here is BEHAVIORAL — does
+// the whole stack still come back green when re-authored in it? It snapshots the
+// affected cells' refs, sets the surface active so re-derivation authors in it,
+// rebuilds every cell whose recorded surface differs via the memoized driver +
+// reauthor, and PROMOTES (persists the surface) iff all are green; else ROLLS BACK
+// (restores refs and the prior surface). reauthor authors + verifies one cell.
+func PromoteSurface(ledger *storage.LedgerEngine, to string, reauthor ReauthorFunc) (SurfaceChangeReport, error) {
+	from := currentSurface()
+	rep := SurfaceChangeReport{From: from, To: to}
+	if to == "" || to == from {
+		return rep, nil
+	}
+	cur := CurrentInputs{Surface: to}
+	plan := PlanRebuild(ledger, cur)
+	snap := make(map[string]string, len(plan.Stale))
+	for _, s := range plan.Stale {
+		if h, err := ledger.GetRef(s.URN); err == nil && h != "" {
+			snap[s.URN] = h
+		}
+	}
+	// Author in the target surface for the duration of the rebuild.
+	setActiveSurface(to)
+	outcomes, err := plan.Execute(ledger, cur, reauthor)
+	if err != nil {
+		restoreRefs(ledger, snap)
+		setActiveSurface(from)
+		return rep, err
+	}
+	for _, o := range outcomes {
+		if o.Reused {
+			rep.Reused++
+		} else {
+			rep.Rebuilt++
+		}
+	}
+	rep.AllGreen = AllGreen(outcomes)
+	rep.Promoted = rep.AllGreen
+	if rep.Promoted {
+		_ = SaveSurface(ledger, to) // persist the promoted default
+	} else {
+		restoreRefs(ledger, snap)
+		setActiveSurface(from)
+	}
+	return rep, nil
+}
