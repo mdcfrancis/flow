@@ -14,8 +14,11 @@ the same verify → gauntlet → rollback machinery. The outer Go collapses towa
 
 Two decisions fix the scope:
 1. **Front-end-only.** The WAT→WASM **assembler (`compiler/sieve.go`, ~2.3k loc)
-   stays in Go**, a fixed, trusted target. The language's design space is in
-   parse/check/lower, not in WASM byte-encoding (a frozen spec, not worth evolving).
+   stays in Go** — not just to save work, but as a **validation gate** (§5.1): the
+   Flux front end emits WAT *text*, and the trusted Go assembler validates it before
+   assembling. So the evolving compiler's output is checked at the Go layer on every
+   compile. The language's design space is in parse/check/lower, not in WASM
+   byte-encoding (a frozen spec, not worth evolving).
 2. **Plan the complete set.** We lay out the *entire* language-completeness
    prerequisite up front (§3–4), rather than discovering it feature-by-feature.
 
@@ -117,9 +120,34 @@ Flux test cell **plus the compiler's own source**. Self-hosting is reached — a
 *proven* — when the Flux compiler compiles its own source to a WASM cell
 byte-identical to what Go produces.
 
+### 5.1 Two validation layers at the Go boundary
+
+Differential verification proves *correctness during migration* (the Flux stage
+matches Go). A second, independent guarantee provides *safety during evolution*:
+the Flux front end's output is **untrusted WAT text**, and the **trusted Go
+assembler validates it on every compile**. An evolving or mutated lowerer can emit
+only WAT the assembler accepts — malformed WAT is rejected at the Go boundary and
+never becomes WASM or runs. wazero validates the assembled WASM as a further check,
+and the existing verify/gauntlet/chaos gates then validate *behavior*. So the trust
+stack is layered and entirely at the Go layer:
+
+```
+Flux front end (untrusted, evolvable)  ─►  WAT text
+    │  Go assembler:  validates WAT structure/types, rejects malformed  ← safety
+    │  wazero:        validates WASM                                     ← safety
+    │  gauntlet/chaos: validates behavior vs the regression corpus      ← correctness
+    ▼
+committed only if all pass
+```
+
+This is *why* the assembler stays Go (decision 1): it is the checkpoint that makes
+evolving the compiler safe — a broken lowerer degrades to a rejected compile, never
+a bad execution.
+
 ## 6. The trusted core (what stays Go, forever)
 
-- **The assembler** (`compiler/sieve.go`): WAT→WASM. Fixed target (decision 1).
+- **The assembler** (`compiler/sieve.go`): WAT→WASM. Fixed target *and* the
+  validation gate on the evolving compiler's output (§5.1) — the reason it stays Go.
 - **wazero + the host ABI/kernel**: memory, draw, HMI, fuel.
 - **Security/rollback**: sandbox, enforced masks, MVCC commit, epoch checkpoints, the
   verify/gauntlet/chaos gates. Evolving the *compiler* makes these MORE load-bearing
