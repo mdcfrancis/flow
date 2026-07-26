@@ -195,10 +195,19 @@ system for identical external behavior.
   but Flux couldn't walk a buffer). **Verified in the sandbox**: a tokenizer authored
   in Flux (`(at src cursor)` → classify → `(store dst cursor …)` → advance) tokenizes
   a buffer over ticks. Parser/stream cells no longer need hand-WAT — they are Flux.
-- **Remaining frontier**: the Forth surface stays an algorithmic Go parser (a
-  concatenative reader is not a keyword skin), and a fully self-hosted *surface*
-  parser cell (Flux surface → IR, in Flux) is the deep endgame — now closer, since
-  buffer-walking cells are expressible. The IR stays the contract; `Lower` stays the
+- **A full parser, in Flux (landed)**: on the buffer capability, a complete parser is
+  now authored entirely in Flux — no hand-WAT. Two cells compose:
+  a **tokenizer** (bytes → tokens; multi-digit numbers accumulated and flushed on a
+  boundary, operators emitted, spaces skipped via self-preserving stores) and a
+  **shift-reduce engine** (tokens → result over a stack: SHIFT a number, REDUCE on an
+  operator). Driven per-tick by the frame loop, the pipeline parses+evaluates
+  arbitrary multi-digit RPN arithmetic (all four operators, spaces, nesting), verified
+  in the sandbox. Parser/stream cells are Flux components now, the archetype for
+  buffer-processing cells generally.
+- **Remaining frontier**: the Forth surface stays an algorithmic Go parser, and a
+  self-hosted *surface* parser cell (Flux surface text → the IR, in Flux) is the deep
+  endgame — the same shift-reduce shape over nested S-expressions, now clearly
+  reachable given the full parser above. The IR stays the contract; `Lower` stays the
   invariant.
 - **The efficiency goal decomposes cleanly onto the surface**: *generated* efficiently
   (grammar the model decodes under — the scoreboard) and *processed* efficiently
