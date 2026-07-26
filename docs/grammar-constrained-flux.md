@@ -86,3 +86,28 @@ remaining work is types and logic, where the feedback loop already works.
 - **Does it shrink `parse` for self-hosting?** If generation is always grammatical,
   the Flux-hosted compiler needs only check+lower over a structure the model emits —
   confirm once the grammar is the live generation path.
+
+## Status — generator landed and proven live (step 1)
+
+`flux.GBNF(layout, kind)` is implemented and proven end to end on the oMLX server
+(guarded round-trip test `TestGBNFRoundTripLive`): under the grammar the model
+emits Flux that PARSES and CHECKS with no repair — a compute cell with genuine
+integrate + wall-reflect physics (lets + nested exprs) and a view cell drawing the
+ball. Two hard-won rules are now baked into the generator:
+
+1. **Bounded everything.** A repetition-prone model exploits any `*` or unbounded
+   recursion into non-termination (seen: infinite write-pairs; infinite
+   `(clamp (abs …`). All lists are capped (`gbnfMaxList`) and expression nesting is
+   stratified to a fixed depth (`gbnfMaxDepth`, `expr0..exprN`); the cell name is a
+   fixed constant (it carries no information).
+2. **Reads fixed to all fields.** A context-free grammar cannot tie the atoms used
+   in the body to a subset declared in a `(reads …)` clause, so the clause is fixed
+   to every field — every field reference is then a declared read by construction.
+   This exposes the reads/writes clauses as **redundant with the body**: an
+   LLM-optimal Flux would *derive* them from the body and drop the clauses (fewer
+   tokens, no possible mismatch). A candidate first language-evolution once the
+   grammar is the live generation path.
+
+Next: wire `guided_grammar` into the inference request + the Flux synthesis path
+(off by default, provider-gated), then measure syntax-valid rate / tokens /
+convergence with vs. without — the north-star scoreboard.
