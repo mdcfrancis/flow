@@ -10,6 +10,7 @@ import (
 	"github.com/mdcfrancis/flow/codependency"
 	"github.com/mdcfrancis/flow/compiler"
 	"github.com/mdcfrancis/flow/engine"
+	"github.com/mdcfrancis/flow/flux"
 	"github.com/mdcfrancis/flow/inference"
 	"github.com/mdcfrancis/flow/manifest"
 	"github.com/mdcfrancis/flow/storage"
@@ -234,21 +235,23 @@ type Orchestrator struct {
 	// unchanged, so a structural refactor is accepted only if behavior holds and cost
 	// drops. Set by the scheduler on plateau, cleared on a structural commit.
 	structural map[string]bool
-	// authoringExamples remembers, per cell URN, the worked-example IDs the last
-	// buildSeed inlined into that cell's prompt — the `examples` edge of its lineage
-	// (docs/lineage.md §4). Read by the commit path when it records lineage, then
-	// stale until the next build overwrites it. Serial with the evolution loop.
-	authoringExamples map[string][]string
+	// authoringInputs remembers, per cell URN, the DERIVATION INPUTS the last
+	// buildSeed authored that cell from — the language/grammar/prompt/model/examples/
+	// scenarios/contract edges of its lineage, assembled while the contract, suite,
+	// layout and retrieved examples are all in hand (the forward process). The commit
+	// path attaches the resulting genotype hash and records it (docs/lineage.md §4).
+	// Stale until the next build overwrites it. Serial with the evolution loop.
+	authoringInputs map[string]Lineage
 }
 
-// noteAuthoringExamples records which worked examples were inlined into a cell's
-// build prompt, so a subsequent commit can attribute them as the cell's lineage
-// `examples` edge. Overwrites the previous note for that cell.
-func (o *Orchestrator) noteAuthoringExamples(urn string, ids []string) {
-	if o.authoringExamples == nil {
-		o.authoringExamples = map[string][]string{}
+// noteAuthoring stashes the derivation inputs buildSeed assembled for a cell, so a
+// subsequent commit can record them (with the new genotype hash as Result) as the
+// cell's lineage. Overwrites the previous note for that cell.
+func (o *Orchestrator) noteAuthoring(urn string, l Lineage) {
+	if o.authoringInputs == nil {
+		o.authoringInputs = map[string]Lineage{}
 	}
-	o.authoringExamples[urn] = ids
+	o.authoringInputs[urn] = l
 }
 
 // SetStructural flags (or clears) a cell for structural escalation — its next synthesis
@@ -729,7 +732,7 @@ func (o *Orchestrator) RunFrame(ctx context.Context, targetURN string) (*FrameRe
 
 	// 4. Atomic reference commit: persist the new genotype+phenotype as a fresh
 	//    descriptor and hot-swap under an optimistic concurrency check.
-	newDescHash, _, err := o.repo.PutCell(targetURN, sieve.Genotype(), sieve.Artifact.Bytecode, desc.Semantics, desc.Saliency)
+	newDescHash, newDesc, err := o.repo.PutCell(targetURN, sieve.Genotype(), sieve.Artifact.Bytecode, desc.Semantics, desc.Saliency)
 	if err != nil {
 		return nil, fmt.Errorf("persist evolved descriptor: %w", err)
 	}
@@ -743,6 +746,7 @@ func (o *Orchestrator) RunFrame(ctx context.Context, targetURN string) (*FrameRe
 	fr.NewRoot = newRoot
 	fr.Reason = fmt.Sprintf("evolved across %d tapes: fuel %d->%d, H %.4f->%.4f",
 		verdict.TapesMatched, verdict.BaselineFuel, verdict.CandidateFuel, verdict.BaselineH, verdict.CandidateH)
+	o.recordLineage(targetURN, newDesc)
 	return fr, nil
 }
 
@@ -786,7 +790,7 @@ func (o *Orchestrator) compactCorpus(ctx context.Context, baseline []byte) ([]Re
 // under the MVCC optimistic-concurrency check.
 func (o *Orchestrator) commit(ctx context.Context, fr *FrameResult, baseRoot, targetURN string, desc *manifest.NodeDescriptor, sieve *SieveOutcome, reason string) (*FrameResult, error) {
 	delete(o.escalation, targetURN) // progress: reset the cost-driven escalation counter
-	newDescHash, _, err := o.repo.PutCell(targetURN, sieve.Genotype(), sieve.Artifact.Bytecode, desc.Semantics, desc.Saliency)
+	newDescHash, newDesc, err := o.repo.PutCell(targetURN, sieve.Genotype(), sieve.Artifact.Bytecode, desc.Semantics, desc.Saliency)
 	if err != nil {
 		return nil, fmt.Errorf("persist evolved descriptor: %w", err)
 	}
@@ -798,6 +802,7 @@ func (o *Orchestrator) commit(ctx context.Context, fr *FrameResult, baseRoot, ta
 	fr.Committed = true
 	fr.NewRoot = newRoot
 	fr.Reason = reason
+	o.recordLineage(targetURN, newDesc)
 	// Emit a lifecycle event whose kind matches the structural change, so the
 	// activity visual transitions the cell correctly (live / split / fused).
 	kind := "commit"
@@ -809,6 +814,26 @@ func (o *Orchestrator) commit(ctx context.Context, fr *FrameResult, baseRoot, ta
 	}
 	o.event(kind, targetURN, reason)
 	return fr, nil
+}
+
+// recordLineage persists the committed cell's derivation graph node: the inputs
+// stashed by the last buildSeed for this cell (docs/lineage.md §4), keyed by the new
+// genotype hash. Best-effort. A commit with no stashed inputs (e.g. a rare path that
+// did not run buildSeed) is skipped rather than recorded with empty inputs, which
+// would pollute the authoring memo (docs/lineage.md §2).
+func (o *Orchestrator) recordLineage(targetURN string, newDesc *manifest.NodeDescriptor) {
+	if newDesc == nil {
+		return
+	}
+	l, ok := o.authoringInputs[targetURN]
+	if !ok {
+		return
+	}
+	l.Result = newDesc.GenotypeHash
+	l.URN = targetURN
+	if err := RecordLineage(o.ledger, l); err != nil {
+		log.Printf("[LINEAGE] record %s: %v", shortName(targetURN), err)
+	}
 }
 
 // buildSeed renders the sieve seed for spec-driven building: the goal, the
@@ -908,12 +933,15 @@ func (o *Orchestrator) buildSeed(urn, intent, genotype string, contract *EntryCo
 	if fluxOn {
 		knowledgeLang = "flux"
 	}
+	var inlinedExamples []string
 	if k, ids := o.renderKnowledge(contract, intent, knowledgeLang); k != "" {
 		b.WriteString(k)
-		// Stash the worked examples actually inlined so the commit path can record
-		// them as this cell's `examples` lineage edge (docs/lineage.md §4).
-		o.noteAuthoringExamples(urn, ids)
+		inlinedExamples = ids
 	}
+	// Record this cell's DERIVATION INPUTS (docs/lineage.md §4) while the contract,
+	// suite, layout and retrieved examples are all in hand — the forward process. The
+	// commit path attaches the resulting genotype hash and persists it.
+	o.noteAuthoring(urn, o.authoringLineage(urn, ns, contract, suite, fluxLayout, fluxOn, inlinedExamples))
 	// User guidance (soft): cross-app SYSTEM principles and this APP's principles,
 	// rewritten from operator commentary. The model weighs these while building; an
 	// adversarial feedback critic enforces them separately.
@@ -966,6 +994,54 @@ func (o *Orchestrator) buildSeed(urn, intent, genotype string, contract *EntryCo
 		fmt.Fprintf(&b, "\nCURRENT GENOTYPE (improve it to pass more checks):\n%s", genotype)
 	}
 	return b.String()
+}
+
+// authoringLineage assembles the DERIVATION INPUTS a cell is being authored from —
+// every edge of docs/lineage.md §3 that is knowable at build time: the language
+// version, the grammar it decodes under, the prompt TEMPLATE (never the inlined
+// examples — those are the `examples` edge), the model, the acceptance suite it will
+// be verified against, the shared-state contract, and the worked examples inlined.
+// The Result (genotype hash) is attached by the commit path. Hashing an input means
+// a later change to it moves this cell's InputsHash and so triggers its rebuild.
+func (o *Orchestrator) authoringLineage(urn, ns string, contract *EntryContract, suite *AcceptanceSuite, layout flux.Layout, fluxOn bool, examples []string) Lineage {
+	l := Lineage{URN: urn, Examples: examples}
+	// language + grammar: the Flux front-end version, and the specific GBNF this cell
+	// decodes under (both derive from the language, so a language change moves them).
+	if fluxOn {
+		l.Language = FluxLanguageVersion
+		kind := flux.KindCompute
+		if contract == RenderFrameContract {
+			kind = flux.KindView
+		}
+		l.Grammar = hashStr(flux.GBNF(layout, kind))
+	} else {
+		l.Language = langWAT
+	}
+	// prompt TEMPLATE: the stable system prompt plus (Flux mode) the example-free
+	// authoring block — NOT the inlined worked examples, which are the examples edge.
+	tmpl := o.CompassPrompt
+	if fluxOn {
+		tmpl += fluxSeedBlock(contract, layout)
+	}
+	l.Prompt = hashStr(tmpl)
+	// model: which model authored it (decode identity).
+	if o.SieveModelType != nil {
+		l.Model = fmt.Sprintf("%v", o.SieveModelType(urn))
+	}
+	// scenarios: the behavioral contract it is verified against — language-INDEPENDENT
+	// (docs/language-evolution.md §2), so a language change does not move this edge.
+	if suite != nil {
+		var sb strings.Builder
+		for _, c := range describeChecks(suite) {
+			fmt.Fprintf(&sb, "%s=%s\n", c["name"], c["spec"])
+		}
+		l.Scenarios = hashStr(sb.String())
+	}
+	// contract: the shared-state memory layout the cell coordinates through.
+	if sc := LoadContract(o.ledger, ns); sc != nil {
+		l.Contract = hashStr(sc.Render())
+	}
+	return l
 }
 
 // acceptanceFrame evaluates a candidate against the cell's spec acceptance

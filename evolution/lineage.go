@@ -29,6 +29,28 @@ import (
 
 const lineageRef = "urn:hdm:lineage"
 
+// FluxLanguageVersion is the coarse identity of the Flux language front-end
+// (grammar + checker + lowering). It is the `language` lineage edge every Flux cell
+// is authored under; a language evolution bumps it, which moves the InputsHash of
+// every Flux cell and so invalidates the whole Flux stack in one stroke — the
+// extreme-case rebuild of docs/lineage.md §6 / docs/language-evolution.md §3. Cells
+// authored in raw WAT record langWAT instead.
+const (
+	FluxLanguageVersion = "flux/v1"
+	langWAT             = "wat"
+)
+
+// hashStr is the content address of a derivation input (a grammar, a prompt
+// template, a contract rendering) — the same sha256 the ledger uses for blocks, so
+// "did this input change?" is a hash comparison.
+func hashStr(s string) string {
+	if s == "" {
+		return ""
+	}
+	h := sha256.Sum256([]byte(s))
+	return hex.EncodeToString(h[:])
+}
+
 // Lineage is one node of the derivation graph: a derived result plus the content
 // hashes of the inputs it was derived from. Keyed by Result (the genotype hash), so
 // the graph is immutable and append-only.
