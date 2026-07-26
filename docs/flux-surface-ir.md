@@ -81,8 +81,32 @@ the floor — leaves net fitness just behind s-expr.
 So the surface war is not settled; it is *localized*. Forth wins big on the axes that
 matter (tokens, canonicality) and the whole gap is validity — exactly what the
 **prologue-locals / depth-bound** lever targets (`forthMaxDepth`, `=:` bindings).
-Tightening the depth bound to force more named intermediates, and sharpening the
-dictionary preamble, are the next hypotheses — now measurable on the same board.
+
+### Depth lever (second crank)
+
+Tightening the stack-depth bound 3→2 (forcing more `=:` intermediates) + a sharpened
+stack-effect dictionary:
+
+| surface   | syntax | valid | tokens | canonicality | fitness |
+|-----------|:------:|:-----:|:------:|:------------:|:-------:|
+| sexpr     | 1.00   | 1.00  | 111.5  | 0.33         | 0.944   |
+| forth-d2  | **1.00** | **0.53** | **17.8** | 0.57     | 0.781   |
+| forth-d3  | 0.80   | 0.33  | 17.6   | 0.60         | 0.598   |
+
+The bound moved the predicted axes: at d2 **syntax reaches 1.00** (every stack
+balances) and validity ~doubles vs d3 (0.53 vs 0.33). Forth's efficiency wins are
+robust across runs (~6× fewer tokens, canonicality ~0.57–0.62 vs ~0.33–0.40).
+
+**Residual (robust across three runs):** Forth's type-valid rate stays below 1.0
+while s-expr sits at 1.0 under an *equally permissive* grammar — so the gap is not the
+grammar but the model's weaker **type-tracking in postfix** (adding a comparison
+result, mixing a color into arithmetic). Depth helps because shallow stacks are
+easier to keep well-typed, but it can't close it alone. The next levers are (a) more
+samples to de-noise the estimate, then (b) a **type-stratified** Forth grammar
+(separate int / bool / color expressions so type errors become ungrammatical) or
+richer worked examples for familiarity. s-expr still leads on fitness because
+valid-rate is the floor; Forth's 6× token + canonicality edge makes closing validity
+the prize.
 
 ## Where this goes
 
