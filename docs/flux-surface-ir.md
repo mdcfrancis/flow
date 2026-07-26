@@ -215,11 +215,27 @@ system for identical external behavior.
   the parse step: the system parses (a surface of) its own language with a cell it can
   evolve; Go only deserializes the tree and lowers it. `Lower` (IR→WAT) remains the
   sole fixed invariant.
-- **Remaining frontier**: extend the node grammar from arithmetic to full cell forms
-  (write/draw/let terminals, field refs) and adopt the nested S-expression surface
-  (a parse-state stack), to make the self-hosted parser the operational reader. The
-  shift-reduce-to-AST mechanism above is the whole engine; what's left is grammar
-  breadth.
+- **Full-surface self-hosted parser (landed)**: the parse-to-AST cell now covers the
+  ENTIRE cell grammar, built up in verified steps (each reconstruction compiles to the
+  same WAT as the hand-written form through the real flux compiler):
+  - the full **expression** vocabulary — all 20 operators, `if`/`clamp`/`min`/`max`,
+    arbitrary nesting (4-wide nodes for ternary forms);
+  - **field references** (expressions over shared state);
+  - **let bindings** — a second namespace (local-ref leaves + a let buffer);
+  - **write terminals** → whole **compute cells**;
+  - **draw terminals + color literals** → **view cells**.
+
+  A single Flux cell, driven per-tick over a postfix token stream, parses any cell
+  form (compute or view) into a serialized AST that Go deserializes into the exact
+  `flux.Cell` its own compiler would produce. Token ranges tag the classes (num · op ·
+  field · write · local-ref · let · color · draw-prim); the shift-reduce stack gives
+  nesting for free. **The parse of the whole surface is done by a cell the system can
+  evolve; Go only deserializes and lowers, and `Lower` (IR→WAT) is the sole fixed
+  invariant.**
+- **Remaining frontier**: the nested S-expression *surface reader* (raw parens →
+  tokens, in Flux) to feed this AST parser directly from source text rather than a
+  pre-tokenized stream — the same tokenizer pattern extended with paren tokens. The
+  AST engine and the full grammar are done.
 - **The efficiency goal decomposes cleanly onto the surface**: *generated* efficiently
   (grammar the model decodes under — the scoreboard) and *processed* efficiently
   (`Render` compactness/legibility). Both are surface properties; behavior is IR.
