@@ -2,6 +2,7 @@ package flux
 
 import (
 	"os"
+	"strconv"
 	"testing"
 )
 
@@ -27,15 +28,15 @@ func TestSurfaceAB(t *testing.T) {
 	}
 	gen := &httpGenerator{url: url, key: os.Getenv("HDM_LLM_API_KEY"), model: model, temperature: 0.7}
 	samples := 5
+	if n, err := strconv.Atoi(os.Getenv("HDM_AB_SAMPLES")); err == nil && n > 0 {
+		samples = n
+	}
 
-	// The lever under test: the Forth stack-depth bound. A tighter bound (d2) forces
-	// more `=:` prologue locals — shallower stacks — which should recover validity
-	// while keeping the token/canonicality wins. Sharpened dictionary preamble applies
-	// to both Forth variants.
+	// The decisive pair: the S-expression baseline vs the type-stratified Forth
+	// surface. HDM_AB_SAMPLES raises the sample count to de-noise the estimate.
 	variants := []Variant{
 		SExprVariant(),
-		ForthVariant("forth-d2", 2),         // best untyped Forth so far
-		ForthTypedVariant("forth-typed", 2), // type-stratified — the lever under test
+		ForthTypedVariant("forth-typed", 2),
 	}
 	board := RunScoreboard(gen, DefaultBenchmark(), variants, samples)
 	t.Logf("=== surface A/B (%d samples/task, temp 0.7) ===", samples)

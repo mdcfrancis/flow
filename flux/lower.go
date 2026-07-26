@@ -17,6 +17,16 @@ func Lower(c *Cell, layout Layout) (string, error) {
 	if c == nil {
 		return "", errf("", "nil cell")
 	}
+	// Distil to the core: inline the prologue derivations (neg/abs/min/max/clamp and
+	// any evolved words) so only core operators reach the backend below. This is the
+	// one place expansion happens; lowerPrim handles CORE ops only (prologue.go).
+	p, err := dfltPrologue()
+	if err != nil {
+		return "", err
+	}
+	if c, err = p.expand(c); err != nil {
+		return "", err
+	}
 	var b strings.Builder
 	b.WriteString("(module\n")
 	b.WriteString("  (import \"hdm:kernel/hardware-io\" \"shared-cluster-memory\" (memory 100))\n")
@@ -192,30 +202,14 @@ func lowerPrim(p *Prim) (string, error) {
 		return bin("i32.or"), nil
 	case "not":
 		return fmt.Sprintf("(i32.eqz %s)", a[0]), nil
-	case "neg":
-		return fmt.Sprintf("(i32.sub (i32.const 0) %s)", a[0]), nil
-	case "abs":
-		return fmt.Sprintf("(select %s (i32.sub (i32.const 0) %s) (i32.ge_s %s (i32.const 0)))", a[0], a[0], a[0]), nil
-	case "min":
-		return selectMin(a[0], a[1]), nil
-	case "max":
-		return selectMax(a[0], a[1]), nil
-	case "clamp": // max(lo, min(x, hi))
-		return selectMax(a[1], selectMin(a[0], a[2])), nil
 	case "if": // (select then else cond)
 		return fmt.Sprintf("(select %s %s %s)", a[1], a[2], a[0]), nil
 	default:
-		return "", errf(p.pos(), "no lowering for primitive %q", p.Op)
+		// neg/abs/min/max/clamp and any evolved word are DERIVATIONS — they must have
+		// been inlined by the prologue expansion before lowering (prologue.go). Reaching
+		// here means expansion was skipped or the prologue lacks the derivation.
+		return "", errf(p.pos(), "no core lowering for %q (a derivation must be expanded via the prologue first)", p.Op)
 	}
-}
-
-// selectMin/selectMax render min/max via select (both branches are pure, so
-// double-evaluation is semantically safe).
-func selectMin(x, y string) string {
-	return fmt.Sprintf("(select %s %s (i32.lt_s %s %s))", x, y, x, y)
-}
-func selectMax(x, y string) string {
-	return fmt.Sprintf("(select %s %s (i32.gt_s %s %s))", x, y, x, y)
 }
 
 // drawOpcode maps a prim name to its primitive opcode (low byte). The 24-byte

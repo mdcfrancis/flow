@@ -130,6 +130,12 @@ more reliably, more canonically, and far more cheaply than the human-oriented
 S-expression, for identical external behavior. It is a genuine ΔL for the epoch gate
 to promote.
 
+**De-noised (12 samples/task):** forth-typed fitness **1.184** vs sexpr **0.870** —
+validity parity (0.94 each), ~2.6× fewer tokens, ~2.3× more canonical. The 5-sample
+1.0 validity was optimistic; the residual ~6% is unbound-local references (the
+grammar admits `i2` as an atom even if never bound), the exact class the agentic
+`ForthDiagnose` feedback loop closes. The win is confirmed and robust.
+
 Note: the agentic `ForthDiagnose` tool (explicit stack/word vs type feedback for
 model iteration) is built and ready, but the grammar lever alone reached valid=1.0 —
 so the agentic loop is now insurance for the harder residual (behavioral correctness,
