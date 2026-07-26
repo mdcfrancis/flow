@@ -85,6 +85,18 @@ func checkCell(list *List, layout Layout) (*Cell, error) {
 	if derivedWrites {
 		if w := terminalWrite(body); w != nil {
 			c.Writes = append([]string(nil), w.Fields...)
+			for _, bs := range w.Stores { // a stored-into buffer is a write target too
+				seen := false
+				for _, x := range c.Writes {
+					if x == bs.Buf {
+						seen = true
+						break
+					}
+				}
+				if !seen {
+					c.Writes = append(c.Writes, bs.Buf)
+				}
+			}
 		}
 	}
 	switch terminalKind(body) {
@@ -123,6 +135,10 @@ func referencedFields(e Expr, layout Layout) []string {
 		case *Write:
 			for _, v := range t.Vals { // the write EXPRESSIONS are reads; the target fields are writes
 				walk(v)
+			}
+			for _, bs := range t.Stores { // a store's index+value are reads (its target buffer is a write)
+				walk(bs.Idx)
+				walk(bs.Val)
 			}
 		case *Draw:
 			for _, p := range t.Prims {
@@ -269,8 +285,20 @@ func checkLet(l *List, scope map[string]Type, layout Layout, writeSet map[string
 func checkWrite(l *List, scope map[string]Type, layout Layout, writeSet map[string]bool) (Expr, error) {
 	w := &Write{base: base{Pos: posOf(l), Typ: TUnit}}
 	for _, it := range l.Items[1:] {
-		if it.List == nil || len(it.List.Items) != 2 {
-			return nil, errf(posOf(l), "each write entry must be (field value)")
+		if it.List == nil || len(it.List.Items) < 2 {
+			return nil, errf(posOf(l), "each write entry must be (field value) or (store buffer index value)")
+		}
+		// (store buffer index value): a buffer element assignment.
+		if it.List.Head() == "store" {
+			bs, err := checkBufStore(it.List, scope, layout, writeSet)
+			if err != nil {
+				return nil, err
+			}
+			w.Stores = append(w.Stores, *bs)
+			continue
+		}
+		if len(it.List.Items) != 2 {
+			return nil, errf(posOf(it.List), "a field write must be (field value)")
 		}
 		fn := symOf(it.List.Items[0])
 		fld, ok := layout[fn]
@@ -294,6 +322,40 @@ func checkWrite(l *List, scope map[string]Type, layout Layout, writeSet map[stri
 		w.Vals = append(w.Vals, val)
 	}
 	return w, nil
+}
+
+// checkBufStore checks (store buffer index value): the buffer must be a writable
+// TBuffer field, the index and value Int.
+func checkBufStore(l *List, scope map[string]Type, layout Layout, writeSet map[string]bool) (*BufStore, error) {
+	if len(l.Items) != 4 {
+		return nil, errf(posOf(l), "store must be (store buffer index value)")
+	}
+	buf := symOf(l.Items[1])
+	fld, ok := layout[buf]
+	if !ok || fld.Type != TBuffer {
+		return nil, errf(posOf(l), "store target %q is not a Buffer field", buf)
+	}
+	if fld.ReadOnly {
+		return nil, errf(posOf(l), "buffer %q is read-only", buf)
+	}
+	if len(writeSet) > 0 && !writeSet[buf] {
+		return nil, errf(posOf(l), "store to %q which is not in the cell's declared writes", buf)
+	}
+	idx, err := checkExpr(l.Items[2], scope, layout, writeSet)
+	if err != nil {
+		return nil, err
+	}
+	if idx.T() != TInt {
+		return nil, errf(idx.pos(), "store index must be Int, got %s", idx.T())
+	}
+	val, err := checkExpr(l.Items[3], scope, layout, writeSet)
+	if err != nil {
+		return nil, err
+	}
+	if val.T() != TInt {
+		return nil, errf(val.pos(), "store value must be Int, got %s", val.T())
+	}
+	return &BufStore{Buf: buf, Idx: idx, Val: val, Pos: posOf(l)}, nil
 }
 
 func checkDraw(l *List, scope map[string]Type, layout Layout, writeSet map[string]bool) (Expr, error) {
@@ -413,6 +475,25 @@ func checkPrim(l *List, scope map[string]Type, layout Layout, writeSet map[strin
 			return nil, errf(pos, "not takes 1 Bool arg")
 		}
 		return mk(TBool), nil
+	case "at": // (at buffer index) → the i32 element, bounds-clamped
+		if len(args) != 2 {
+			return nil, errf(pos, "at takes (buffer index)")
+		}
+		if args[0].T() != TBuffer {
+			return nil, errf(args[0].pos(), "at expects a Buffer as its first arg, got %s", args[0].T())
+		}
+		if args[1].T() != TInt {
+			return nil, errf(args[1].pos(), "at index must be Int, got %s", args[1].T())
+		}
+		return mk(TInt), nil
+	case "len": // (len buffer) → element count
+		if len(args) != 1 {
+			return nil, errf(pos, "len takes (buffer)")
+		}
+		if args[0].T() != TBuffer {
+			return nil, errf(args[0].pos(), "len expects a Buffer, got %s", args[0].T())
+		}
+		return mk(TInt), nil
 	default:
 		// A registered prologue derivation (built-in or evolved): type it as an
 		// (Int^arity → Int) call. Expansion inlines it to core before lowering

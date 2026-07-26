@@ -143,7 +143,19 @@ func (p *prologue) expandExpr(e Expr) (Expr, error) {
 			}
 			nv[i] = ev
 		}
-		return &Write{base: x.base, Fields: x.Fields, Vals: nv}, nil
+		ns := make([]BufStore, len(x.Stores))
+		for i, bs := range x.Stores {
+			idx, err := p.expandExpr(bs.Idx)
+			if err != nil {
+				return nil, err
+			}
+			val, err := p.expandExpr(bs.Val)
+			if err != nil {
+				return nil, err
+			}
+			ns[i] = BufStore{Buf: bs.Buf, Idx: idx, Val: val, Pos: bs.Pos}
+		}
+		return &Write{base: x.base, Fields: x.Fields, Vals: nv, Stores: ns}, nil
 	case *Draw:
 		np := make([]DrawPrim, len(x.Prims))
 		for i, pr := range x.Prims {

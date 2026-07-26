@@ -15,6 +15,12 @@ const (
 	TBool         // i32 0/1 — the result of a comparison; guards `if`
 	TColor        // i32 RGBA — a draw color, distinct from Int
 	TUnit         // the type of a `write`/`draw` terminal
+	TBuffer       // a bounded i32 array in shared memory: a base offset + length. The
+	// value a Flux cell needs to walk a token/byte buffer — indexed via (at buf i),
+	// sized via (len buf) — the capability that makes parser/stream cells authorable
+	// in Flux (docs/flux-surface-ir.md). Access is bounds-clamped, so a buffer field
+	// is as isolation-safe as a scalar field: the cell touches only its declared,
+	// fixed-size window.
 )
 
 func (t Type) String() string {
@@ -29,6 +35,8 @@ func (t Type) String() string {
 		return "Color"
 	case TUnit:
 		return "Unit"
+	case TBuffer:
+		return "Buffer"
 	default:
 		return "?"
 	}
@@ -44,6 +52,10 @@ type Field struct {
 	// ReadOnly marks a host-written capability field (e.g. the HMI input
 	// registers): a cell may read it but a `write` to it is a type error.
 	ReadOnly bool
+	// Len is the element count for a TBuffer field (i32 elements at Offset,
+	// Offset+4, …). Zero for scalar fields. Indexed access (at/store) is clamped to
+	// [0, Len), so a buffer field is bounds-safe by construction.
+	Len uint32
 }
 
 // Layout maps each shared-state field name to its type and offset.
@@ -119,11 +131,24 @@ type Let struct {
 	Body  Expr
 }
 
-// Write is the compute terminal: store each field's value back to the store.
+// Write is the compute terminal: store each field's value back to the store, and
+// (Stores) store values into buffer elements — so a cell can build an output buffer
+// (a parse tree, a token stream) as well as update scalar fields.
 type Write struct {
 	base
 	Fields []string
 	Vals   []Expr
+	Stores []BufStore
+}
+
+// BufStore is one buffer element assignment in a write terminal: (store buf idx val)
+// writes val into buf[idx] (bounds-clamped). It is how a Flux cell produces indexed
+// output — the write counterpart of (at buf idx).
+type BufStore struct {
+	Buf string
+	Idx Expr
+	Val Expr
+	Pos string
 }
 
 // Draw is the view terminal: a list of draw primitives.

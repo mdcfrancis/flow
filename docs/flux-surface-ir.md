@@ -187,10 +187,19 @@ system for identical external behavior.
   analog of the ledger-resident prologue. Proven behavior-safe by `BehaviorHash`.
   (Skin tokens must be valid Flux identifiers; `DeriveClauses` is behavior-equivalent
   but re-orders reads in the WAT, so it is not `BehaviorHash`-identical.)
+- **Buffer capability (landed) — parser/stream cells are now Flux**: Flux gained a
+  `TBuffer` type and bounded indexed memory — `(at buf i)` / `(len buf)` reads and
+  `(store buf i v)` writes, every access **clamped to `[0, len)`** so a buffer field
+  is as isolation-safe as a scalar one. This closes the gap the substrate map found
+  (the parser substrate — `sys:stream-fold` + `sys:list` + `invoke-cell` — existed,
+  but Flux couldn't walk a buffer). **Verified in the sandbox**: a tokenizer authored
+  in Flux (`(at src cursor)` → classify → `(store dst cursor …)` → advance) tokenizes
+  a buffer over ticks. Parser/stream cells no longer need hand-WAT — they are Flux.
 - **Remaining frontier**: the Forth surface stays an algorithmic Go parser (a
-  concatenative reader is not a keyword skin), and a fully self-hosted parser *cell*
-  is the deep endgame. But for the S-expr family the front-end is now data. The IR
-  stays the contract; `Lower` stays the invariant.
+  concatenative reader is not a keyword skin), and a fully self-hosted *surface*
+  parser cell (Flux surface → IR, in Flux) is the deep endgame — now closer, since
+  buffer-walking cells are expressible. The IR stays the contract; `Lower` stays the
+  invariant.
 - **The efficiency goal decomposes cleanly onto the surface**: *generated* efficiently
   (grammar the model decodes under — the scoreboard) and *processed* efficiently
   (`Render` compactness/legibility). Both are surface properties; behavior is IR.
