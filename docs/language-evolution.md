@@ -134,3 +134,15 @@ X. This makes the *single-source + lazy-inlining* principle (§6) real, which is
 prerequisite for treating a language change as a store migration (§4) rather than a
 hunt through the codebase for embedded Flux. Small, and it pays off immediately:
 capturing a better green cell already improves the examples the prompt shows.
+
+## 9. Implementation status
+
+The mechanism is built; see [lineage.md §9](lineage.md) for the full map. In short:
+the de-embed first step landed (Flux worked examples live in the KB, tagged by
+language, lazily inlined — `fluxSeedBlock` embeds no Flux program); the dependency
+tree is recorded generically as lineage; and this doc's acceptance gate (§3) is
+`evolution.ProposeLanguageChange` — snapshot the affected refs, rebuild the stale
+stack under a new ledger-backed language version via the memoized driver, promote iff
+all green + fitness improved, else roll back atomically. The remaining seam is the
+real `reauthor` adapter (re-author a cell against its unchanged scenarios) and an
+actual better-language front-end to promote.

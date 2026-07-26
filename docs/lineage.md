@@ -173,3 +173,29 @@ This composes with the language-evolution first step (lazy-inline examples from 
 KB): once prompts are assembled from the example store, the `examples` a cell was
 authored with are exactly the nodes to record — **lineage and lazy-inlining are the
 same edge seen from two directions.**
+
+## 9. Implementation status
+
+Landed (all of §7, plus the language-change gate):
+
+- **Store** — `evolution/lineage.go`: the `Lineage` record, `RecordLineage`,
+  `LineageOf` (provenance), `FindLineageByInputs` (the authoring memo), and
+  `InputsHash` (the order-independent content address of a derivation).
+- **Edges in the forward process** — `evolution/orchestrator.go`: `buildSeed`
+  assembles the input edges (language/grammar/prompt/model/examples/scenarios/
+  contract) and the commit chokepoint attaches the genotype hash and records them.
+  De-embedding Flux from prompts made the `examples` edge real (worked examples are
+  lazily inlined from the KB, so the edge is the set of stored examples retrieved).
+  **Verified live**: a `bounce:physics` cell authored in Flux recorded
+  `lang=flux/v1`, a real grammar hash, and the two KB Flux examples it drew from.
+- **Rebuild** — `evolution/rebuild.go`: `PlanRebuild` (hits vs stale) + `Execute`
+  (reuse hits, early-cutoff on the memo, else re-derive via an injected callback,
+  memoizing only green results).
+- **Epoch gate** — `evolution/language_epoch.go`: `ProposeLanguageChange` snapshots
+  the affected refs, rebuilds under the new ledger-backed language version, and
+  promotes iff all green + fitness improved, else rolls back atomically.
+
+Open seam: the real `reauthor` adapter that drives the orchestrator to re-author a
+cell against its unchanged scenarios (the callback the driver and gate inject) — and
+the actual better-language front-end whose promotion the gate would accept, which is
+the open research the north star (docs/self-hosting-flux.md §0.1) frames.
