@@ -21,9 +21,11 @@ func Lower(c *Cell, layout Layout) (string, error) {
 	b.WriteString("(module\n")
 	b.WriteString("  (import \"hdm:kernel/hardware-io\" \"shared-cluster-memory\" (memory 100))\n")
 
-	export := "run-tick"
-	if c.Kind == KindView {
-		export = "render-frame"
+	// The entry export is the cell's PRIMARY interface — derived from its shape, not
+	// hardcoded here (see interface.go / docs/flux-interfaces.md).
+	export := PrimaryEntry(c, layout)
+	if export == "" {
+		return "", errf("", "cell satisfies no entry interface (needs a write or draw terminal)")
 	}
 	fmt.Fprintf(&b, "  (func (export %q) (param $base i32) (param $cap i32) (result i32)\n", export)
 

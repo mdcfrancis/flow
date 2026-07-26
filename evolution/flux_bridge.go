@@ -56,9 +56,39 @@ func ClearFluxDraft(ledger *storage.LedgerEngine, urn string) {
 	}
 }
 
+// BindCapabilities augments a layout with a cell's monadic input capabilities: each
+// required capability is allocated a concrete resource and added as a read-only
+// field under its alias, so the cell reads the bound value without ever naming a
+// register. v1 is LOCAL, SINGLETON binding — each scalar takes the next slider
+// register (the fulfillment substrate we already ship); node placement and
+// capability groups are later layers (docs/flux-interfaces.md §8.1–8.3). Returns the
+// layout unchanged when nothing is required; never mutates the caller's map.
+func BindCapabilities(layout flux.Layout, src string) flux.Layout {
+	caps, err := flux.Requirements(src)
+	if err != nil || len(caps) == 0 {
+		return layout
+	}
+	out := make(flux.Layout, len(layout)+len(caps))
+	for k, v := range layout {
+		out[k] = v
+	}
+	slider := 0
+	for _, cap := range caps {
+		if cap.Kind != "scalar" {
+			continue // v1: scalar only; toggle/trigger next
+		}
+		if off, ok := HMIFieldOffset(fmt.Sprintf("hmi_slider%d", slider)); ok {
+			out[cap.Alias] = flux.Field{Type: flux.TInt, Offset: off, ReadOnly: true}
+			slider++
+		}
+	}
+	return out
+}
+
 // lowerFluxToBytecode lowers a Flux program to wasm bytecode (for judging a draft
 // without committing it), or an error if it does not compile.
 func lowerFluxToBytecode(layout flux.Layout, src string) ([]byte, error) {
+	layout = BindCapabilities(layout, src)
 	wat, err := flux.Compile("cell", src, layout)
 	if err != nil {
 		return nil, err
@@ -90,10 +120,36 @@ var hmiFields = map[string]flux.Field{
 	"hmi_buttons":    {Type: flux.TInt, Offset: 0x50008, ReadOnly: true}, // held-button mask: bit0 L, bit1 R, bit2 M
 	"hmi_modifiers":  {Type: flux.TInt, Offset: 0x5000C, ReadOnly: true}, // modifier mask: bit0 shift,1 ctrl,2 alt,3 meta
 	"hmi_event_seq":  {Type: flux.TInt, Offset: 0x50010, ReadOnly: true}, // monotonic event counter (compare vs last tick)
-	"hmi_event_type": {Type: flux.TInt, Offset: 0x50014, ReadOnly: true}, // 2 down,3 up,4 click,5 keydown,6 keyup
+	"hmi_event_type": {Type: flux.TInt, Offset: 0x50014, ReadOnly: true}, // 2 down,3 up,4 click,5 keydown,6 keyup,7 slider
 	"hmi_event_x":    {Type: flux.TInt, Offset: 0x50018, ReadOnly: true}, // cursor x at event time
 	"hmi_event_y":    {Type: flux.TInt, Offset: 0x5001C, ReadOnly: true}, // cursor y at event time
 	"hmi_key":        {Type: flux.TInt, Offset: 0x50020, ReadOnly: true}, // key code for key events
+}
+
+// HMIFieldOffset returns the shared-memory offset of a read-only HMI capability
+// field (hmi_mouse_x, hmi_slider0, hmi_event_seq, …), or ok=false if the name is
+// not an HMI field. Exposed so scenario authoring can SEED the inputs an
+// input-source cell reads — the capability implication of the input-source
+// interface (see docs/flux-interfaces.md).
+func HMIFieldOffset(name string) (uint32, bool) {
+	f, ok := hmiFields[name]
+	if !ok {
+		return 0, false
+	}
+	return f.Offset, true
+}
+
+// Register the operator slider knobs (hmi_slider0..NumSliders-1): read-only i32
+// inputs the user drags from the console, so every cell can read a live knob
+// (speed, gravity, hue, …). Offsets mirror execution.InSlider0 (0x50024) and
+// NumSliders (8); TestHMISliderOffsetsMatchRuntime guards the mirror against drift.
+func init() {
+	const sliderBase, sliderCount = 0x50024, 8
+	for i := 0; i < sliderCount; i++ {
+		hmiFields[fmt.Sprintf("hmi_slider%d", i)] = flux.Field{
+			Type: flux.TInt, Offset: uint32(sliderBase + i*4), ReadOnly: true,
+		}
+	}
 }
 
 // LayoutFromContract turns the app's shared-state contract into a Flux field
@@ -152,7 +208,7 @@ func (o *Orchestrator) fluxLayoutFor(urn string) flux.Layout {
 func candidateWAT(resp string, layout flux.Layout) (wat, fluxSrc string, err error) {
 	if layout != nil {
 		if src := extractFlux(resp); src != "" {
-			w, cerr := flux.Compile("cell", src, layout)
+			w, cerr := flux.Compile("cell", src, BindCapabilities(layout, src))
 			if cerr != nil {
 				return "", src, cerr
 			}
@@ -267,6 +323,7 @@ func fluxSeedBlock(contract *EntryContract, layout flux.Layout) string {
 // the authoring model TEST its cell empirically — set inputs, see outputs, iterate
 // — instead of guessing. inputsJSON is a JSON object of field name → integer.
 func runFluxCell(layout flux.Layout, src, inputsJSON string, steps int) (string, error) {
+	layout = BindCapabilities(layout, src)
 	wat, err := flux.Compile("cell", src, layout)
 	if err != nil {
 		return "", err

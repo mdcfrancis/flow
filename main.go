@@ -2448,6 +2448,7 @@ func main() {
 		Canvas:  canvasSrv,
 		Build:   integration.NewBuildServer(grower, registry, canvasSrv),
 		Input:   integration.NewInputServer(hypervisor),
+		Slider:  integration.NewSliderServer(hypervisor),
 		Cells:   registry.List,
 		Status:  activity.Snapshot,
 		Flow:    activity.Flow,

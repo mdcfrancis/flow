@@ -34,6 +34,49 @@ func noopFlux(sub Subsystem, layout flux.Layout) (src string, ok bool) {
 	}
 	addressable := func(f string) bool { _, in := layout[f]; return in }
 
+	// Input adapter: the subsystem declares operator CAPABILITIES. Seed the forwarder
+	// — read each capability, write it into the state field it drives (inputs[k] →
+	// writes[k]). For a pure forwarder this IS the answer, so the adapter converges
+	// immediately; the system binds each scalar to a resource (a slider) and the cell
+	// never names a register.
+	if len(sub.Inputs) > 0 {
+		var reqs strings.Builder
+		var scalars []string
+		for _, in := range sub.Inputs {
+			if in.Kind != "scalar" {
+				continue // v1: scalar only
+			}
+			fmt.Fprintf(&reqs, " (scalar %s %d %d)", in.Name, in.Min, in.Max)
+			scalars = append(scalars, in.Name)
+		}
+		if len(scalars) > 0 {
+			var writesOut, readsBack []string
+			var pairs strings.Builder
+			k := 0
+			for _, w := range sub.Writes {
+				if !addressable(w) {
+					continue
+				}
+				writesOut = append(writesOut, w)
+				if k < len(scalars) {
+					fmt.Fprintf(&pairs, " (%s %s)", w, scalars[k]) // forward capability → field
+				} else {
+					fmt.Fprintf(&pairs, " (%s %s)", w, w) // extra write: keep unchanged
+					readsBack = append(readsBack, w)
+				}
+				k++
+			}
+			if len(writesOut) > 0 {
+				reads := ""
+				if len(readsBack) > 0 {
+					reads = " (reads " + strings.Join(readsBack, " ") + ")"
+				}
+				return fmt.Sprintf("(cell %s (requires%s)%s (writes %s) (write%s))",
+					name, reqs.String(), reads, strings.Join(writesOut, " "), pairs.String()), true
+			}
+		}
+	}
+
 	if kindOf(sub) == KindRender {
 		// Magenta tiles on the (black) canvas, one rect per filled square of a
 		// coarse checkerboard. Constants only — clearly a test pattern, not any
@@ -70,6 +113,21 @@ func noopFlux(sub Subsystem, layout flux.Layout) (src string, ok bool) {
 		name, list, list, pairs.String()), true
 }
 
+// fluxInterfaceSpec renders a cell's DERIVED interface contract from its Flux
+// genome — the entry it implements (its primary interface) plus its declared ports.
+// In Flux mode this replaces the model-authored WIT: the interface is a property of
+// the cell's shape, owned by the lowerer, not a separate artifact the model writes.
+// Nothing downstream parses this yet; it is the human-facing record for the map.
+func fluxInterfaceSpec(sub Subsystem, genome string) string {
+	entry, role := "run-tick", "tick"
+	if e, err := flux.EntryOf(genome); err == nil && e == "render-frame" {
+		entry, role = "render-frame", "view"
+	}
+	return fmt.Sprintf(
+		"// DERIVED interface for %s (see docs/flux-interfaces.md)\ninterface %s {\n    %s: func(base: u32, cap: u32) -> s32;\n}\n// reads:  %s\n// writes: %s\n",
+		sub.Identity, role, entry, strings.Join(sub.Reads, ", "), strings.Join(sub.Writes, ", "))
+}
+
 // seedNoopFlux returns the no-op Flux genome + its compiled bytecode for a
 // subsystem, or ok=false if the app has no Flux-addressable layout or the no-op
 // does not compile (so genesis keeps the WAT path). The layout comes from the
@@ -85,6 +143,10 @@ func (g *Grower) seedNoopFlux(env *AppEnvelope, sub Subsystem) (src string, bc [
 	if !ok {
 		return "", nil, false
 	}
+	// Bind any capabilities the seed declares (their aliases → resource registers) so
+	// the layout the front end checks against includes them — the same binding the
+	// orchestrator's compile paths apply.
+	layout = evolution.BindCapabilities(layout, src)
 	wat, err := flux.Compile("cell", src, layout)
 	if err != nil {
 		return "", nil, false

@@ -57,13 +57,27 @@ const (
 	KindView                    // render-frame: Record(reads) -> DrawList
 )
 
+// Capability is a monadic input a cell REQUIRES — a resource typed by its
+// interaction shape (v1: scalar), not by a physical register. The system binds it
+// to a concrete resource on a providing node (a slider on the IO node today) and
+// the cell reads the bound value through Alias as an ordinary read-only field. The
+// cell names the capability, never an address — so it is location- and
+// device-independent. See docs/flux-interfaces.md §8.
+type Capability struct {
+	Kind     string // "scalar" (v1; toggle/trigger next)
+	Alias    string // the read-only name the cell reads the bound value through
+	Min, Max int32  // declared range (UI widget bounds; future value scaling)
+	Pos      string
+}
+
 // Cell is the typed, checked form of a Flux cell — the input to lowering.
 type Cell struct {
-	Name   string
-	Kind   CellKind
-	Reads  []string // declared read fields (order preserved)
-	Writes []string // declared write fields (compute only)
-	Body   Expr     // a chain of Lets ending in a Write (compute) or Draw (view)
+	Name     string
+	Kind     CellKind
+	Reads    []string     // declared read fields (order preserved; includes bound capability aliases)
+	Writes   []string     // declared write fields (compute only)
+	Requires []Capability // monadic input capabilities the cell requires
+	Body     Expr         // a chain of Lets ending in a Write (compute) or Draw (view)
 }
 
 // Expr is a typed Flux expression. T() is filled by the checker.

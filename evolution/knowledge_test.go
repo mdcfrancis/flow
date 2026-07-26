@@ -24,7 +24,7 @@ func TestExampleStoreRoundTripAndNovelty(t *testing.T) {
 	}
 
 	drawFixed := Example{Kind: "render", Entry: "render-frame", Semantics: "draw a circle",
-		Tags: []string{"draw-at-position"}, WAT: "(module (func (export \"render-frame\")))", Score: "3/5", Provenance: "seed"}
+		Tags: []string{"draw-at-position"}, Genotype: "(module (func (export \"render-frame\")))", Score: "3/5", Provenance: "seed"}
 	if ok, _ := AddExample(le, drawFixed); !ok {
 		t.Fatal("first example should be stored")
 	}
@@ -39,7 +39,7 @@ func TestExampleStoreRoundTripAndNovelty(t *testing.T) {
 
 	// Same shape (render + draw-at-position), WORSE score → rejected.
 	worse := drawFixed
-	worse.WAT = "(module (func (export \"render-frame\")) (; padding for a longer body ;))"
+	worse.Genotype = "(module (func (export \"render-frame\")) (; padding for a longer body ;))"
 	worse.Score = "2/5"
 	if ok, _ := AddExample(le, worse); ok {
 		t.Fatal("worse example for a covered shape must be rejected")
@@ -47,7 +47,7 @@ func TestExampleStoreRoundTripAndNovelty(t *testing.T) {
 
 	// Same shape, BETTER score → replaces.
 	better := drawFixed
-	better.WAT = "(module (func (export \"render-frame\")) (; better ;))"
+	better.Genotype = "(module (func (export \"render-frame\")) (; better ;))"
 	better.Score = "5/5"
 	if ok, _ := AddExample(le, better); !ok {
 		t.Fatal("better example should replace")
@@ -58,7 +58,7 @@ func TestExampleStoreRoundTripAndNovelty(t *testing.T) {
 
 	// Different shape (compute) → additive.
 	if ok, _ := AddExample(le, Example{Kind: "compute", Entry: "run-tick", Semantics: "integrate + bounce",
-		Tags: []string{"wall-bounce"}, WAT: "(module (func (export \"run-tick\")))", Score: "4/4"}); !ok {
+		Tags: []string{"wall-bounce"}, Genotype: "(module (func (export \"run-tick\")))", Score: "4/4"}); !ok {
 		t.Fatal("new-shape example should be additive")
 	}
 	if len(LoadExamples(le)) != 2 {
@@ -69,11 +69,11 @@ func TestExampleStoreRoundTripAndNovelty(t *testing.T) {
 func TestExampleRetrievalKindFilterAndRanking(t *testing.T) {
 	le := kbLedger(t)
 	_, _ = AddExample(le, Example{Kind: "render", Entry: "render-frame", Semantics: "read ball_x ball_y and draw a circle there",
-		Tags: []string{"draw-at-position"}, WAT: "R1", Score: "5/5"})
+		Tags: []string{"draw-at-position"}, Genotype: "R1", Score: "5/5"})
 	_, _ = AddExample(le, Example{Kind: "render", Entry: "render-frame", Semantics: "draw a static background grid",
-		Tags: []string{"static-draw"}, WAT: "R2", Score: "5/5"})
+		Tags: []string{"static-draw"}, Genotype: "R2", Score: "5/5"})
 	_, _ = AddExample(le, Example{Kind: "compute", Entry: "run-tick", Semantics: "integrate position and bounce off walls",
-		Tags: []string{"wall-bounce"}, WAT: "C1", Score: "4/4"})
+		Tags: []string{"wall-bounce"}, Genotype: "C1", Score: "4/4"})
 
 	// A render target must NOT see the compute example (hard kind filter).
 	got := FindExamples(le, "render", "draw the ball at its position", []string{"ball_x", "ball_y"}, nil, 5)
@@ -83,7 +83,7 @@ func TestExampleRetrievalKindFilterAndRanking(t *testing.T) {
 		}
 	}
 	// The position-draw example should rank first for a draw-at-position intent.
-	if len(got) == 0 || got[0].WAT != "R1" {
+	if len(got) == 0 || got[0].Genotype != "R1" {
 		t.Fatalf("expected R1 (draw-at-position) first, got %+v", got)
 	}
 }

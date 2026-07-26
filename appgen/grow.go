@@ -45,11 +45,28 @@ type Subsystem struct {
 	Kind   CellKind `json:"kind,omitempty"`
 	Reads  []string `json:"reads,omitempty"`  // contract field names it reads (plus "HMI input")
 	Writes []string `json:"writes,omitempty"` // contract field names it writes
+	// Inputs are the operator-input CAPABILITIES this subsystem requires — a slider
+	// knob, later a toggle/button. The system binds each to a resource and the cell
+	// reads it read-only; the adapter forwards inputs[i] into writes[i]. Declaring the
+	// capability here (not leaving the model to discover it) lets scaffold seed the
+	// adapter and inject its scenario. See docs/flux-interfaces.md §8.
+	Inputs []InputCap `json:"inputs,omitempty"`
 	// Composition, when set, makes this subsystem a COMBINATOR driver: HDM generates
 	// the boilerplate that applies a leaf function cell across the arrays via
 	// cell-dispatch, and the model implements only the small leaf (a separate
 	// subsystem).
 	Composition *Composition `json:"composition,omitempty"`
+}
+
+// InputCap is an operator-input capability a subsystem declares in the envelope: an
+// interaction (v1: "scalar" — a slider knob in [Min,Max]) the system binds to a
+// resource and the cell reads read-only under Name. Typed by interaction shape, not
+// by device or register — see docs/flux-interfaces.md §8.
+type InputCap struct {
+	Kind string `json:"kind"` // "scalar" (v1)
+	Name string `json:"name"` // the read-only alias the cell reads the bound value through
+	Min  int32  `json:"min"`
+	Max  int32  `json:"max"`
 }
 
 // Composition specifies a data-parallel component built from a combinator + a leaf
@@ -82,13 +99,18 @@ const envelopePrompt = `You decompose a natural-language application objective i
       "kind": "compute|render|input|leaf",
       "semantics": "<what it does, in terms of the shared state it reads/writes>",
       "reads":  ["<shared field it consumes>", "HMI input"],
-      "writes": ["<shared field it produces>"] }
+      "writes": ["<shared field it produces>"],
+      "inputs": [{"kind":"scalar","name":"<alias>","min":<int>,"max":<int>}] }
   ]
 }
 Declare each subsystem's KIND — its type — and make its reads/writes MATCH the kind:
 - "compute": updates shared state (physics, logic). WRITES ≥1 field, draws nothing.
 - "render": a live VIEW. READS state and draws it; WRITES NO state (writes: []).
-- "input": reads operator input. "HMI input" in reads, WRITES ≥1 state field.
+- "input": reads operator input. WRITES ≥1 state field. When the operator input is a
+  PARAMETER the human adjusts live (a slider/knob — speed, gravity, size), declare it in
+  "inputs" as a scalar CAPABILITY and pair it with the state field it drives: inputs[i]
+  feeds writes[i]. e.g. a speed knob: {"kind":"input", "inputs":[{"kind":"scalar","name":"speed","min":0,"max":255}], "writes":["ball_speed"]}.
+  Use "HMI input" in reads only for RAW pointer/keyboard input, not for a slider.
 - "leaf": a pure per-element function on the arg pointer (see COMPOSITION); reads: [], writes: [].
 A cell that WRITES state is never a "render" — split "simulate AND draw" into a compute
 writer and a separate render view. (Kinds are validated against reads/writes; ports win.)
@@ -599,13 +621,21 @@ func (g *Grower) scaffold(ctx context.Context, env *AppEnvelope, sub Subsystem) 
 		return g.scaffoldComposition(ctx, env, sub)
 	}
 	g.phase("growing", "synthesizing subsystem "+sub.Identity, sub.Identity)
-	// Stage 2: draft and persist the WIT interface contract.
-	wit := g.wit(ctx, env, sub)
+	// Stage 2+3: the interface contract and the seed genome. In Flux mode the
+	// interface is DERIVED from the cell's shape (its primary interface + ports) —
+	// no per-cell model round-trip — so genesis seeds the no-op Flux first and the
+	// spec is read off it. In WAT mode the model drafts a WIT and genesis conforms.
+	var wit string
+	if !g.FluxEnabled {
+		wit = g.wit(ctx, env, sub)
+	}
+	wat, bc := g.genesis(ctx, env, sub, wit)
+	if g.FluxEnabled {
+		wit = fluxInterfaceSpec(sub, wat)
+	}
 	if h, err := g.ledger.WriteBlock([]byte(wit)); err == nil {
 		_ = g.ledger.UpdateRef(sub.Identity+":wit", h)
 	}
-	// Stage 3: Genesis Pass — synthesize a skeleton conforming to the WIT.
-	wat, bc := g.genesis(ctx, env, sub, wit)
 	sem := manifest.SemanticManifest{
 		FunctionalIntent: sub.Semantics,
 		DomainTags:       []string{nsTag(env.ApplicationNamespace), "genesis"},
@@ -632,6 +662,12 @@ func (g *Grower) scaffold(ctx context.Context, env *AppEnvelope, sub Subsystem) 
 	// one authoritative fact, so genesis, grading, and authoring can never disagree.
 	kind := kindOf(sub)
 	switch {
+	case len(sub.Inputs) > 0 && contract != nil:
+		// Input-capability adapter: scenario-by-INJECTION. Seed the resource each
+		// declared capability binds to and assert the field it drives — the seed
+		// forwarder already satisfies these, so the adapter converges without the
+		// model having to discover the capability form or an author naming a register.
+		suite = &evolution.AcceptanceSuite{Scenarios: groundScenarios(capabilityScenarios(sub, contract), contract, false)}
 	case kind == KindLeaf || isCompositionLeaf(env, sub.Identity):
 		// A LEAF is a pure per-element function: the harness invokes it with its
 		// input element in memory at the arg pointer (DefaultPayloadOffset). Its
@@ -645,7 +681,7 @@ func (g *Grower) scaffold(ctx context.Context, env *AppEnvelope, sub Subsystem) 
 		// static scene and nothing moves. Author them from the contract and append
 		// to the draw-floor scenarios.
 		if contract != nil {
-			if coord := g.authorCoordination(ctx, sub.Semantics, contract, env.ApplicationNamespace, true, sub.Writes); coord != nil && len(coord.Scenarios) > 0 {
+			if coord := g.authorCoordination(ctx, sub.Semantics, contract, env.ApplicationNamespace, true, sub.Writes, sub.Reads); coord != nil && len(coord.Scenarios) > 0 {
 				if suite == nil {
 					suite = &evolution.AcceptanceSuite{}
 				}
@@ -654,7 +690,7 @@ func (g *Grower) scaffold(ctx context.Context, env *AppEnvelope, sub Subsystem) 
 		}
 	default:
 		if contract != nil {
-			suite = g.authorCoordination(ctx, sub.Semantics, contract, env.ApplicationNamespace, false, sub.Writes)
+			suite = g.authorCoordination(ctx, sub.Semantics, contract, env.ApplicationNamespace, false, sub.Writes, sub.Reads)
 		}
 		if suiteCount(suite) == 0 { // no contract, or authoring produced nothing
 			suite = g.acceptance(ctx, sub)
@@ -845,8 +881,11 @@ discarded. (Seeds may use a raw "at" for the HMI input register offsets below.)
 Set "entry" to the cell's export (run-tick for compute, render-frame for UI).
 HMI input register (seed these u32 offsets to mock input):
   0x50000 mouseX  0x50004 mouseY  0x50008 buttons(bit0 left)  0x5000C modifiers
-  0x50010 eventSeq(nonzero=new)  0x50014 eventType(2 down,3 up,4 click,5 keydown,6 keyup)
+  0x50010 eventSeq(nonzero=new)  0x50014 eventType(2 down,3 up,4 click,5 keydown,6 keyup,7 slider)
   0x50018 eventX  0x5001C eventY  0x50020 keyCode
+  0x50024..0x50040 slider0..slider7 (operator knobs; slider i at 0x50024+i*4). To test a
+  cell that reads a slider (e.g. hmi_slider0), seed its offset (0x50024) AND eventSeq nonzero,
+  then assert the shared field it drives.
 Draw records carry a layer in the op high byte (0 basemap, 1 widget/app, 2 overlay).
 COORDINATION: to test that a cell reads/writes SHARED STATE (see the shared-state
 contract if given), use "reads" to assert a shared field AFTER the run. Each read

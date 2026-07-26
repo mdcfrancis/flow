@@ -54,6 +54,28 @@ func checkCell(list *List, layout Layout) (*Cell, error) {
 		}
 	}
 
+	// requires clause: monadic input capabilities. The system binds each to a
+	// read-only field before check (its Alias is in the layout at a resource offset),
+	// so a bound capability reads exactly like a declared read of a read-only field —
+	// the cell names the capability, never the register. An unbound alias is an error
+	// (the system failed to allocate a resource for it).
+	caps, err := capabilitiesOf(list)
+	if err != nil {
+		return nil, err
+	}
+	for _, cap := range caps {
+		fld, ok := layout[cap.Alias]
+		if !ok {
+			return nil, errf(cap.Pos, "capability %q is not bound in the layout — the system must allocate its resource before lowering", cap.Alias)
+		}
+		if !fld.ReadOnly {
+			return nil, errf(cap.Pos, "capability %q must bind to a read-only resource", cap.Alias)
+		}
+		c.Requires = append(c.Requires, cap)
+		c.Reads = append(c.Reads, cap.Alias) // loaded like any read; read-only enforced on write
+		scope[cap.Alias] = fld.Type
+	}
+
 	// The body is the final item — a chain of lets ending in write/draw.
 	bodySexp := list.Items[len(list.Items)-1]
 	body, err := checkExpr(bodySexp, scope, layout, writeSet)
@@ -356,4 +378,15 @@ func posOf(l *List) string {
 		return ""
 	}
 	return l.Pos.String()
+}
+
+func intOf(s *Sexp) (int32, error) {
+	if s == nil || s.Atom == nil || s.Atom.Int == nil {
+		return 0, errf("", "expected an integer")
+	}
+	n, err := strconv.ParseInt(*s.Atom.Int, 10, 32)
+	if err != nil {
+		return 0, err
+	}
+	return int32(n), nil
 }

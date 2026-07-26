@@ -40,7 +40,7 @@ func (g *Grower) CaptureExample(urn, score string) (bool, error) {
 		Semantics:  sub.Semantics,
 		Reads:      sub.Reads,
 		Writes:     sub.Writes,
-		WAT:        wat,
+		Genotype:   wat,
 		Score:      score,
 		Provenance: urn,
 	})

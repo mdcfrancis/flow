@@ -62,10 +62,11 @@ var (
 // thus entry-agnostic — a cell is evolved against whichever monadic entry it
 // implements.
 func entryContractFor(genotype string) *EntryContract {
-	// A Flux genome names its shape by its terminal: a view cell has a (draw …),
-	// a compute cell a (write …). WAT names it by the export.
+	// A Flux genome names its shape by its terminal (a view has a (draw …), a compute
+	// a (write …)); flux.EntryOf derives that from the parse tree — the same
+	// primary-interface derivation the lowerer uses. WAT names it by the export.
 	if strings.Contains(genotype, "(cell") {
-		if strings.Contains(genotype, "(draw") {
+		if entry, err := flux.EntryOf(genotype); err == nil && entry == "render-frame" {
 			return RenderFrameContract
 		}
 		return RunTickContract
