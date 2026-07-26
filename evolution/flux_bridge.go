@@ -28,6 +28,14 @@ func fluxSurfaceName() string {
 
 func fluxIsForth() bool { return fluxSurfaceName() == "forth" }
 
+// activeSurface returns the flux.Surface the operational sieve currently authors in.
+func activeSurface() flux.Surface {
+	if fluxIsForth() {
+		return flux.Forth{}
+	}
+	return flux.SExpr{}
+}
+
 // Flux DRAFT store: the most recent Flux program the model authored for a cell,
 // whether or not it committed. The committed genome is the source of truth (P0),
 // but a cell shows its WAT stub until a Flux candidate commits — so for the
@@ -342,7 +350,7 @@ func forthSeedBlock(contract *EntryContract, layout flux.Layout) string {
 // the authoring model TEST its cell empirically — set inputs, see outputs, iterate
 // — instead of guessing. inputsJSON is a JSON object of field name → integer.
 func runFluxCell(layout flux.Layout, src, inputsJSON string, steps int) (string, error) {
-	wat, err := flux.Compile("cell", src, layout)
+	wat, err := flux.CompileWith(activeSurface(), "cell", src, layout)
 	if err != nil {
 		return "", err
 	}
