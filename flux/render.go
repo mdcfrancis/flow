@@ -87,6 +87,33 @@ func renderExpr(e Expr) string {
 	}
 }
 
+// renderLeaf renders the surface-INVARIANT expressions — literals and variable
+// references — which every S-expression surface prints identically. Returns "" for a
+// non-leaf. Shared by the default renderer and the spec-driven surface.
+func renderLeaf(e Expr) string {
+	switch x := e.(type) {
+	case *IntLit:
+		return strconv.FormatInt(int64(x.V), 10)
+	case *FloatLit:
+		s := strconv.FormatFloat(float64(x.V), 'f', -1, 32)
+		if !strings.ContainsRune(s, '.') {
+			s += ".0"
+		}
+		return s
+	case *BoolLit:
+		if x.V {
+			return "true"
+		}
+		return "false"
+	case *ColorLit:
+		return fmt.Sprintf("#x%08X", x.V)
+	case *Var:
+		return x.Name
+	default:
+		return ""
+	}
+}
+
 // argsTail renders " arg arg …" (a leading space before each) for an operator or
 // draw-primitive argument list.
 func argsTail(args []Expr) string {

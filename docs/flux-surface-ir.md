@@ -179,9 +179,18 @@ system for identical external behavior.
   state. `PromoteSurface` runs a whole-stack epoch — re-author every cell in the new
   surface, promote iff all green, else roll back — so flipping the default to forth is
   a verified language change, not a flag.
-- **Next — "move the parser into the system"**: the surface⇄IR *reader/renderer* is
-  still Go. Making it a data-driven/evolvable artifact (as the prologue now is) is the
-  remaining self-hosting step. The IR stays the contract; `Lower` stays the invariant.
+- **Parser-as-data (landed, S-expr family)**: a surface can now be a `SurfaceSpec`
+  (data: a keyword lexicon + clause policy) that a single generic `SpecSurface` engine
+  interprets — Read remaps skin heads back to canonical then type-checks, Render emits
+  the skin. Specs are ledger-resident (`SaveSurfaceSpec`/`LoadSurfaceSpec`), so a new
+  S-expr-family surface is data the system holds and can evolve, no Go type — the
+  analog of the ledger-resident prologue. Proven behavior-safe by `BehaviorHash`.
+  (Skin tokens must be valid Flux identifiers; `DeriveClauses` is behavior-equivalent
+  but re-orders reads in the WAT, so it is not `BehaviorHash`-identical.)
+- **Remaining frontier**: the Forth surface stays an algorithmic Go parser (a
+  concatenative reader is not a keyword skin), and a fully self-hosted parser *cell*
+  is the deep endgame. But for the S-expr family the front-end is now data. The IR
+  stays the contract; `Lower` stays the invariant.
 - **The efficiency goal decomposes cleanly onto the surface**: *generated* efficiently
   (grammar the model decodes under — the scoreboard) and *processed* efficiently
   (`Render` compactness/legibility). Both are surface properties; behavior is IR.
