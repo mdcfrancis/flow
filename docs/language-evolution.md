@@ -135,6 +135,33 @@ prerequisite for treating a language change as a store migration (§4) rather th
 hunt through the codebase for embedded Flux. Small, and it pays off immediately:
 capturing a better green cell already improves the examples the prompt shows.
 
+## 10. Exploration results (live, Qwen3.6-27B-oQ4)
+
+The two-tier exploration loop (cheap scoreboard → epoch gate) is built and run. The
+scoreboard (`flux/scoreboard.go`) measures a variant on the LLM-optimal axes; the
+proposer (`flux/proposer.go`) hands the model the board and lets it propose the next
+variant. Findings so far (temp 0.7, small N — noisy, directional):
+
+- **Grammar guarantees syntax, not types.** Syntax-valid rate is ~1.0 by
+  construction; the parse+**type-check** rate sits lower (≈0.75–1.0). That gap is the
+  type-error rate the grammar admits — a concrete language-evolution target (make a
+  class of type errors ungrammatical and the gap closes).
+- **Canonicality is the weak axis** (≈0.20–0.30): at temp>0 the model scatters across
+  many equivalent programs. But **fixing write ORDER did not fix it** — the
+  `canonical` variant moved canonicality within noise while costing tokens. The
+  scatter lives in the **expression trees and let-bindings**, not write ordering. The
+  next canonicality lever should target those (e.g. constrain/most-canonicalize let
+  usage), not field order.
+- **The LLM proposer reasons correctly about its own generation.** Shown the board,
+  the model proposed `clauses=true canonical_writes=true`, explicitly "targeting
+  canonicality … while maintaining clauses=true to preserve the valid-rate floor that
+  dropped in the terse variant." Sound reasoning — and the cheap tier still
+  **rejected** the proposal on measurement (0.68 ≤ baseline 0.90), without paying for
+  a whole-stack epoch. Proposer + filter working as designed.
+
+Net: baseline (clauses, free writes) remains the fittest measured language; terse and
+canonical are recorded negatives; the open lever is expression/let canonicality.
+
 ## 9. Implementation status
 
 The mechanism is built; see [lineage.md §9](lineage.md) for the full map. In short:
