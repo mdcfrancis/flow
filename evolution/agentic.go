@@ -125,6 +125,12 @@ func buildAgenticTools(ledger *storage.LedgerEngine, cs *compiler.CompilerServic
 			inference.ToolDef{Name: "flux_run", Description: "Run your Flux (cell …) in the real sandbox for several ticks with inputs you choose, and get back each writable field's per-tick TRAJECTORY (or the drawn shapes) — so you can see the full behavior over time, not just one step. Use enough steps to reach the edge cases the GOAL implies (e.g. the ball hitting a wall) and confirm it behaves right (reverses/bounces, doesn't stop or leave the screen). inputs is a JSON object of field→integer; steps defaults to 12.", Parameters: objSchema(map[string]string{"src": "the full (cell …) Flux program", "inputs": "JSON object mapping field names to integers, e.g. {\"ball_x\":300,\"ball_vx\":5,\"screen_width\":320}", "steps": "how many ticks to run (integer; use enough to reach an edge case, e.g. 30)"}, []string{"src", "inputs"})},
 		)
 	}
+	// The example tools show worked examples in the language this cell is authored
+	// in: Flux when a layout is present, WAT otherwise — never the other language.
+	toolLang := "wat"
+	if layout != nil {
+		toolLang = "flux"
+	}
 	exec := func(name, argsJSON string) string {
 		args := map[string]any{}
 		_ = json.Unmarshal([]byte(argsJSON), &args)
@@ -138,7 +144,7 @@ func buildAgenticTools(ledger *storage.LedgerEngine, cs *compiler.CompilerServic
 		switch name {
 		case "list_examples":
 			var b strings.Builder
-			for _, e := range FindExamples(ledger, kind, "", nil, nil, 20) {
+			for _, e := range FindExamples(ledger, kind, toolLang, "", nil, nil, 20) {
 				fmt.Fprintf(&b, "%s: %s\n", e.ID, e.Semantics)
 			}
 			return orNone(b.String(), "no examples stored")
@@ -148,7 +154,7 @@ func buildAgenticTools(ledger *storage.LedgerEngine, cs *compiler.CompilerServic
 				q = intent
 			}
 			var b strings.Builder
-			for _, e := range FindExamples(ledger, kind, q, nil, nil, 3) {
+			for _, e := range FindExamples(ledger, kind, toolLang, q, nil, nil, 3) {
 				fmt.Fprintf(&b, "EXAMPLE (%s, score %s):\n%s\n\n", e.Semantics, e.Score, e.WAT)
 			}
 			return orNone(b.String(), "no matching examples")

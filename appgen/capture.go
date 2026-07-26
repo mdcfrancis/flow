@@ -1,6 +1,8 @@
 package appgen
 
 import (
+	"strings"
+
 	"github.com/mdcfrancis/flow/evolution"
 )
 
@@ -34,9 +36,17 @@ func (g *Grower) CaptureExample(urn, score string) (bool, error) {
 	if err != nil || wat == "" {
 		return false, err
 	}
+	// Under P0 the stored genome is Flux for Flux cells; tag the captured example
+	// with the language of its source so it lands in the right retrieval bucket (a
+	// captured green Flux cell must supersede the Flux seed example, not the WAT one).
+	lang := ""
+	if strings.HasPrefix(strings.TrimSpace(wat), "(cell") {
+		lang = "flux"
+	}
 	return evolution.AddExample(g.ledger, evolution.Example{
 		Kind:       string(kindOf(*sub)),
 		Entry:      entryFor(*sub),
+		Lang:       lang,
 		Semantics:  sub.Semantics,
 		Reads:      sub.Reads,
 		Writes:     sub.Writes,

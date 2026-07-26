@@ -234,6 +234,21 @@ type Orchestrator struct {
 	// unchanged, so a structural refactor is accepted only if behavior holds and cost
 	// drops. Set by the scheduler on plateau, cleared on a structural commit.
 	structural map[string]bool
+	// authoringExamples remembers, per cell URN, the worked-example IDs the last
+	// buildSeed inlined into that cell's prompt — the `examples` edge of its lineage
+	// (docs/lineage.md §4). Read by the commit path when it records lineage, then
+	// stale until the next build overwrites it. Serial with the evolution loop.
+	authoringExamples map[string][]string
+}
+
+// noteAuthoringExamples records which worked examples were inlined into a cell's
+// build prompt, so a subsequent commit can attribute them as the cell's lineage
+// `examples` edge. Overwrites the previous note for that cell.
+func (o *Orchestrator) noteAuthoringExamples(urn string, ids []string) {
+	if o.authoringExamples == nil {
+		o.authoringExamples = map[string][]string{}
+	}
+	o.authoringExamples[urn] = ids
 }
 
 // SetStructural flags (or clears) a cell for structural escalation — its next synthesis
@@ -801,15 +816,22 @@ func (o *Orchestrator) commit(ctx context.Context, fr *FrameResult, baseRoot, ta
 // renderKnowledge retrieves the top docs + worked examples for a cell of this entry
 // kind and intent from the knowledge base, formatted for the synthesis prompt. Empty
 // when the stores hold nothing relevant (the static few-shot then carries synthesis).
-func (o *Orchestrator) renderKnowledge(contract *EntryContract, intent string) string {
+// renderKnowledge inlines the relevant docs + worked examples for a cell. lang
+// selects the language of the worked examples ("flux" when this cell is authored in
+// Flux, "wat" otherwise), so the example the prompt shows is always in the language
+// the model must write — and, crucially, is drawn FROM THE STORE rather than
+// hard-coded in the seed. This is the lazy-inlining that keeps Flux single-sourced
+// (docs/language-evolution.md §6). ids returns the example IDs actually inlined, so
+// the caller can record them as the cell's `examples` lineage edge (docs/lineage.md).
+func (o *Orchestrator) renderKnowledge(contract *EntryContract, intent, lang string) (text string, ids []string) {
 	kind := ""
 	if contract == RenderFrameContract {
 		kind = "render"
 	}
 	docs := FindDocuments(o.ledger, kind, intent, 2)
-	exs := FindExamples(o.ledger, kind, intent, nil, nil, 2)
+	exs := FindExamples(o.ledger, kind, lang, intent, nil, nil, 2)
 	if len(docs) == 0 && len(exs) == 0 {
-		return ""
+		return "", nil
 	}
 	var b strings.Builder
 	b.WriteString("RELEVANT KNOWLEDGE (retrieved for this cell — apply it):\n")
@@ -818,9 +840,10 @@ func (o *Orchestrator) renderKnowledge(contract *EntryContract, intent string) s
 	}
 	for _, e := range exs {
 		fmt.Fprintf(&b, "WORKED EXAMPLE (%s, %s):\n%s\n", e.Kind, e.Semantics, e.WAT)
+		ids = append(ids, e.ID)
 	}
 	b.WriteString("\n")
-	return b.String()
+	return b.String(), ids
 }
 
 func (o *Orchestrator) buildSeed(urn, intent, genotype string, contract *EntryContract, suite *AcceptanceSuite) string {
@@ -881,8 +904,15 @@ func (o *Orchestrator) buildSeed(urn, intent, genotype string, contract *EntryCo
 	// knowledge base most relevant to a cell of THIS kind and intent — concrete guidance
 	// targeting exactly this synthesis shape (the doc explains the pattern, the example
 	// shows it working). The static few-shot in the system prompt is only the floor.
-	if k := o.renderKnowledge(contract, intent); k != "" {
+	knowledgeLang := "wat"
+	if fluxOn {
+		knowledgeLang = "flux"
+	}
+	if k, ids := o.renderKnowledge(contract, intent, knowledgeLang); k != "" {
 		b.WriteString(k)
+		// Stash the worked examples actually inlined so the commit path can record
+		// them as this cell's `examples` lineage edge (docs/lineage.md §4).
+		o.noteAuthoringExamples(urn, ids)
 	}
 	// User guidance (soft): cross-app SYSTEM principles and this APP's principles,
 	// rewritten from operator commentary. The model weighs these while building; an

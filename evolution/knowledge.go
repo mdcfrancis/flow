@@ -25,18 +25,32 @@ const (
 	docsRef     = "urn:hdm:docs"
 )
 
-// Example is a captured worked WAT solution.
+// Example is a captured worked solution. Lang names the language its source (WAT
+// field) is written in — "" or "wat" for raw WAT, "flux" for a Flux (cell …)
+// program. This is what lets the Flux worked examples live in the KB (single source
+// of Flux, lazily inlined into prompts) instead of being hard-coded in the seed
+// block — see docs/language-evolution.md §6 and docs/lineage.md §8.
 type Example struct {
 	ID         string   `json:"id"`
-	Kind       string   `json:"kind"`  // compute|render|input|leaf (string; no appgen dep)
-	Entry      string   `json:"entry"` // run-tick|render-frame
+	Kind       string   `json:"kind"`           // compute|render|input|leaf (string; no appgen dep)
+	Entry      string   `json:"entry"`          // run-tick|render-frame
+	Lang       string   `json:"lang,omitempty"` // ""/"wat" | "flux" — the language of WAT below
 	Semantics  string   `json:"semantics"`
 	Reads      []string `json:"reads,omitempty"`
 	Writes     []string `json:"writes,omitempty"`
-	WAT        string   `json:"wat"`
+	WAT        string   `json:"wat"`        // the worked source, in the language named by Lang
 	Score      string   `json:"score"`      // "5/5" — proof it is a WORKED example
 	Provenance string   `json:"provenance"` // source cell URN / objective / "seed"
 	Tags       []string `json:"tags,omitempty"`
+}
+
+// langOf normalizes an example's language: an empty Lang means raw WAT (the
+// historical default, before Flux examples existed).
+func langOf(e Example) string {
+	if e.Lang == "" {
+		return "wat"
+	}
+	return e.Lang
 }
 
 // Document is reusable conceptual knowledge — prose, not code.
@@ -145,12 +159,15 @@ func AddDocument(ledger *storage.LedgerEngine, d Document) error {
 	return SaveDocuments(ledger, append(ds, d))
 }
 
-// sameShape reports whether two examples cover the same synthesis shape: same entry and
-// same tag set (tags name the pattern, e.g. "draw-at-position", "wall-bounce"). An
-// untagged example (a raw capture) has no declared shape, so it is only deduped by exact
-// content, never collapsed against another — additive but content-unique.
+// sameShape reports whether two examples cover the same synthesis shape: same
+// language, same entry and same tag set (tags name the pattern, e.g.
+// "draw-at-position", "wall-bounce"). Language is part of the shape so a Flux
+// example never displaces the WAT example for the same pattern (or vice versa) —
+// each language keeps its own worked example. An untagged example (a raw capture)
+// has no declared shape, so it is only deduped by exact content, never collapsed
+// against another — additive but content-unique.
 func sameShape(a, b Example) bool {
-	if a.Entry != b.Entry || len(a.Tags) == 0 || len(b.Tags) == 0 {
+	if langOf(a) != langOf(b) || a.Entry != b.Entry || len(a.Tags) == 0 || len(b.Tags) == 0 {
 		return false
 	}
 	return strings.EqualFold(strings.Join(sortedLower(a.Tags), ","), strings.Join(sortedLower(b.Tags), ","))
@@ -197,10 +214,13 @@ func sortedLower(ss []string) []string {
 
 // --- retrieval: rank by kind (hard filter) then intent/shape overlap ---
 
-// FindExamples returns up to k worked examples relevant to a cell of the given kind and
-// intent, best first. Kind is a hard filter (a render target only sees render examples);
-// ties break on keyword overlap between the query and the example's semantics/tags.
-func FindExamples(ledger *storage.LedgerEngine, kind, intent string, reads, writes []string, k int) []Example {
+// FindExamples returns up to k worked examples relevant to a cell of the given kind
+// and intent, best first. Kind is a hard filter (a render target only sees render
+// examples); lang is a hard filter too when non-empty ("flux" retrieves only Flux
+// programs, "wat" only WAT) so a cell being authored in one language is never shown a
+// worked example in the other. ties break on keyword overlap between the query and
+// the example's semantics/tags.
+func FindExamples(ledger *storage.LedgerEngine, kind, lang, intent string, reads, writes []string, k int) []Example {
 	terms := terms(intent, reads, writes)
 	type scored struct {
 		e Example
@@ -209,6 +229,9 @@ func FindExamples(ledger *storage.LedgerEngine, kind, intent string, reads, writ
 	var ranked []scored
 	for _, e := range LoadExamples(ledger) {
 		if kind != "" && e.Kind != "" && !strings.EqualFold(e.Kind, kind) {
+			continue
+		}
+		if lang != "" && !strings.EqualFold(langOf(e), lang) {
 			continue
 		}
 		ranked = append(ranked, scored{e, overlap(terms, e.Semantics, strings.Join(e.Tags, " "), strings.Join(e.Reads, " "))})

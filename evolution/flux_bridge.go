@@ -205,9 +205,12 @@ func extractFlux(resp string) string {
 
 // fluxSeedBlock renders the Flux authoring instructions appended to the build
 // seed when the Flux path is on: it tells the model to output a (cell …) program
-// (not WAT), gives the grammar + the typed field list + a worked example matching
-// the cell's entry, so the model writes only logic and the lowerer owns the
-// encoding.
+// (not WAT) and gives the language description — the grammar + the typed field
+// list — so the model writes only logic and the lowerer owns the encoding. It
+// deliberately embeds NO worked Flux program: the worked example is retrieved from
+// the knowledge base and lazily inlined by renderKnowledge, so Flux lives in exactly
+// one place (the example store) and a language change never has to hunt for Flux
+// hard-coded in a prompt. See docs/language-evolution.md §6 and docs/lineage.md §8.
 func fluxSeedBlock(contract *EntryContract, layout flux.Layout) string {
 	view := contract != nil && contract.Name == "render-frame"
 	var stateFields, inputFields []string
@@ -243,19 +246,7 @@ func fluxSeedBlock(contract *EntryContract, layout flux.Layout) string {
 		b.WriteString("  hmi_event_type: 2 mousedown, 3 mouseup, 4 click, 5 keydown, 6 keyup. Detect a NEW discrete event by comparing hmi_event_seq to the value you saw last tick. hmi_key is the key code; hmi_mouse_x/y is the live cursor; hmi_buttons/hmi_modifiers are bit masks.\n")
 	}
 	b.WriteString("\n")
-	if view {
-		b.WriteString("WORKED EXAMPLE (a view cell that draws AT its read position):\n")
-		b.WriteString("  (cell renderer (reads ball_x ball_y) (draw (circle ball_x ball_y 8 #xFFCC33FF)))\n\n")
-	} else {
-		b.WriteString("WORKED EXAMPLE (a physics cell: integrate, reflect at the walls, clamp):\n")
-		b.WriteString("  (cell physics\n")
-		b.WriteString("    (reads ball_x ball_y vel_x vel_y screen_w screen_h)\n")
-		b.WriteString("    (writes ball_x ball_y vel_x vel_y)\n")
-		b.WriteString("    (let ([nx (+ ball_x vel_x)] [ny (+ ball_y vel_y)]\n")
-		b.WriteString("          [bx (or (< nx 0) (>= nx screen_w))] [by (or (< ny 0) (>= ny screen_h))])\n")
-		b.WriteString("      (write (vel_x (if bx (neg vel_x) vel_x)) (vel_y (if by (neg vel_y) vel_y))\n")
-		b.WriteString("             (ball_x (clamp nx 0 (- screen_w 1))) (ball_y (clamp ny 0 (- screen_h 1))))))\n\n")
-	}
+	b.WriteString("A WORKED FLUX EXAMPLE for this cell's kind is provided above under RELEVANT KNOWLEDGE — follow its shape.\n")
 	b.WriteString("Output only your (cell …) program.\n")
 	return b.String()
 }
