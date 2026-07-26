@@ -1008,7 +1008,7 @@ func (o *Orchestrator) authoringLineage(urn, ns string, contract *EntryContract,
 	// language + grammar: the Flux front-end version, and the specific GBNF this cell
 	// decodes under (both derive from the language, so a language change moves them).
 	if fluxOn {
-		l.Language = FluxLanguageVersion
+		l.Language = LoadLanguageVersion(o.ledger)
 		kind := flux.KindCompute
 		if contract == RenderFrameContract {
 			kind = flux.KindView

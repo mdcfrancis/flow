@@ -121,7 +121,11 @@ func (plan RebuildPlan) Execute(ledger *storage.LedgerEngine, cur CurrentInputs,
 			return outcomes, err
 		}
 		migrated.Result = result
-		_ = RecordLineage(ledger, migrated)
+		// Only a GREEN re-derivation is memoized, so a later rebuild's early-cutoff
+		// never serves a genotype that failed its scenarios (docs/lineage.md §2).
+		if green {
+			_ = RecordLineage(ledger, migrated)
+		}
 		outcomes = append(outcomes, RebuildOutcome{URN: s.URN, Result: result, Green: green, Fitness: fitness})
 	}
 	return outcomes, nil
