@@ -1013,7 +1013,13 @@ func (o *Orchestrator) authoringLineage(urn, ns string, contract *EntryContract,
 		if contract == RenderFrameContract {
 			kind = flux.KindView
 		}
-		l.Grammar = hashStr(flux.GBNF(layout, kind))
+		// Same IR (so the language version is unchanged), but the SURFACE the model
+		// decodes under differs — record the active surface's grammar.
+		if fluxIsForth() {
+			l.Grammar = hashStr(flux.GBNFForthTyped(layout, kind))
+		} else {
+			l.Grammar = hashStr(flux.GBNF(layout, kind))
+		}
 	} else {
 		l.Language = langWAT
 	}

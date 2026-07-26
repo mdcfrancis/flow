@@ -66,6 +66,23 @@ func BehaviorHash(c *Cell, layout Layout) (string, error) {
 	return hex.EncodeToString(h[:]), nil
 }
 
+// CompileWith reads source through a given Surface into the IR and lowers it to WAT —
+// the surface-parameterized form of Compile. The operational synthesis path uses this
+// to author cells in a chosen surface (S-expr or Forth) while the IR + Lower stay
+// invariant.
+func CompileWith(s Surface, filename, src string, layout Layout) (string, error) {
+	cell, err := s.Read(filename, src, layout)
+	if err != nil {
+		return "", err
+	}
+	return Lower(cell, layout)
+}
+
+// ForthTypedGuide is the dictionary/instructions describing the type-stratified Forth
+// surface to a model — exported so the operational build seed can inline it when that
+// surface is active.
+func ForthTypedGuide() string { return forthTypedPreamble }
+
 // SameBehavior reports whether two cells lower to identical WAT — the behavior
 // invariant a surface experiment must hold.
 func SameBehavior(a, b *Cell, layout Layout) bool {
