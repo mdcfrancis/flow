@@ -42,6 +42,38 @@ type derivTemplate struct {
 	body   Expr // typed expression with the params as free Vars
 }
 
+// derivSigs is the checker's view of the active vocabulary: derivation name → arity.
+// The checker types an otherwise-unknown op as an (Int^arity → Int) call when it is a
+// registered derivation, so a data-defined word (built-in or evolved) type-checks
+// without a Go change — the property that makes the prologue evolvable-from-data.
+// (v1 derivations are all-Int, matching neg/abs/min/max/clamp.)
+var (
+	derivMu   sync.RWMutex
+	derivSigs = map[string]int{}
+)
+
+// init registers the built-in default arities so cells using clamp/min/max/etc.
+// type-check even before any prologue is explicitly installed.
+func init() { registerDerivSigs(DefaultPrologue) }
+
+func registerDerivSigs(ds []Derivation) {
+	m := make(map[string]int, len(ds))
+	for _, d := range ds {
+		m[d.Name] = len(d.Params)
+	}
+	derivMu.Lock()
+	derivSigs = m
+	derivMu.Unlock()
+}
+
+// derivArity reports a derivation's arity and whether it is a registered derivation.
+func derivArity(name string) (int, bool) {
+	derivMu.RLock()
+	n, ok := derivSigs[name]
+	derivMu.RUnlock()
+	return n, ok
+}
+
 type prologue struct {
 	templates map[string]*derivTemplate
 }
@@ -50,6 +82,9 @@ type prologue struct {
 // derivation may reference core ops and earlier derivations; the checker types the
 // latter as ordinary prims (they are inlined later by expansion).
 func compilePrologue(ds []Derivation) (*prologue, error) {
+	// Register arities FIRST so a derivation body may reference earlier derivations
+	// (e.g. clamp uses max/min) and still type-check while templates are built.
+	registerDerivSigs(ds)
 	p := &prologue{templates: make(map[string]*derivTemplate, len(ds))}
 	for _, d := range ds {
 		layout := Layout{}
@@ -168,13 +203,47 @@ func substitute(e Expr, sub map[string]Expr) Expr {
 }
 
 var (
-	prologueOnce sync.Once
-	prologueInst *prologue
-	prologueErr  error
+	prologueMu sync.RWMutex
+	active     *prologue // nil until installed; lazily defaults to DefaultPrologue
 )
 
-// dfltPrologue compiles and caches the default prologue.
-func dfltPrologue() (*prologue, error) {
-	prologueOnce.Do(func() { prologueInst, prologueErr = compilePrologue(DefaultPrologue) })
-	return prologueInst, prologueErr
+// SetPrologue installs the derived vocabulary the language expands against, compiling
+// it first (so a malformed derivation is rejected, not silently adopted). The
+// operational system loads this from the ledger — see evolution.InstallPrologue — so
+// the derivations are EVOLVABLE DATA on the substrate, not fixed Go: the system can
+// rewrite its own vocabulary (docs/flux-surface-ir.md). An empty list restores the
+// built-in DefaultPrologue.
+func SetPrologue(ds []Derivation) error {
+	if len(ds) == 0 {
+		ds = DefaultPrologue
+	}
+	p, err := compilePrologue(ds)
+	if err != nil {
+		return err
+	}
+	prologueMu.Lock()
+	active = p
+	prologueMu.Unlock()
+	return nil
+}
+
+// currentPrologue returns the active prologue, lazily compiling the built-in default
+// if none has been installed.
+func currentPrologue() (*prologue, error) {
+	prologueMu.RLock()
+	p := active
+	prologueMu.RUnlock()
+	if p != nil {
+		return p, nil
+	}
+	prologueMu.Lock()
+	defer prologueMu.Unlock()
+	if active == nil {
+		pp, err := compilePrologue(DefaultPrologue)
+		if err != nil {
+			return nil, err
+		}
+		active = pp
+	}
+	return active, nil
 }

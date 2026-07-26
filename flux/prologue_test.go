@@ -31,7 +31,7 @@ func collectOps(e Expr, into map[string]bool) {
 // After expansion, no derivation op (neg/abs/min/max/clamp) survives — the cell is
 // pure core, which is all the backend lowers.
 func TestPrologueExpandsToCore(t *testing.T) {
-	p, err := dfltPrologue()
+	p, err := currentPrologue()
 	if err != nil {
 		t.Fatalf("prologue compile: %v", err)
 	}
@@ -68,7 +68,7 @@ func TestPrologueExpandsToCore(t *testing.T) {
 
 // The default prologue compiles (every derivation body type-checks against the core).
 func TestDefaultPrologueCompiles(t *testing.T) {
-	if _, err := dfltPrologue(); err != nil {
+	if _, err := currentPrologue(); err != nil {
 		t.Fatalf("default prologue must compile: %v", err)
 	}
 }

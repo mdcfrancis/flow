@@ -414,6 +414,16 @@ func checkPrim(l *List, scope map[string]Type, layout Layout, writeSet map[strin
 		}
 		return mk(TBool), nil
 	default:
+		// A registered prologue derivation (built-in or evolved): type it as an
+		// (Int^arity → Int) call. Expansion inlines it to core before lowering
+		// (prologue.go). This is what lets a data-defined word type-check with no Go
+		// change — the evolvable-prologue property.
+		if n, ok := derivArity(op); ok {
+			if err := num(n); err != nil {
+				return nil, err
+			}
+			return mk(TInt), nil
+		}
 		return nil, errf(pos, "unknown primitive %q", op)
 	}
 }

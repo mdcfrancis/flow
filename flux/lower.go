@@ -20,7 +20,7 @@ func Lower(c *Cell, layout Layout) (string, error) {
 	// Distil to the core: inline the prologue derivations (neg/abs/min/max/clamp and
 	// any evolved words) so only core operators reach the backend below. This is the
 	// one place expansion happens; lowerPrim handles CORE ops only (prologue.go).
-	p, err := dfltPrologue()
+	p, err := currentPrologue()
 	if err != nil {
 		return "", err
 	}
