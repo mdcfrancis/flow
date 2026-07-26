@@ -171,9 +171,17 @@ system for identical external behavior.
 - **Now**: the surface is a swappable `Surface` in Go; a language experiment is a new
   `Surface`, gated by `BehaviorHash`. The science loop optimizes the surface with a
   structural invariant.
-- **Next — "move the parser into the system"**: make the surface⇄IR mapping a
-  data-driven / evolvable artifact rather than fixed Go, so the surface can evolve
-  without a code change. The IR stays the contract; `Lower` stays the invariant.
+- **Ledger-resident prologue (landed)**: the derived vocabulary
+  (neg/abs/min/max/clamp and any evolved words) lives in the ledger as data
+  (`InstallPrologue`), and the checker consults its arities — so the system can
+  rewrite its own vocabulary from data with no Go change (proven: adding `double`).
+- **Surface promotion (landed)**: the default authoring surface is promotable ledger
+  state. `PromoteSurface` runs a whole-stack epoch — re-author every cell in the new
+  surface, promote iff all green, else roll back — so flipping the default to forth is
+  a verified language change, not a flag.
+- **Next — "move the parser into the system"**: the surface⇄IR *reader/renderer* is
+  still Go. Making it a data-driven/evolvable artifact (as the prologue now is) is the
+  remaining self-hosting step. The IR stays the contract; `Lower` stays the invariant.
 - **The efficiency goal decomposes cleanly onto the surface**: *generated* efficiently
   (grammar the model decodes under — the scoreboard) and *processed* efficiently
   (`Render` compactness/legibility). Both are surface properties; behavior is IR.
