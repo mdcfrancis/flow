@@ -108,6 +108,33 @@ richer worked examples for familiarity. s-expr still leads on fitness because
 valid-rate is the floor; Forth's 6× token + canonicality edge makes closing validity
 the prize.
 
+### Type-stratification (third crank — the win)
+
+Making the residual error class ungrammatical: `GBNFForthTyped` segregates iexpr /
+bexpr / color and binds to typed local pools (`=: i0` Int, `=: b0` Bool), writes take
+only an iexpr into an Int field.
+
+| surface           | syntax | valid | tokens | canonicality | fitness |
+|-------------------|:------:|:-----:|:------:|:------------:|:-------:|
+| **forth-typed**   | 1.00   | **1.00** | 41.9 | **0.67**    | **1.250** |
+| sexpr             | 1.00   | 0.93  | 110.4  | 0.28         | 0.854   |
+| forth-d2 (untyped)| 0.93   | 0.60  | 22.0   | 0.42         | 0.768   |
+
+**The type-stratified Forth surface overtakes s-expr decisively.** Validity goes to
+1.0 (type errors are now ungrammatical, exactly as the s-expr GBNF is
+valid-by-construction — applied to the failing axis), canonicality to 0.67, tokens
+~2.6× leaner than s-expr. Fitness 1.25 vs 0.85. Behavior identical by `BehaviorHash`.
+
+This is the **first measured better-LLM language**: a surface the model generates
+more reliably, more canonically, and far more cheaply than the human-oriented
+S-expression, for identical external behavior. It is a genuine ΔL for the epoch gate
+to promote.
+
+Note: the agentic `ForthDiagnose` tool (explicit stack/word vs type feedback for
+model iteration) is built and ready, but the grammar lever alone reached valid=1.0 —
+so the agentic loop is now insurance for the harder residual (behavioral correctness,
+rare unbound-local cases), not required for validity.
+
 ## Where this goes
 
 - **Now**: the surface is a swappable `Surface` in Go; a language experiment is a new
