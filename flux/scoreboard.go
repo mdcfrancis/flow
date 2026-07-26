@@ -50,9 +50,13 @@ type Generator interface {
 
 // Score is a variant's measured fitness on the benchmark.
 type Score struct {
-	Variant      string
-	Samples      int     // total generations attempted
-	ValidRate    float64 // fraction that parse + type-check
+	Variant    string
+	Samples    int     // total generations attempted
+	SyntaxRate float64 // fraction that PARSE — what the grammar guarantees by construction
+	ValidRate  float64 // fraction that parse + TYPE-CHECK — a usable cell (grammar does not guarantee types)
+	// The gap SyntaxRate−ValidRate is the type-error rate the grammar admits — a
+	// language-evolution target: making a class of type errors ungrammatical would
+	// close it (docs/language-evolution.md).
 	MeanTokens   float64 // completion tokens, mean over VALID samples (cost of a usable cell)
 	Canonicality float64 // per-task fraction of valid samples equal to the modal program, averaged
 }
@@ -78,7 +82,7 @@ func RunScoreboard(gen Generator, tasks []Task, variants []Variant, samples int)
 		if validFn == nil {
 			validFn = defaultValid
 		}
-		var totalValid, totalSamples, tokenN int
+		var totalSyntax, totalValid, totalSamples, tokenN int
 		var tokenSum, canonAcc float64
 		var canonTasks int
 		for _, task := range tasks {
@@ -87,7 +91,13 @@ func RunScoreboard(gen Generator, tasks []Task, variants []Variant, samples int)
 			for i := 0; i < samples; i++ {
 				totalSamples++
 				src, toks, err := gen.Generate(task.Prompt, g)
-				if err != nil || !validFn(src, task.Layout) {
+				if err != nil {
+					continue
+				}
+				if parses(src) {
+					totalSyntax++
+				}
+				if !validFn(src, task.Layout) {
 					continue
 				}
 				totalValid++
@@ -102,6 +112,7 @@ func RunScoreboard(gen Generator, tasks []Task, variants []Variant, samples int)
 		}
 		s := Score{Variant: v.Name, Samples: totalSamples}
 		if totalSamples > 0 {
+			s.SyntaxRate = float64(totalSyntax) / float64(totalSamples)
 			s.ValidRate = float64(totalValid) / float64(totalSamples)
 		}
 		if tokenN > 0 {
@@ -125,6 +136,13 @@ func defaultValid(src string, layout Layout) bool {
 		return false
 	}
 	_, err = Check(f, layout)
+	return err == nil
+}
+
+// parses reports whether the source is syntactically well-formed Flux — what a
+// grammar-constrained decode guarantees by construction, independent of types.
+func parses(src string) bool {
+	_, err := Parse("m", src)
 	return err == nil
 }
 
@@ -169,12 +187,15 @@ func DefaultBenchmark() []Task {
 	}
 }
 
-// FluxV1Variants are the two language variants measured so far: the baseline grammar
-// (with reads/writes clauses) and the terse (clause-less, derived) candidate — the
-// first proposed language evolution (docs/grammar-constrained-flux.md).
+// FluxV1Variants are the language variants measured so far: the baseline grammar
+// (with reads/writes clauses), the terse (clause-less, derived) candidate — the first
+// proposed evolution, a measured negative — and the canonical candidate, which
+// removes write-pair ordering to attack the low-canonicality weak axis
+// (docs/grammar-constrained-flux.md, docs/language-evolution.md).
 func FluxV1Variants() []Variant {
 	return []Variant{
 		{Name: "baseline(clauses)", Grammar: GBNF},
 		{Name: "terse(no-clauses)", Grammar: GBNFTerse},
+		{Name: "canonical(fixed-writes)", Grammar: GBNFCanonical},
 	}
 }
