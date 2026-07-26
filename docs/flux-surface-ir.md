@@ -204,11 +204,22 @@ system for identical external behavior.
   arbitrary multi-digit RPN arithmetic (all four operators, spaces, nesting), verified
   in the sandbox. Parser/stream cells are Flux components now, the archetype for
   buffer-processing cells generally.
-- **Remaining frontier**: the Forth surface stays an algorithmic Go parser, and a
-  self-hosted *surface* parser cell (Flux surface text → the IR, in Flux) is the deep
-  endgame — the same shift-reduce shape over nested S-expressions, now clearly
-  reachable given the full parser above. The IR stays the contract; `Lower` stays the
-  invariant.
+- **Self-hosted surface parser (landed, postfix surface)**: a Flux cell now parses
+  the surface into IR STRUCTURE, not just a value. Same shift-reduce shape, but it
+  ALLOCATES AST nodes — a number becomes a leaf `(0, value, ·)`, an operator pops two
+  handles and becomes an inner node `(op, left, right)` — in a `nodes` buffer with a
+  bump allocator, pushing handles on the stack. Chained after the tokenizer,
+  `text → tokens → AST node buffer`, and Go reconstructs the tree from the buffer.
+  **The parse — surface text into a structured AST — is done by a cell, not by Go.**
+  Verified in the sandbox on multi-digit RPN arithmetic. This is full self-hosting of
+  the parse step: the system parses (a surface of) its own language with a cell it can
+  evolve; Go only deserializes the tree and lowers it. `Lower` (IR→WAT) remains the
+  sole fixed invariant.
+- **Remaining frontier**: extend the node grammar from arithmetic to full cell forms
+  (write/draw/let terminals, field refs) and adopt the nested S-expression surface
+  (a parse-state stack), to make the self-hosted parser the operational reader. The
+  shift-reduce-to-AST mechanism above is the whole engine; what's left is grammar
+  breadth.
 - **The efficiency goal decomposes cleanly onto the surface**: *generated* efficiently
   (grammar the model decodes under — the scoreboard) and *processed* efficiently
   (`Render` compactness/legibility). Both are surface properties; behavior is IR.
