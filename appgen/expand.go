@@ -395,6 +395,54 @@ func directionalScenarios(c *evolution.AppContract, writes, reads []string) []ev
 	return out
 }
 
+// capabilityScenarios grounds an input-capability adapter by INJECTION: for each
+// declared scalar capability paired with the state field it drives (inputs[k] →
+// the k-th addressable write), it seeds the resource the capability binds to
+// (positional: scalar k → slider k) with a value in range and asserts the field
+// takes that value. The check provides the operator value the adapter must forward
+// — no register is named by the author, and no cell must be discovered: the seed
+// forwarder already satisfies these, so a capability adapter converges immediately.
+func capabilityScenarios(sub Subsystem, c *evolution.AppContract) []evolution.Scenario {
+	if len(sub.Inputs) == 0 || c == nil {
+		return nil
+	}
+	off := map[string]int{}
+	for _, f := range c.Fields {
+		off[strings.ToLower(f.Name)] = f.Offset
+	}
+	var writes []string // addressable writes, in order (matches noopFlux's pairing)
+	for _, w := range sub.Writes {
+		if _, ok := off[strings.ToLower(w)]; ok {
+			writes = append(writes, w)
+		}
+	}
+	var out []evolution.Scenario
+	k := 0
+	for _, in := range sub.Inputs {
+		if in.Kind != "scalar" || k >= len(writes) {
+			continue
+		}
+		w := writes[k]
+		soff, ok := evolution.HMIFieldOffset(fmt.Sprintf("hmi_slider%d", k))
+		k++
+		if !ok {
+			continue
+		}
+		v := in.Min + (in.Max-in.Min)*3/4 // in range, biased off min so it differs from a likely init
+		if v <= in.Min {
+			v = in.Max
+		}
+		out = append(out, evolution.Scenario{
+			Name: "input_sets_" + w, Entry: "run-tick", Steps: 1,
+			Seed: []evolution.SeedWrite{{At: fmt.Sprintf("0x%X", soff), U32: []uint32{uint32(v)}}},
+			Expect: evolution.ScenarioExpect{
+				Reads: []evolution.SeedWrite{{At: fmt.Sprintf("0x%X", off[strings.ToLower(w)]), U32: []uint32{uint32(v)}, Cmp: "eq"}},
+			},
+		})
+	}
+	return out
+}
+
 // hmiInputLo/hmiInputHi bound the HMI input register — a seed there means the
 // scenario is input-driven, so it is NOT autonomous movement.
 const hmiInputLo, hmiInputHi = 0x00050000, 0x00051000
