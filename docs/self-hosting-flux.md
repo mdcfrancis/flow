@@ -12,6 +12,11 @@ primitives, better lowering, optimizations — as ordinary cell evolution, gated
 the same verify → gauntlet → rollback machinery. The outer Go collapses toward what
 [[hdm-evolvable-surface]] already wants: **security, rollback, and a bootstrap seed.**
 
+But self-hosting is the *mechanism*, not the end. The **north star (§0.1)** is a
+language optimal for its only author — the LLM — with the model's generation success
+as the fitness function. Making the compiler mutable is what lets the language evolve
+toward that instead of staying frozen at a human-ergonomic design.
+
 Two decisions fix the scope:
 1. **Front-end-only.** The WAT→WASM **assembler (`compiler/sieve.go`, ~2.3k loc)
    stays in Go** — not just to save work, but as a **validation gate** (§5.1): the
@@ -21,6 +26,42 @@ Two decisions fix the scope:
    byte-encoding (a frozen spec, not worth evolving).
 2. **Plan the complete set.** We lay out the *entire* language-completeness
    prerequisite up front (§3–4), rather than discovering it feature-by-feature.
+
+## 0.1 The north star — a language optimal for the LLM, not the human
+
+Self-hosting is not the goal; it is the **mechanism**. Flux today is an
+S-expression language shaped by *human* ergonomics (readable, Lisp-like, balanced
+parens). But Flux has exactly one author — the model. The end goal is a language
+**optimal for the LLM to generate**, and a self-hosted (mutable) compiler is what
+lets the language *evolve toward* that instead of being frozen at a human design.
+
+**Fitness = the model's generation success**, which the system can already measure:
+- **syntax-valid rate** — fraction of generations that parse/check with no repair;
+- **token cost** — tokens per correct cell (cheaper, and fewer places to err);
+- **convergence speed** — sieve iterations / frames to green;
+- **canonicality** — one way to say each thing, so the generation distribution is
+  sharp and the model is never torn between equivalent forms.
+The language evolves to maximize these, not readability — and will drift away from
+human-pretty S-expr toward something terser, more canonical, more domain-loaded.
+
+**Grammar-constrained decoding (#60) is the pivot, and it does two things at once:**
+1. It drives syntax-valid rate to ~100% — an invalid program becomes *undecodable*.
+2. It lets the model emit a structure that IS (close to) the AST — which **collapses
+   the hardest self-hosting stage**: there is little or no text *parser* to write.
+   The compiler becomes **check + lower over model-emitted structure**; §2c largely
+   disappears. This is the strongest reason the north star and the self-hosting plan
+   reinforce each other.
+
+**A tension to choose deliberately:** the model is *fixed* — we can't cheaply
+retrain it. So the language cannot evolve toward "what a fresh model would learn
+best"; it must evolve toward **what this model already generates reliably** (its
+priors), *or* we grammar-constrain to force validity and then evolve for tokens and
+convergence *under that constraint*. Prefer the latter: constrain for validity,
+optimize for cost + convergence.
+
+**The end state is co-evolution:** the model authors cells → the system scores
+generation success → the self-hosted language + compiler mutate toward higher-success
+forms → repeat. A language shaped by its only speaker.
 
 ## 1. The compile path, and what moves
 
@@ -174,6 +215,12 @@ differentially against its Go twin on the corpus:
 - **2a. `lower`** (typed AST → WAT) — most mechanical, least text; do first.
 - **2b. `check`** (AST → typed AST) — symbol table + type rules.
 - **2c. `parse`** (text → AST) — recursive descent over `[Char]`; hardest; do last.
+  **But under the north star (§0.1) this stage largely disappears:** with
+  grammar-constrained decoding the model emits an AST-shaped structure directly, so
+  there is little surface text to parse. Treat a full text parser as the fallback
+  only if we keep a human-writable surface; the primary path is check+lower over
+  model-emitted structure — which also means the language lift (Arc A) need not carry
+  the string/parser machinery purely for self-hosting.
 
 **Phase 3 — Self-host fixpoint + cutover.** The Flux compiler compiles its own
 source to a byte-identical WASM cell. Flip the live compile path to the Flux
