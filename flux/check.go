@@ -29,8 +29,14 @@ func checkCell(list *List, layout Layout) (*Cell, error) {
 	}
 	c := &Cell{Name: name}
 
-	// reads/writes clauses.
+	// reads/writes clauses are OPTIONAL. When present they constrain (and are
+	// validated against the layout). When OMITTED they are DERIVED from the body —
+	// the fields it references are its reads, the fields its terminal writes are its
+	// writes. Declaring them is redundant with the body, so dropping them is the
+	// first LLM-optimal language simplification: fewer tokens, and no possible
+	// clause/body mismatch. See docs/grammar-constrained-flux.md.
 	scope := map[string]Type{}
+	derivedReads := list.Sub("reads") == nil
 	if reads := list.Sub("reads"); reads != nil {
 		for _, it := range reads.Items[1:] {
 			fn := symOf(it)
@@ -41,8 +47,13 @@ func checkCell(list *List, layout Layout) (*Cell, error) {
 			c.Reads = append(c.Reads, fn)
 			scope[fn] = fld.Type
 		}
+	} else {
+		for n, f := range layout { // every field is readable; c.Reads is derived below
+			scope[n] = f.Type
+		}
 	}
 	writeSet := map[string]bool{}
+	derivedWrites := list.Sub("writes") == nil
 	if writes := list.Sub("writes"); writes != nil {
 		for _, it := range writes.Items[1:] {
 			fn := symOf(it)
@@ -51,6 +62,12 @@ func checkCell(list *List, layout Layout) (*Cell, error) {
 			}
 			c.Writes = append(c.Writes, fn)
 			writeSet[fn] = true
+		}
+	} else {
+		for n, f := range layout { // every non-read-only field is writable; c.Writes derived below
+			if !f.ReadOnly {
+				writeSet[n] = true
+			}
 		}
 	}
 
@@ -61,6 +78,15 @@ func checkCell(list *List, layout Layout) (*Cell, error) {
 		return nil, err
 	}
 	c.Body = body
+	// Derive the omitted clauses from the checked body.
+	if derivedReads {
+		c.Reads = referencedFields(body, layout)
+	}
+	if derivedWrites {
+		if w := terminalWrite(body); w != nil {
+			c.Writes = append([]string(nil), w.Fields...)
+		}
+	}
 	switch terminalKind(body) {
 	case "write":
 		c.Kind = KindCompute
@@ -70,6 +96,56 @@ func checkCell(list *List, layout Layout) (*Cell, error) {
 		return nil, errf(posOf(list), "cell body must end in a (write …) or (draw …)")
 	}
 	return c, nil
+}
+
+// referencedFields returns the layout fields the expression reads, in first-use
+// order (deduped) — used to DERIVE a cell's reads when the clause is omitted.
+func referencedFields(e Expr, layout Layout) []string {
+	seen := map[string]bool{}
+	var out []string
+	var walk func(Expr)
+	walk = func(e Expr) {
+		switch t := e.(type) {
+		case *Var:
+			if _, ok := layout[t.Name]; ok && !seen[t.Name] {
+				seen[t.Name] = true
+				out = append(out, t.Name)
+			}
+		case *Prim:
+			for _, a := range t.Args {
+				walk(a)
+			}
+		case *Let:
+			for _, v := range t.Vals {
+				walk(v)
+			}
+			walk(t.Body)
+		case *Write:
+			for _, v := range t.Vals { // the write EXPRESSIONS are reads; the target fields are writes
+				walk(v)
+			}
+		case *Draw:
+			for _, p := range t.Prims {
+				for _, a := range p.Args {
+					walk(a)
+				}
+			}
+		}
+	}
+	walk(e)
+	return out
+}
+
+// terminalWrite returns the (write …) a compute body reduces to (through lets), or
+// nil — used to DERIVE a cell's writes when the clause is omitted.
+func terminalWrite(e Expr) *Write {
+	switch t := e.(type) {
+	case *Write:
+		return t
+	case *Let:
+		return terminalWrite(t.Body)
+	}
+	return nil
 }
 
 // terminalKind reports whether the body reduces (through lets) to a write or draw.

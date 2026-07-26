@@ -111,3 +111,38 @@ ball. Two hard-won rules are now baked into the generator:
 Next: wire `guided_grammar` into the inference request + the Flux synthesis path
 (off by default, provider-gated), then measure syntax-valid rate / tokens /
 convergence with vs. without — the north-star scoreboard.
+
+## Step 2 — validity-by-construction won; the naive token-cut did not (measured)
+
+Pushing toward a *better* grammar, the loop measured several candidate changes on
+the live server. Two clear results:
+
+**WIN — a valid-by-construction grammar.** The grammar was tightened so it
+guarantees not just syntax but **name-existence and arity**:
+- expression atoms are the ENUMERATED real fields + a FIXED let-name pool
+  (`t0…t7`) + literals — no free identifier, so the model can neither invent a
+  field nor reference an unbound name;
+- expressions carry EXACT per-op arities (binop=2, unop=1, `clamp`/`if`=3), so a
+  wrong-arity form like `(clamp 0 1)` is ungrammatical, not merely a check error.
+
+Proven live (`TestGBNFRoundTripLive`): the model emits genuine bounce physics
+(reflect-at-walls, using the let-pool with correct 3-arg `if`/`clamp`) and a
+clamped-circle view — both parse AND check, valid by construction. This is the real
+first improvement to the north-star fitness: the syntax/name/arity failure classes
+are eliminated at decode time.
+
+**NEGATIVE — dropping the reads/writes clauses (measured worse).** The Flux checker
+now *derives* reads/writes from the body (clause-less cells are legal — an honest
+language simplification), and `flux.GBNFTerse` drops the clauses. But A/B on the
+server (`TestGBNFEvolutionMeasure`) showed the terse grammar is a LOSS: without the
+clauses the model bloats (fills the grammar's depth/list bounds with nested
+`(clamp …)` and repeated write-pairs) and, absent the clause's field list, invents
+names. So the clauses aren't pure redundancy — they anchor **concision and field
+vocabulary** as the model generates. The clean token-reduction is therefore subtle;
+it needs the model to be steered toward concision (prompt, or a concision-biased
+grammar), not just the clauses removed. Deferred — and a good first task for the
+*systematic* language evolution (self-hosting Phase 4) rather than hand-tuning.
+
+Net: the language-for-the-LLM is measurably better (valid by construction); the
+obvious next optimization was falsified by measurement, which is exactly what the
+scoreboard is for.
