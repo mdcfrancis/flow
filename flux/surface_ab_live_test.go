@@ -34,8 +34,8 @@ func TestSurfaceAB(t *testing.T) {
 	// to both Forth variants.
 	variants := []Variant{
 		SExprVariant(),
-		ForthVariant("forth-d3", 3),
-		ForthVariant("forth-d2", 2),
+		ForthVariant("forth-d2", 2),         // best untyped Forth so far
+		ForthTypedVariant("forth-typed", 2), // type-stratified — the lever under test
 	}
 	board := RunScoreboard(gen, DefaultBenchmark(), variants, samples)
 	t.Logf("=== surface A/B (%d samples/task, temp 0.7) ===", samples)

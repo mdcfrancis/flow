@@ -229,6 +229,21 @@ func ForthVariant(name string, maxDepth int) Variant {
 	}
 }
 
+// ForthTypedVariant builds a Forth variant on the TYPE-STRATIFIED grammar
+// (GBNFForthTyped): int and bool expressions are segregated and bound to typed local
+// pools (i0…/b0…), so the type errors that were the residual validity gap are
+// ungrammatical. The lever under test is whether that closes the gap while keeping
+// the token/canonicality wins.
+func ForthTypedVariant(name string, maxDepth int) Variant {
+	return Variant{
+		Name:     name,
+		Grammar:  func(l Layout, k CellKind) string { return gbnfForthTyped(l, k, maxDepth) },
+		Valid:    func(src string, l Layout) bool { _, err := (Forth{}).Read("m", src, l); return err == nil },
+		Syntax:   func(src string, l Layout) bool { _, err := forthToSexpr(src, l); return err == nil },
+		Preamble: forthTypedPreamble,
+	}
+}
+
 const sexprPreamble = `FLUX (S-EXPRESSION) — write (cell c (reads …) (writes …) BODY).
 BODY = (let ([t0 expr] …) (write (field expr) …))  or, for a view, (draw (circle cx cy r #xRRGGBBAA) …).
 Operators are PREFIX: (+ a b) (- a b) (clamp x lo hi) (if cond then else) (< a b) (or a b) (neg x).
@@ -252,6 +267,26 @@ Example (note how each intermediate is named so no stack is deep):
     ball_y vel_y + =: t1
     t0 0 screen_w 1 - clamp -> ball_x
     t1 0 screen_h 1 - clamp -> ball_y`
+
+// forthTypedPreamble mirrors forthPreamble but names the TYPED local pools the
+// type-stratified grammar uses: Int results bind to i0..i3, Bool results (comparisons
+// and their combinations) bind to b0..b3. Keeping the two apart is what the grammar
+// enforces, and the example shows the physics shape under it.
+const forthTypedPreamble = `FLUX (FORTH, typed) — a POSTFIX word stream over a stack. Operands come BEFORE the
+operator. Values are Int, Bool, or Color; keep them straight:
+    Int   ← + - * / mod min max (Int Int -- Int), neg abs (Int -- Int), clamp (x lo hi -- Int),
+            a comparison-then-two-Ints if:  cond iThen iElse ?  (-- Int)
+    Bool  ← comparisons < <= > >= = != (Int Int -- Bool), and or (Bool Bool -- Bool), not (Bool -- Bool), true/false
+    Color ← #xRRGGBBAA
+LOCALS ARE TYPED: bind an Int result with ` + "`" + `=: i0` + "`" + ` (pool i0..i3); bind a Bool result with ` + "`" + `=: b0` + "`" + ` (pool b0..b3).
+Then use i0 where an Int is needed and b0 where a Bool is needed.
+- ` + "`" + `iexpr -> field` + "`" + ` writes an Int to a shared field.   For a view:  cx cy r #color circle (or rect/line).
+Keep every stack shallow — bind the moment a value is reused or an expression is >2 deep. Reads/writes are inferred.
+Example (physics: bind the ints and the wall test, then write):
+    ball_x vel_x + =: i0
+    i0 0 < i0 screen_w >= or =: b0
+    i0 0 screen_w 1 - clamp -> ball_x
+    b0 vel_x neg vel_x ? -> vel_x`
 
 // FluxV1Variants are the language variants measured so far: the baseline grammar
 // (with reads/writes clauses), the terse (clause-less, derived) candidate — the first

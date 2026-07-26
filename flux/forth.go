@@ -38,6 +38,22 @@ func (Forth) Read(filename, src string, layout Layout) (*Cell, error) {
 
 func (Forth) Render(c *Cell) string { return cellToForth(c) }
 
+// ForthDiagnose validates a Forth cell and returns "ok" or a precise, actionable
+// message naming what broke — a stack/word error (underflow, unknown word, dangling
+// value) from the transpile, or a type/field error from the checker. It is the
+// payload of the agentic validation tool: the model calls it, reads the feedback, and
+// fixes the cell before committing (the same trick as flux_check for s-expr).
+func ForthDiagnose(src string, layout Layout) string {
+	sx, err := forthToSexpr(src, layout)
+	if err != nil {
+		return "REJECTED (stack/word): " + err.Error()
+	}
+	if _, err := (SExpr{}).Read("m", sx, layout); err != nil {
+		return "REJECTED (type): " + err.Error()
+	}
+	return "ok"
+}
+
 // forth operator classes. Binops render/read as a 2-arg prefix form; unops 1-arg;
 // clamp is 3-arg; `?` is the ternary select (if).
 var forthBinop = map[string]bool{
