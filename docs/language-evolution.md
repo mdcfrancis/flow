@@ -2,7 +2,9 @@
 
 Status: design (exploration). How a change to Flux itself (grammar/semantics/lowering)
 propagates and is accepted. Companion to [self-hosting-flux.md](self-hosting-flux.md)
-(§0.1 north star) and [grammar-constrained-flux.md](grammar-constrained-flux.md).
+(§0.1 north star) and [grammar-constrained-flux.md](grammar-constrained-flux.md). The
+dependency tree here (§1) is one instance of the general derivation graph in
+[lineage.md](lineage.md) — a language change is the extreme case of a lineage rebuild.
 
 ## 0. The problem
 
