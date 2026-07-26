@@ -403,3 +403,24 @@ also (a) fixes degenerate input decompositions, and (b) resolves the
 scenario-authoring chicken-egg (scenarios are authored at scaffold, before a cell's
 draft exists — so the capability must be known there). It aligns with the earlier
 "who declares an input" call: the contract author declares it; the cell consumes it.
+
+### 8.5 Second slice — scalar capabilities grow end to end (landed)
+
+Envelope-level declaration closed the loop. A "slider controls ball speed" grow
+produced and CONVERGED a capability adapter with no register in sight:
+
+    (cell input (requires (scalar speed_slider 0 255)) (writes ball_speed)
+      (write (ball_speed speed_slider)))            -- input 1/1, immediately
+
+The envelope declares the capability (`inputs: [{kind:scalar,…}]`), scaffold seeds
+that forwarder (already the answer for a pure adapter) and injects the scenario by
+value (seed the bound resource, assert the driven field). The renderer converged
+too (8/8). So a capability example now grows AND is captured into the Flux-native
+KB — "examples throughout" holds for the input/view path.
+
+Remaining non-green in that grow was `physics` (5/7) on genuine wall-bounce cases —
+its own convergence, coupled to how the model reconciles `ball_vx * ball_speed`
+with a default `ball_speed`. That is general physics-convergence variance (a clean
+bounce converged physics 3/3 elsewhere), not a capability-plan gap. Still open on
+the plan: `toggle`/`trigger`, the `stateful` grade-on-writes fix, and the
+distributed pieces (node advertisement, groups, per-member fan-out).
