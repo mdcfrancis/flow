@@ -75,6 +75,7 @@ func forthToSexpr(src string, layout Layout) (string, error) {
 	var stack []string
 	var lets [][2]string   // ordered (localName, exprSexpr)
 	var writes [][2]string // ordered (field, exprSexpr)
+	var stores []string    // ordered buffer store terminals: (store buf idx val)
 	var draws []string     // rendered draw prims
 	locals := map[string]bool{}
 
@@ -128,6 +129,23 @@ func forthToSexpr(src string, layout Layout) (string, error) {
 				return "", fmt.Errorf("forth: clamp needs x lo hi")
 			}
 			push("(clamp " + x + " " + lo + " " + hi + ")")
+		case t == "at":
+			// `buf idx at` — read element idx of a buffer (bounds-clamped).
+			idx, err1 := pop()
+			buf, err2 := pop()
+			if err1 != nil || err2 != nil {
+				return "", fmt.Errorf("forth: at needs buf idx")
+			}
+			push("(at " + buf + " " + idx + ")")
+		case t == "store":
+			// `val buf idx store` — a TERMINAL: write val to buffer element idx.
+			idx, err1 := pop()
+			buf, err2 := pop()
+			val, err3 := pop()
+			if err1 != nil || err2 != nil || err3 != nil {
+				return "", fmt.Errorf("forth: store needs val buf idx")
+			}
+			stores = append(stores, "(store "+buf+" "+idx+" "+val+")")
 		case forthBinop[t]:
 			b, err1 := pop()
 			a, err2 := pop()
@@ -166,11 +184,12 @@ func forthToSexpr(src string, layout Layout) (string, error) {
 
 	var term string
 	switch {
-	case len(writes) > 0:
-		parts := make([]string, len(writes))
-		for i, w := range writes {
-			parts[i] = "(" + w[0] + " " + w[1] + ")"
+	case len(writes) > 0 || len(stores) > 0:
+		parts := make([]string, 0, len(writes)+len(stores))
+		for _, w := range writes {
+			parts = append(parts, "("+w[0]+" "+w[1]+")")
 		}
+		parts = append(parts, stores...)
 		term = "(write " + strings.Join(parts, " ") + ")"
 	case len(draws) > 0:
 		term = "(draw " + strings.Join(draws, " ") + ")"
@@ -234,6 +253,10 @@ func cellToForth(c *Cell) string {
 	case *Write:
 		for i, f := range t.Fields {
 			out = append(out, rpn(t.Vals[i]), "->", f)
+		}
+		for _, s := range t.Stores {
+			// (store buf idx val) → `val buf idx store`
+			out = append(out, rpn(s.Val), s.Buf, rpn(s.Idx), "store")
 		}
 	case *Draw:
 		for _, p := range t.Prims {
