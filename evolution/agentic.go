@@ -57,6 +57,16 @@ Only after flux_run shows behavior that matches the GOAL, reply with ONLY the fi
 
 `
 
+// Direct-authoring preambles for a backend WITHOUT tool support (e.g. Gemini). They must
+// NOT mention tools: told to call a tool that isn't declared, Gemini emits a
+// MALFORMED_FUNCTION_CALL and returns EMPTY ("empty source stream" on every cell). These
+// ask for the complete program in one shot instead.
+const forthDirectPreamble = `You author a cell in FLUX, written in the FORTH surface — a postfix word stream over a stack (its dictionary of atomic words, your exact typed fields, and a worked example are in the task below). Think it through, then reply with ONLY the complete, correct word stream — no prose, no explanation, no (cell …), no WAT, no tool calls. Keep every stack SHALLOW: bind a reused or >2-deep value with ` + "`" + `=:` + "`" + ` (Int → i0..i3, Bool → b0..b3). Make it match the GOAL, not just the checks.`
+
+const fluxDirectPreamble = `You author a cell in FLUX — a small typed functional language (its grammar, your exact typed fields, and a worked example are in the task below). Think it through, then reply with ONLY the complete, correct (cell …) program — no prose, no explanation, no WAT, no tool calls. Make it match the GOAL, not just the checks.`
+
+const watDirectPreamble = `Author the cell and reply with ONLY the complete, correct WAT (module …) — no prose, no tool calls.`
+
 // RunAgenticSieve synthesizes a cell with the CLIENT-SIDE agentic loop: the model may
 // call knowledge-base + compiler tools (retrieve a worked example, read a how-to,
 // compile-check a draft) while it works. The final WAT is extracted, assembled, and
@@ -70,12 +80,28 @@ func RunAgenticSieve(ctx context.Context, model ToolReasoner, ledger *storage.Le
 	// is thrown away ("empty source stream"). It is the fallback answer.
 	var lastFlux string
 	tools, exec := buildAgenticTools(ledger, cs, kind, intent, layout, &lastFlux)
-	preamble := agenticPreamble
-	if layout != nil {
+	// A backend WITHOUT tool support (Gemini) must get a DIRECT preamble — a tool-USING
+	// preamble makes it try to call an undeclared function (MALFORMED_FUNCTION_CALL) and
+	// return empty. Detected via an optional interface so mocks/other reasoners are
+	// unaffected (default: has tools).
+	hasTools := true
+	if st, ok := model.(interface{ SupportsTools() bool }); ok {
+		hasTools = st.SupportsTools()
+	}
+	var preamble string
+	switch {
+	case !hasTools && layout != nil && fluxIsForth():
+		preamble = forthDirectPreamble
+	case !hasTools && layout != nil:
+		preamble = fluxDirectPreamble
+	case !hasTools:
+		preamble = watDirectPreamble
+	case layout != nil && fluxIsForth():
+		preamble = forthAgenticPreamble
+	case layout != nil:
 		preamble = fluxAgenticPreamble
-		if fluxIsForth() {
-			preamble = forthAgenticPreamble
-		}
+	default:
+		preamble = agenticPreamble
 	}
 	resp, err := model.InvokeTools(ctx, preamble+systemPrompt, seedContext, tools, exec, agenticMaxSteps)
 	if err != nil {

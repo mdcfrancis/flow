@@ -48,6 +48,14 @@ type toolsResponse struct {
 	} `json:"usage"`
 }
 
+// SupportsTools reports whether this backend can run the client-side tool loop. The
+// Gemini generateContent path does NOT (we don't send its function-calling schema), so
+// InvokeTools degrades to a plain completion for it — and, crucially, a caller must not
+// give Gemini a tool-USING preamble: told to call a tool that isn't declared, Gemini
+// emits a MALFORMED_FUNCTION_CALL and returns EMPTY. Callers check this to pick a
+// direct-authoring preamble instead.
+func (c *LocalModelClient) SupportsTools() bool { return c.provider != providerGemini }
+
 // InvokeTools runs a CLIENT-SIDE agentic loop: it offers the model the given tools on
 // /v1/chat/completions and, while the model responds with tool_calls, executes each via
 // exec (a Go callback) and feeds the results back — up to maxSteps rounds — then returns
