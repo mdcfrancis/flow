@@ -32,8 +32,6 @@ func noopFlux(sub Subsystem, layout flux.Layout) (src string, ok bool) {
 	if i := strings.LastIndexByte(name, ':'); i >= 0 {
 		name = name[i+1:]
 	}
-	addressable := func(f string) bool { _, in := layout[f]; return in }
-
 	if kindOf(sub) == KindRender {
 		// Magenta tiles on the (black) canvas, one rect per filled square of a
 		// coarse checkerboard. Constants only — clearly a test pattern, not any
@@ -50,24 +48,31 @@ func noopFlux(sub Subsystem, layout flux.Layout) (src string, ok bool) {
 		return fmt.Sprintf("(cell %s (reads) (draw%s))", name, tiles.String()), true
 	}
 
-	// Compute: write every addressable write-port back to itself. reads == writes so
-	// each written field is in scope as a read var.
-	var writes []string
+	// Compute: write every addressable write-port back to itself — a true no-op that
+	// still establishes the cell's read/write shape. A SCALAR port writes its field back
+	// unchanged; a BUFFER (array) port stores element 0 back unchanged, which touches the
+	// buffer (establishing it as a write port) without needing a per-tick loop. reads ==
+	// writes so each written field is in scope as a read var / buffer.
+	var ports []string
+	var body strings.Builder
 	for _, w := range sub.Writes {
-		if addressable(w) {
-			writes = append(writes, w)
+		f, in := layout[w]
+		if !in {
+			continue
+		}
+		ports = append(ports, w)
+		if f.Type == flux.TBuffer {
+			fmt.Fprintf(&body, " (store %s 0 (at %s 0))", w, w)
+		} else {
+			fmt.Fprintf(&body, " (%s %s)", w, w)
 		}
 	}
-	if len(writes) == 0 {
+	if len(ports) == 0 {
 		return "", false // nothing addressable to write — fall back to WAT
 	}
-	var pairs strings.Builder
-	for _, w := range writes {
-		fmt.Fprintf(&pairs, " (%s %s)", w, w)
-	}
-	list := strings.Join(writes, " ")
+	list := strings.Join(ports, " ")
 	return fmt.Sprintf("(cell %s (reads %s) (writes %s) (write%s))",
-		name, list, list, pairs.String()), true
+		name, list, list, body.String()), true
 }
 
 // seedNoopFlux returns the no-op Flux genome + its compiled bytecode for a

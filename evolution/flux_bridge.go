@@ -142,16 +142,22 @@ func LayoutFromContract(c *AppContract) flux.Layout {
 	}
 	l := flux.Layout{}
 	for _, f := range c.Fields {
-		var t flux.Type
-		switch strings.TrimSpace(f.Type) {
-		case "i32":
-			t = flux.TInt
-		case "f32":
-			t = flux.TFloat
+		ft := strings.TrimSpace(f.Type)
+		switch {
+		case ft == "i32":
+			l[f.Name] = flux.Field{Type: flux.TInt, Offset: uint32(f.Offset)}
+		case ft == "f32":
+			l[f.Name] = flux.Field{Type: flux.TFloat, Offset: uint32(f.Offset)}
+		case strings.HasPrefix(ft, "i32[") && strings.HasSuffix(ft, "]"):
+			// An i32 array becomes a bounded Flux BUFFER (addressed with at/store,
+			// bounds-clamped) — so an array-writing cell (a particle system, a grid
+			// renderer) is Flux-addressable instead of falling back to raw WAT.
+			if n := typeWords(ft); n > 1 {
+				l[f.Name] = flux.Field{Type: flux.TBuffer, Offset: uint32(f.Offset), Len: uint32(n)}
+			}
 		default:
-			continue // arrays / unknown: not addressable by Flux v1
+			continue // f32 arrays / unknown: not addressable by Flux yet
 		}
-		l[f.Name] = flux.Field{Type: t, Offset: uint32(f.Offset)}
 	}
 	if len(l) == 0 {
 		return nil

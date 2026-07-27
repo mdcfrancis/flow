@@ -4,6 +4,8 @@ import (
 	"context"
 	"strings"
 	"testing"
+
+	"github.com/mdcfrancis/flow/flux"
 )
 
 // scriptedFlux is a Reasoner that replays canned completions — a deterministic
@@ -95,7 +97,7 @@ func TestLayoutFromContract(t *testing.T) {
 	c := &AppContract{Fields: []ContractField{
 		{Name: "ball_x", Offset: 0xB0000, Type: "i32"},
 		{Name: "speed", Offset: 0xB0004, Type: "f32"},
-		{Name: "grid", Offset: 0xB0100, Type: "i32[40]"}, // array — not addressable by Flux v1
+		{Name: "grid", Offset: 0xB0100, Type: "i32[40]"}, // i32 array → a Flux buffer
 	}}
 	l := LayoutFromContract(c)
 	if l["ball_x"].Type.String() != "Int" || l["ball_x"].Offset != 0xB0000 {
@@ -104,7 +106,8 @@ func TestLayoutFromContract(t *testing.T) {
 	if l["speed"].Type.String() != "Float" {
 		t.Fatalf("speed should be Float, got %s", l["speed"].Type)
 	}
-	if _, ok := l["grid"]; ok {
-		t.Fatal("array field must be omitted from the Flux layout")
+	// An i32 array is now addressable as a bounded buffer (at/store), not omitted.
+	if g, ok := l["grid"]; !ok || g.Type != flux.TBuffer || g.Offset != 0xB0100 || g.Len != 40 {
+		t.Fatalf("grid must map to a TBuffer{off:0xB0100,len:40}, got %+v (ok=%v)", g, ok)
 	}
 }
