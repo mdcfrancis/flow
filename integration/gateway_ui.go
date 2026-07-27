@@ -361,7 +361,8 @@ li{padding:2px 0;font-family:ui-monospace,monospace;font-size:12px}
 <p class="muted">Click / move / type over the canvas — events route through the HMI input register.</p>
 
 <h1>Cells</h1>
-<p class="muted" style="font-size:12px;margin:2px 0">Click a cell to inspect its tests &amp; constraints.</p>
+<p class="muted" style="font-size:12px;margin:2px 0">Click a cell to inspect its tests &amp; constraints.
+  <label style="margin-left:8px;cursor:pointer"><input type="checkbox" id="hidesys"> hide syslib</label></p>
 <ul id="cells"></ul>
 
 <div id="inspector">
@@ -432,15 +433,29 @@ cv.addEventListener('mouseup',e=>{const p=cxy(e);post({type:'up',x:p.x,y:p.y,but
 cv.addEventListener('click',e=>{cv.focus();const p=cxy(e);post({type:'click',x:p.x,y:p.y,buttons:1,mods:mods(e)});});
 cv.addEventListener('keydown',e=>{post({type:'keydown',x:0,y:0,key:e.keyCode,mods:mods(e)});if(e.key===' ')e.preventDefault();});
 cv.addEventListener('keyup',e=>{post({type:'keyup',x:0,y:0,key:e.keyCode,mods:mods(e)});});
+// Hide the system standard-library cells (urn:hdm:sys:*) from the cell list + the
+// active-cell dropdown, so the app's own cells aren't buried. Persisted across reloads.
+function isSyslib(u){return u.indexOf('urn:hdm:sys:')===0;}
+let lastCells=[];
+function renderCells(){
+  const hide=document.getElementById('hidesys').checked;
+  const cells=hide?lastCells.filter(u=>!isSyslib(u)):lastCells;
+  document.getElementById('cells').innerHTML=cells.map(u=>'<li onclick="inspect(\''+u+'\')" title="'+u+'">'+shortURN(u)+'</li>').join('');
+  const cur=sel.value;
+  sel.innerHTML='<option value="">(active)</option>'+cells.map(u=>'<option>'+u+'</option>').join('');
+  sel.value=cur;
+}
 async function refreshCells(){
   try{
-    const cells=await (await fetch('/cells',{cache:'no-store'})).json();
-    document.getElementById('cells').innerHTML=cells.map(u=>'<li onclick="inspect(\''+u+'\')" title="'+u+'">'+shortURN(u)+'</li>').join('');
-    const cur=sel.value;
-    sel.innerHTML='<option value="">(active)</option>'+cells.map(u=>'<option>'+u+'</option>').join('');
-    sel.value=cur;
+    lastCells=await (await fetch('/cells',{cache:'no-store'})).json();
+    renderCells();
   }catch(e){}
 }
+(function initHideSys(){
+  const cb=document.getElementById('hidesys');
+  cb.checked=localStorage.getItem('hidesys')!=='0'; // default ON (syslib hidden)
+  cb.addEventListener('change',()=>{localStorage.setItem('hidesys',cb.checked?'1':'0');renderCells();});
+})();
 // Cell inspector: pull a cell's acceptance tests + shared-state constraints.
 let inspectURN='';
 async function inspect(u){
