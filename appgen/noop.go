@@ -6,18 +6,21 @@ import (
 
 	"github.com/mdcfrancis/flow/evolution"
 	"github.com/mdcfrancis/flow/flux"
-	"github.com/mdcfrancis/flow/macro"
 )
 
-// macroFieldsFromContract builds the macro field map (name → offset + f32?) from the
+// macroFieldsFromContract builds the macro field Layout (name → type + offset) from the
 // app contract — the same ground truth the synthesis path expands against.
-func macroFieldsFromContract(c *evolution.AppContract) map[string]macro.Field {
-	m := map[string]macro.Field{}
+func macroFieldsFromContract(c *evolution.AppContract) flux.Layout {
+	m := flux.Layout{}
 	if c == nil {
 		return m
 	}
 	for _, f := range c.Fields {
-		m[f.Name] = macro.Field{Offset: uint32(f.Offset), Float: strings.TrimSpace(f.Type) == "f32"}
+		t := flux.TInt
+		if strings.TrimSpace(f.Type) == "f32" {
+			t = flux.TFloat
+		}
+		m[f.Name] = flux.Field{Type: t, Offset: uint32(f.Offset)}
 	}
 	return m
 }
@@ -26,7 +29,7 @@ func macroFieldsFromContract(c *evolution.AppContract) map[string]macro.Field {
 // write-port back unchanged (scalar via (set/get), array via (setidx/atidx element 0));
 // a render cell draws a magenta checkerboard placeholder. Returns ok=false if there is
 // nothing addressable to write (caller keeps the WAT skeleton).
-func macroNoop(sub Subsystem, fields map[string]macro.Field, arrays map[string]bool) (string, bool) {
+func macroNoop(sub Subsystem, fields flux.Layout, arrays map[string]bool) (string, bool) {
 	if kindOf(sub) == KindRender {
 		const cw, ch, tile = 320, 240, 80
 		var prims strings.Builder
@@ -75,7 +78,7 @@ func (g *Grower) seedNoopMacro(env *AppEnvelope, sub Subsystem) (src string, bc 
 	if !ok {
 		return "", nil, false
 	}
-	wat, err := macro.Expand(m, fields)
+	wat, err := flux.Expand(m, fields)
 	if err != nil {
 		return "", nil, false
 	}

@@ -8,8 +8,8 @@ import (
 	"testing"
 
 	"github.com/mdcfrancis/flow/compiler"
+	"github.com/mdcfrancis/flow/flux"
 	"github.com/mdcfrancis/flow/inference"
-	"github.com/mdcfrancis/flow/macro"
 	"github.com/mdcfrancis/flow/storage"
 )
 
@@ -27,17 +27,17 @@ func TestMacroFloatGravityCurves(t *testing.T) {
 	defer rm.Close(ctx)
 
 	const wellOff, xOff, vxOff = 0xB0000, 0xB0010, 0xB0018
-	fields := map[string]macro.Field{
-		"well_x":     {Offset: wellOff, Float: true},
-		"orbiter_x":  {Offset: xOff, Float: true},
-		"orbiter_vx": {Offset: vxOff, Float: true},
+	fields := flux.Layout{
+		"well_x":     {Type: flux.TFloat, Offset: wellOff},
+		"orbiter_x":  {Type: flux.TFloat, Offset: xOff},
+		"orbiter_vx": {Type: flux.TFloat, Offset: vxOff},
 	}
 	src := `(cell run-tick
   (set orbiter_vx (f32.add (get orbiter_vx)
       (f32.div (f32.sub (get well_x) (get orbiter_x)) (f32.const 100.0))))
   (set orbiter_x (f32.add (get orbiter_x) (get orbiter_vx)))
   (i32.const 0))`
-	wat, err := macro.Expand(src, fields)
+	wat, err := flux.Expand(src, fields)
 	if err != nil {
 		t.Fatalf("expand: %v", err)
 	}
@@ -86,13 +86,13 @@ func TestMacroRenderEmitsDrawRecord(t *testing.T) {
 	defer rm.Close(ctx)
 
 	const xOff, yOff = 0xB0010, 0xB0014
-	fields := map[string]macro.Field{
-		"orbiter_x": {Offset: xOff, Float: true},
-		"orbiter_y": {Offset: yOff, Float: true},
+	fields := flux.Layout{
+		"orbiter_x": {Type: flux.TFloat, Offset: xOff},
+		"orbiter_y": {Type: flux.TFloat, Offset: yOff},
 	}
 	src := `(cell render-frame
   (scene (circle (geti orbiter_x) (geti orbiter_y) (i32.const 12) (i32.const 0xFF00FFFF))))`
-	wat, err := macro.Expand(src, fields)
+	wat, err := flux.Expand(src, fields)
 	if err != nil {
 		t.Fatalf("expand: %v", err)
 	}

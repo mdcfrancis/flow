@@ -10,7 +10,6 @@ import (
 
 	"github.com/mdcfrancis/flow/compiler"
 	"github.com/mdcfrancis/flow/flux"
-	"github.com/mdcfrancis/flow/macro"
 	"github.com/mdcfrancis/flow/storage"
 )
 
@@ -36,7 +35,7 @@ func fluxSurfaceName() string {
 func fluxIsForth() bool { return fluxSurfaceName() == "forth" }
 
 // isMacro reports whether the OPERATIONAL surface is macro-WAT — the default. The model
-// writes native WAT with (cell)/(get)/(set)/(scene) macros (macro.Expand), rather than a
+// writes native WAT with (cell)/(get)/(set)/(scene) macros (flux.Expand), rather than a
 // Flux/Forth program. HDM_FLUX_SURFACE=forth|sexpr opts back into the (now legacy) Flux
 // language path; anything else (unset, or "macro") is macro-WAT.
 func isMacro() bool {
@@ -50,16 +49,6 @@ func isMacro() bool {
 // IsMacro reports whether the operational surface is macro-WAT (the default), for
 // callers outside the package (appgen seeds a macro-WAT no-op in that case).
 func IsMacro() bool { return isMacro() }
-
-// macroFields projects the app's Flux layout to the macro field map (name → offset +
-// whether it's an f32). Array (TBuffer) fields carry their base offset with i32 elements.
-func macroFields(layout flux.Layout) map[string]macro.Field {
-	m := make(map[string]macro.Field, len(layout))
-	for name, f := range layout {
-		m[name] = macro.Field{Offset: f.Offset, Float: f.Type == flux.TFloat}
-	}
-	return m
-}
 
 // extractMacroWAT isolates the model's macro-WAT program — the outermost balanced
 // (cell …) or (module …) — tolerating markdown fences, <think> blocks, and surrounding
@@ -262,12 +251,12 @@ func candidateWAT(resp string, layout flux.Layout) (wat, fluxSrc string, err err
 	if layout != nil && isMacro() {
 		// Macro-WAT (the default): the model wrote (cell …) with field macros; expand it
 		// against the contract to raw WAT. A bare (module …) passes straight through
-		// (macro.Expand leaves non-macro WAT untouched).
+		// (flux.Expand leaves non-macro WAT untouched).
 		src := extractMacroWAT(resp)
 		if src == "" {
 			return extractWAT(resp), "", nil
 		}
-		w, cerr := macro.Expand(src, macroFields(layout))
+		w, cerr := flux.Expand(src, layout)
 		if cerr != nil {
 			return "", src, cerr
 		}
