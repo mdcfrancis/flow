@@ -67,6 +67,41 @@ const fluxDirectPreamble = `You author a cell in FLUX — a small typed function
 
 const watDirectPreamble = `Author the cell and reply with ONLY the complete, correct WAT (module …) — no prose, no tool calls.`
 
+// authorWithCorrection drives a TOOL-LESS backend (e.g. Gemini) by re-prompting with
+// the compile error until the program compiles or attempts run out — the no-tool
+// analogue of the agentic loop, so a model that cannot call flux_check still self-
+// corrects its near-misses. Returns a compiling response as soon as one is produced,
+// else the last attempt (the caller's verification then reports its error).
+func authorWithCorrection(ctx context.Context, model ToolReasoner, cs *compiler.CompilerService, systemPrompt, seed string, layout flux.Layout, maxSteps int) (string, error) {
+	if maxSteps < 1 {
+		maxSteps = 1
+	}
+	user, last := seed, ""
+	for i := 0; i < maxSteps; i++ {
+		resp, err := model.InvokeTools(ctx, systemPrompt, user, nil, nil, 1) // nil tools ⇒ plain completion
+		if err != nil {
+			return last, err
+		}
+		last = resp
+		wat, _, ferr := candidateWAT(resp, layout)
+		if ferr == nil {
+			if art, cerr := cs.CompileGenotype(wat); cerr == nil && art != nil && art.SyntaxPassed {
+				return resp, nil // compiles cleanly — done
+			} else if cerr != nil {
+				ferr = cerr
+			} else if art != nil {
+				ferr = fmt.Errorf("%s (line %d)", art.ErrorContext, art.ErrorLine)
+			} else {
+				ferr = fmt.Errorf("empty program")
+			}
+		}
+		user = seed + "\n\nYOUR PREVIOUS ANSWER FAILED TO COMPILE:\n" + resp +
+			"\n\nEXACT ERROR: " + ferr.Error() +
+			"\nFix ONLY that error and reply with the complete corrected program — nothing else."
+	}
+	return last, nil
+}
+
 // RunAgenticSieve synthesizes a cell with the CLIENT-SIDE agentic loop: the model may
 // call knowledge-base + compiler tools (retrieve a worked example, read a how-to,
 // compile-check a draft) while it works. The final WAT is extracted, assembled, and
@@ -103,7 +138,17 @@ func RunAgenticSieve(ctx context.Context, model ToolReasoner, ledger *storage.Le
 	default:
 		preamble = agenticPreamble
 	}
-	resp, err := model.InvokeTools(ctx, preamble+systemPrompt, seedContext, tools, exec, agenticMaxSteps)
+	var resp string
+	var err error
+	if hasTools {
+		resp, err = model.InvokeTools(ctx, preamble+systemPrompt, seedContext, tools, exec, agenticMaxSteps)
+	} else {
+		// A tool-less backend (Gemini) can't call flux_check to iterate, so it emits a
+		// one-shot near-miss (a color missing its 'x', a stray import) with no chance to
+		// fix it. Drive a RE-PROMPT correction loop instead: feed the exact compile error
+		// back and ask for a corrected program, up to agenticMaxSteps times.
+		resp, err = authorWithCorrection(ctx, model, cs, preamble+systemPrompt, seedContext, layout, agenticMaxSteps)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("agentic sieve: %w", err)
 	}
