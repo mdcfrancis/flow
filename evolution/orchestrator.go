@@ -459,6 +459,27 @@ func (o *Orchestrator) ScenarioFlags(ctx context.Context, cellURN string) ([]Sce
 	return out, nil
 }
 
+// FailureReasons returns a concrete, human-readable reason for each acceptance check
+// the cell currently FAILS — the expected-vs-actual detail, graded under the cell's
+// ENFORCED mask (the same boundary it runs under) so a reason reflects live behavior,
+// not an unmasked ideal. For an inspector: WHY a check fails, not just which. nil when
+// the cell passes everything or can't be resolved.
+func (o *Orchestrator) FailureReasons(ctx context.Context, cellURN string) ([]string, error) {
+	suite, _ := LoadAcceptance(o.ledger, cellURN)
+	if suite == nil {
+		return nil, nil
+	}
+	desc, err := o.repo.Load(cellURN)
+	if err != nil {
+		return nil, err
+	}
+	phenotype, err := o.repo.Phenotype(desc)
+	if err != nil {
+		return nil, err
+	}
+	return SuiteFailureReasons(ctx, phenotype, EntryPoint, suite, o.PayloadOffset, o.StateWindow, o.resolver(), o.maskFor(cellURN)), nil
+}
+
 // resolver returns a CellResolver backed by the descriptor repository, so shadow
 // replays can follow inter-cell dispatch (needed for fusion/fission baselines).
 // modelFor selects the client bound to a logical model type when the model is a

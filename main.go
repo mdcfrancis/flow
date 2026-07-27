@@ -3276,6 +3276,20 @@ func inspectCell(ctx context.Context, ledger *storage.LedgerEngine, orch *evolut
 	default:
 		out["state"] = "active"
 	}
+
+	// WHY the cell is failing: the concrete expected-vs-actual reason for each check it
+	// misses (graded under its enforced boundary), so the inspector shows the failing
+	// check's detail, not just the aggregate score.
+	if incomplete {
+		if reasons, rerr := orch.FailureReasons(ctx, urn); rerr == nil && len(reasons) > 0 {
+			out["failures"] = reasons
+		}
+	}
+	// The cell's last recorded ERROR/issue: the adversarial critic's note (why the last
+	// version was refuted against the goal or the operator's criteria), if any.
+	if note := evolution.LoadCriticNote(ledger, urn); note != "" {
+		out["note"] = note
+	}
 	return out
 }
 

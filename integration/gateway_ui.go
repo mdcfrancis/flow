@@ -467,8 +467,14 @@ async function inspect(u){
     let h='<div><b>'+shortURN(u)+'</b> ';
     if(d.total>0){const ok=d.passed>=d.total;h+='<span class="'+(ok?'pass':'fail')+'">'+d.passed+'/'+d.total+' checks</span>';}
     else h+='<span class="empty">no acceptance checks</span>';
-    if(d.state)h+=' <span class="muted">· '+d.state+'</span>';
+    if(d.state){const sc=(d.state==='converged'||d.state==='active')?'pass':(d.state==='stalled'?'fail':'muted');h+=' <span class="'+sc+'">· '+esc(d.state)+'</span>';}
     h+='</div>';
+    // Last recorded error/issue for the cell: adversarial-critic feedback on why the
+    // last version was refuted, if any.
+    if(d.note)h+='<div class="fail" style="margin:3px 0;font-size:11px">⚠ '+esc(d.note)+'</div>';
+    // WHICH checks fail and WHY (expected vs actual, under the enforced boundary).
+    if((d.failures||[]).length){h+='<div class="grp">Failing checks</div><ul style="margin:2px 0 4px 16px;padding:0;font-size:11px" class="fail">';
+      d.failures.forEach(f=>{h+='<li>'+esc(f)+'</li>';});h+='</ul>';}
     // THIS cell's design plan (what it must implement) leads; the checks verify it.
     const P=d.plan;
     if(P){
@@ -487,7 +493,7 @@ async function inspect(u){
     if(T.length){h+='<div class="grp">Scalar tests</div><table>';
       T.forEach(t=>{h+='<tr><td>'+esc(t.name||'')+'</td><td>in '+t.input+'</td><td>→ '+t.expected+'</td></tr>';});h+='</table>';}
     if(S.length){h+='<div class="grp">Scenarios</div><table>';
-      S.forEach(s=>{h+='<tr><td>'+esc(s.name||'')+'</td><td>'+esc(s.entry||'run-tick')+'</td><td>'+esc(s.expect||'')+'</td></tr>';});h+='</table>';}
+      S.forEach(s=>{const m=s.pass?'<span class="pass">✓</span>':'<span class="fail">✗</span>';h+='<tr><td>'+m+' '+esc(s.name||'')+'</td><td>'+esc(s.entry||'run-tick')+'</td><td>'+esc(s.expect||'')+'</td></tr>';});h+='</table>';}
     if(C.length){h+='<div class="grp">Shared-state contract</div><table>';
       C.forEach(f=>{h+='<tr><td class="off">'+f.offset+'</td><td>'+esc(f.name||'')+' <span class="muted">'+esc(f.type||'')+'</span></td><td class="muted">'+esc(f.desc||'')+'</td></tr>';});h+='</table>';}
     if(!T.length&&!S.length&&!C.length&&!P)h+='<span class="empty">no plan, tests, or constraints recorded</span>';
