@@ -202,12 +202,51 @@ func candidateWAT(resp string, layout flux.Layout) (wat, fluxSrc string, err err
 	return extractWAT(resp), "", nil
 }
 
+// stripThink removes any <think>…</think> reasoning blocks a model may emit. The
+// local server's enable_thinking:false suppresses these on the normal path, but this
+// is a cheap belt-and-braces so a stray block never reaches the compiler.
+func stripThink(s string) string {
+	for {
+		i := indexFold(s, "<think>")
+		if i < 0 {
+			return s
+		}
+		if j := indexFold(s[i:], "</think>"); j >= 0 {
+			s = s[:i] + s[i+j+len("</think>"):]
+		} else {
+			return s[:i] // unclosed — drop the tail
+		}
+	}
+}
+
+func indexFold(s, sub string) int {
+	return strings.Index(strings.ToLower(s), strings.ToLower(sub))
+}
+
+// stripLeadingProse drops a leading run of English prose tokens — ones that begin with
+// an ASCII uppercase letter (e.g. "Now", "Let", "The", "Here's", "I"). No valid Flux/
+// Forth token starts with A-Z (identifiers are lowercase snake_case, the rest are
+// digits, operators, =:, ->, ?, or #x… colors), so this is safe on real programs and
+// recovers the common "Now, here is the code: <forth>" pattern a flailing model emits.
+func stripLeadingProse(s string) string {
+	toks := strings.Fields(s)
+	i := 0
+	for i < len(toks) && toks[i][0] >= 'A' && toks[i][0] <= 'Z' {
+		i++
+	}
+	if i == 0 {
+		return strings.TrimSpace(s) // no leading prose — preserve original spacing
+	}
+	return strings.Join(toks[i:], " ")
+}
+
 // extractForth isolates the Forth word stream from a completion: the contents of a
-// fenced code block if present, else the trimmed whole. Unlike (cell …) there is no
-// bracketing form to key on, so the checker/repair loop (not extraction) rejects any
-// prose the model leaves in.
+// fenced code block if present, else the trimmed whole with any <think> block and
+// leading English-prose preamble stripped. Unlike (cell …) there is no bracketing form
+// to key on, so residual prose is still caught by the checker/repair loop — but a
+// flailing model's narration ("Now the cell…") no longer poisons the very first word.
 func extractForth(resp string) string {
-	s := resp
+	s := stripThink(resp)
 	if i := strings.Index(s, "```"); i >= 0 {
 		rest := s[i+3:]
 		if nl := strings.IndexByte(rest, '\n'); nl >= 0 {
@@ -218,14 +257,15 @@ func extractForth(resp string) string {
 		} else {
 			s = rest
 		}
+		return strings.TrimSpace(s) // fenced content is authoritative — no prose strip
 	}
-	return strings.TrimSpace(s)
+	return stripLeadingProse(s)
 }
 
 // extractFlux isolates the outermost balanced (cell …) form from a completion,
 // tolerating markdown fences and surrounding prose. Returns "" if none.
 func extractFlux(resp string) string {
-	s := resp
+	s := stripThink(resp)
 	if i := strings.Index(s, "```"); i >= 0 {
 		rest := s[i+3:]
 		if nl := strings.IndexByte(rest, '\n'); nl >= 0 {
