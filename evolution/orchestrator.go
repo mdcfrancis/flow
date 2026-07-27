@@ -969,10 +969,7 @@ func (o *Orchestrator) buildSeed(urn, intent, genotype string, contract *EntryCo
 	// shows it working). The static few-shot in the system prompt is only the floor.
 	knowledgeLang := "wat"
 	if fluxOn {
-		knowledgeLang = "flux"
-		if fluxIsForth() {
-			knowledgeLang = "forth" // show worked examples in the surface being authored
-		}
+		knowledgeLang = "flux" // worked examples in the macro-WAT surface
 	}
 	var inlinedExamples []string
 	if k, ids := o.renderKnowledge(contract, intent, knowledgeLang); k != "" {
@@ -1015,15 +1012,14 @@ func (o *Orchestrator) buildSeed(urn, intent, genotype string, contract *EntryCo
 		b.WriteString("\n")
 	}
 	if fluxOn {
-		// Author in Flux: the grammar + typed field list + a worked example, and an
-		// explicit instruction to output only a (cell …) program. The lowerer owns
-		// the encoding, so the model only writes logic.
-		b.WriteString(fluxSeedBlock(contract, fluxLayout))
+		// Author in macro-WAT: the macro forms + the typed field list, and an explicit
+		// instruction to output only a (cell …) program.
+		b.WriteString(macroSeedBlock(contract, fluxLayout))
 		// DFS iteration: refine the model's latest working DRAFT (its most recent
 		// non-regressing attempt), not the last commit — so synthesis goes deeper on
 		// the candidate it was building instead of restarting each frame. Fall back to
-		// the committed Flux genome, then to nothing (a fresh start after an unwind,
-		// which clears the draft).
+		// the committed genome, then to nothing (a fresh start after an unwind, which
+		// clears the draft).
 		wip := LoadFluxDraft(o.ledger, urn)
 		if wip == "" && strings.HasPrefix(strings.TrimSpace(genotype), "(cell") {
 			wip = genotype
@@ -1046,31 +1042,17 @@ func (o *Orchestrator) buildSeed(urn, intent, genotype string, contract *EntryCo
 // a later change to it moves this cell's InputsHash and so triggers its rebuild.
 func (o *Orchestrator) authoringLineage(urn, ns string, contract *EntryContract, suite *AcceptanceSuite, layout flux.Layout, fluxOn bool, examples []string) Lineage {
 	l := Lineage{URN: urn, Examples: examples}
-	// language + grammar: the Flux front-end version, and the specific GBNF this cell
-	// decodes under (both derive from the language, so a language change moves them).
+	// language: macro-WAT when the cell has a contract layout, raw WAT otherwise.
 	if fluxOn {
-		l.Language = LoadLanguageVersion(o.ledger)
-		kind := flux.KindCompute
-		if contract == RenderFrameContract {
-			kind = flux.KindView
-		}
-		// Same IR (so the language version is unchanged), but the SURFACE the model
-		// decodes under differs — record the active surface + its grammar so a surface
-		// change is a rebuild dimension the epoch gate can act on.
-		l.Surface = fluxSurfaceName()
-		if fluxIsForth() {
-			l.Grammar = hashStr(flux.GBNFForthTyped(layout, kind))
-		} else {
-			l.Grammar = hashStr(flux.GBNF(layout, kind))
-		}
+		l.Language = MacroLanguageVersion
 	} else {
 		l.Language = langWAT
 	}
-	// prompt TEMPLATE: the stable system prompt plus (Flux mode) the example-free
+	// prompt TEMPLATE: the stable system prompt plus (macro mode) the example-free
 	// authoring block — NOT the inlined worked examples, which are the examples edge.
 	tmpl := o.CompassPrompt
 	if fluxOn {
-		tmpl += fluxSeedBlock(contract, layout)
+		tmpl += macroSeedBlock(contract, layout)
 	}
 	l.Prompt = hashStr(tmpl)
 	// model: which model authored it (decode identity).

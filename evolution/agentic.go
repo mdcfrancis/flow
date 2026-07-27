@@ -30,41 +30,9 @@ When finished, reply with ONLY the final complete (module ...) form — no tool 
 
 `
 
-// fluxAgenticPreamble drives TEST-DRIVEN Flux authoring: the model writes a
-// (cell …) program, checks it compiles, and — the key step — RUNS it in the real
-// sandbox on inputs it chooses, reads the outputs, and iterates until the behavior
-// matches the goal. This turns synthesis from "guess the syntax" into an empirical
-// loop, which is what lets a model that has the logic but not the grammar converge.
-const fluxAgenticPreamble = `You author a cell in FLUX — a small typed functional language (its grammar, your exact typed fields, and a worked example are in the task below). You have TOOLS; USE them and ITERATE until the cell is correct — do not answer on the first draft.
-- find_docs / find_examples / read_doc: retrieve a relevant how-to or worked pattern.
-- flux_check(src): parse + type-check + lower your (cell …). It returns "ok" or the exact error (an unknown field, a type mismatch, a syntax slip). Fix EVERY error before running.
-- flux_run(src, inputs, steps): RUN your cell in the real sandbox for MANY ticks (set steps high enough — e.g. 30 — to reach the edge cases the GOAL implies) and read back each field's per-tick TRAJECTORY. This is how you VERIFY the FULL behavior over time, not just one tick.
-VALIDATE AGAINST THE GOAL, not only the acceptance checks: the checks are a floor, not the spec. Read the trajectory and confirm the cell does what the OBJECTIVE says — e.g. for "bounces off all four walls", run until the ball reaches a wall and confirm its position REVERSES (the trajectory turns around) and the velocity flips; it must NOT stop at the wall (clamp), freeze (flat line), or leave the screen. If the trajectory doesn't match the goal, fix the LOGIC and run again — even if the acceptance checks would already pass.
-Only after flux_run shows behavior that matches the GOAL, reply with ONLY the final complete (cell …) program — no tool call, no prose, no WAT.
-
-`
-
-// forthAgenticPreamble is the Forth-surface counterpart: the model authors a postfix
-// word stream (its dictionary + fields + worked example are in the task), checks and
-// runs it via the same tools, and answers with only the word stream.
-const forthAgenticPreamble = `You author a cell in FLUX, written in the FORTH surface — a postfix word stream over a stack (its dictionary of atomic words, your exact typed fields, and a worked example are in the task below). You have TOOLS; USE them and ITERATE until the cell is correct — do not answer on the first draft.
-- find_docs / find_examples / read_doc: retrieve a relevant how-to or worked pattern.
-- flux_check(src): parse + type-check your word stream. Returns "ok" or a categorized error — a stack/word slip (underflow, unknown word, dangling value) or a type mismatch — naming what broke. Fix EVERY error before running.
-- flux_run(src, inputs, steps): RUN your word stream in the real sandbox for MANY ticks (steps ~30) and read back each field's per-tick TRAJECTORY — VERIFY the FULL behavior over time.
-Keep every stack SHALLOW: the moment a value is reused or an expression runs more than ~2 words deep, bind it with ` + "`" + `=:` + "`" + ` and use the name. Bind an Int result to i0..i3, a Bool result to b0..b3.
-VALIDATE AGAINST THE GOAL, not only the acceptance checks: run until the edge cases the OBJECTIVE implies (e.g. the ball reaching a wall) and confirm the trajectory does what the goal says (reverses/bounces, doesn't stop or leave the screen). If it doesn't match, fix the LOGIC and run again.
-Only after flux_run shows behavior that matches the GOAL, reply with ONLY the final word stream — no tool call, no prose, no (cell …), no WAT.
-
-`
-
-// Direct-authoring preambles for a backend WITHOUT tool support (e.g. Gemini). They must
-// NOT mention tools: told to call a tool that isn't declared, Gemini emits a
-// MALFORMED_FUNCTION_CALL and returns EMPTY ("empty source stream" on every cell). These
-// ask for the complete program in one shot instead.
-const forthDirectPreamble = `You author a cell in FLUX, written in the FORTH surface — a postfix word stream over a stack (its dictionary of atomic words, your exact typed fields, and a worked example are in the task below). Think it through, then reply with ONLY the complete, correct word stream — no prose, no explanation, no (cell …), no WAT, no tool calls. Keep every stack SHALLOW: bind a reused or >2-deep value with ` + "`" + `=:` + "`" + ` (Int → i0..i3, Bool → b0..b3). Make it match the GOAL, not just the checks.`
-
-const fluxDirectPreamble = `You author a cell in FLUX — a small typed functional language (its grammar, your exact typed fields, and a worked example are in the task below). Think it through, then reply with ONLY the complete, correct (cell …) program — no prose, no explanation, no WAT, no tool calls. Make it match the GOAL, not just the checks.`
-
+// watDirectPreamble drives a TOOL-LESS backend to author a raw WAT module in one shot
+// (used only for a layout-less system cell; a cell with a contract layout authors
+// macro-WAT via macroPreamble).
 const watDirectPreamble = `Author the cell and reply with ONLY the complete, correct WAT (module …) — no prose, no tool calls.`
 
 // authorWithCorrection drives a TOOL-LESS backend (e.g. Gemini) by re-prompting with
@@ -137,12 +105,7 @@ ONLY the complete (cell …) program — no prose, no explanation, no markdown f
 // gates unchanged — the tools inform synthesis, they never bypass verification.
 func RunAgenticSieve(ctx context.Context, model ToolReasoner, ledger *storage.LedgerEngine, systemPrompt, seedContext, kind, intent string, layout flux.Layout, contract *EntryContract) (*SieveOutcome, error) {
 	cs := compiler.NewCompilerService()
-	// lastFlux captures the most recent (cell …) the model successfully checked or
-	// RAN via a tool. Models routinely do their real work in tool calls and then
-	// end with a summary/empty final message — without this, that verified program
-	// is thrown away ("empty source stream"). It is the fallback answer.
-	var lastFlux string
-	tools, exec := buildAgenticTools(ledger, cs, kind, intent, layout, &lastFlux)
+	tools, exec := buildAgenticTools(ledger, cs, kind, intent, layout)
 	// A backend WITHOUT tool support (Gemini) must get a DIRECT preamble — a tool-USING
 	// preamble makes it try to call an undeclared function (MALFORMED_FUNCTION_CALL) and
 	// return empty. Detected via an optional interface so mocks/other reasoners are
@@ -151,21 +114,15 @@ func RunAgenticSieve(ctx context.Context, model ToolReasoner, ledger *storage.Le
 	if st, ok := model.(interface{ SupportsTools() bool }); ok {
 		hasTools = st.SupportsTools()
 	}
-	macroMode := layout != nil && isMacro()
+	// A cell with a contract layout authors MACRO-WAT (the operational surface); a
+	// layout-less system cell authors raw WAT.
+	macroMode := layout != nil
 	var preamble string
 	switch {
 	case macroMode:
 		preamble = macroPreamble
-	case !hasTools && layout != nil && fluxIsForth():
-		preamble = forthDirectPreamble
-	case !hasTools && layout != nil:
-		preamble = fluxDirectPreamble
 	case !hasTools:
 		preamble = watDirectPreamble
-	case layout != nil && fluxIsForth():
-		preamble = forthAgenticPreamble
-	case layout != nil:
-		preamble = fluxAgenticPreamble
 	default:
 		preamble = agenticPreamble
 	}
@@ -174,40 +131,24 @@ func RunAgenticSieve(ctx context.Context, model ToolReasoner, ledger *storage.Le
 	if hasTools && !macroMode {
 		resp, err = model.InvokeTools(ctx, preamble+systemPrompt, seedContext, tools, exec, agenticMaxSteps)
 	} else {
-		// Macro-WAT and tool-less backends both author in ONE shot (the flux_check tools
-		// are Flux-specific and don't apply to macro-WAT). Drive a RE-PROMPT correction
-		// loop: feed the exact expand/compile error back and ask for a corrected program,
-		// up to agenticMaxSteps times.
+		// Macro-WAT and tool-less backends both author in ONE shot. Drive a RE-PROMPT
+		// correction loop: feed the exact expand/compile error back and ask for a
+		// corrected program, up to agenticMaxSteps times.
 		resp, err = authorWithCorrection(ctx, model, cs, preamble+systemPrompt, seedContext, layout, agenticMaxSteps)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("agentic sieve: %w", err)
 	}
-	// Flux-aware: with a layout the model may answer with a (cell …) program, which
-	// is lowered to WAT here — the same path as the standard sieve. If the final
-	// message carries no usable program, fall back to the last one the model
-	// verified with a tool (its actual work).
+	// With a layout the model answered with macro-WAT (a (cell …) form), expanded to
+	// raw WAT here — the same path as the standard sieve.
 	wat, fluxSrc, ferr := candidateWAT(resp, layout)
-	// Fall back to the last tool-verified program when the final message carries none.
-	// Surface-aware: in Forth mode "no program" is tested by extractForth and the
-	// fallback lowers the Forth stream; in S-expr mode by extractFlux and Compile.
-	noProgram := extractFlux(resp) == ""
-	if fluxIsForth() {
-		noProgram = extractForth(resp) == ""
-	}
-	if layout != nil && (ferr != nil || noProgram) && lastFlux != "" {
-		if w, lerr := flux.CompileWith(activeSurface(), "cell", lastFlux, layout); lerr == nil {
-			log.Printf("[FLUX] agentic: final message had no program; using the last tool-verified cell")
-			wat, fluxSrc, ferr = w, lastFlux, nil
-		}
-	}
 	if ferr != nil {
 		taxoWAT(fluxSrc, nil, ferr.Error())
 		return &SieveOutcome{WAT: fluxSrc, Raw: resp},
-			fmt.Errorf("agentic sieve: flux did not compile: %v", ferr)
+			fmt.Errorf("agentic sieve: macro-WAT did not expand: %v", ferr)
 	}
 	if fluxSrc != "" {
-		log.Printf("[FLUX] agentic: lowered a model-authored (cell …) to WAT")
+		log.Printf("[FLUX] agentic: expanded model-authored macro-WAT to raw WAT")
 	}
 	art, cerr := cs.CompileGenotype(wat)
 	if cerr != nil || art == nil || !art.SyntaxPassed {
@@ -233,7 +174,7 @@ func RunAgenticSieve(ctx context.Context, model ToolReasoner, ledger *storage.Le
 // buildAgenticTools returns the tool definitions and a Go executor bound to the
 // knowledge base + compiler. Every tool is read-only except that compile_check runs the
 // assembler (no side effects); the model's produced WAT is still fully verified later.
-func buildAgenticTools(ledger *storage.LedgerEngine, cs *compiler.CompilerService, kind, intent string, layout flux.Layout, lastFlux *string) ([]inference.ToolDef, inference.ToolExec) {
+func buildAgenticTools(ledger *storage.LedgerEngine, cs *compiler.CompilerService, kind, intent string, layout flux.Layout) ([]inference.ToolDef, inference.ToolExec) {
 	defs := []inference.ToolDef{
 		{Name: "list_examples", Description: "List available worked WAT examples (id + one-line semantics) for this cell's kind.", Parameters: objSchema(nil, nil)},
 		{Name: "find_examples", Description: "Search worked WAT examples by a query; returns the best matches with their WAT.", Parameters: objSchema(map[string]string{"query": "what you want a worked example of"}, []string{"query"})},
@@ -242,28 +183,7 @@ func buildAgenticTools(ledger *storage.LedgerEngine, cs *compiler.CompilerServic
 		{Name: "read_doc", Description: "Return the full body of one document by id.", Parameters: objSchema(map[string]string{"id": "the document id"}, []string{"id"})},
 		{Name: "compile_check", Description: "Assemble a WAT (module ...) through the HDM assembler; returns 'ok' or the exact error. Use before finalizing.", Parameters: objSchema(map[string]string{"wat": "the full WAT module source"}, []string{"wat"})},
 	}
-	// In Flux mode, add the test-driven authoring tools: check a (cell …) program
-	// and RUN it in the real sandbox on chosen inputs to verify behavior.
-	if layout != nil {
-		prog := "(cell …) Flux program"
-		if fluxIsForth() {
-			prog = "Forth word stream"
-		}
-		defs = append(defs,
-			inference.ToolDef{Name: "flux_check", Description: "Parse, type-check, and lower your " + prog + "; returns 'ok' or the exact error (unknown field, type mismatch, syntax/stack slip). Use before flux_run.", Parameters: objSchema(map[string]string{"src": "the full " + prog}, []string{"src"})},
-			inference.ToolDef{Name: "flux_run", Description: "Run your " + prog + " in the real sandbox for several ticks with inputs you choose, and get back each writable field's per-tick TRAJECTORY (or the drawn shapes) — so you can see the full behavior over time, not just one step. Use enough steps to reach the edge cases the GOAL implies (e.g. the ball hitting a wall) and confirm it behaves right (reverses/bounces, doesn't stop or leave the screen). inputs is a JSON object of field→integer; steps defaults to 12.", Parameters: objSchema(map[string]string{"src": "the full " + prog, "inputs": "JSON object mapping field names to integers, e.g. {\"ball_x\":300,\"ball_vx\":5,\"screen_width\":320}", "steps": "how many ticks to run (integer; use enough to reach an edge case, e.g. 30)"}, []string{"src", "inputs"})},
-		)
-	}
-	// The example tools show worked examples in the SURFACE this cell is authored in:
-	// Forth (the operational standard) or S-expression Flux when a layout is present,
-	// WAT otherwise — never the wrong surface.
-	toolLang := "wat"
-	if layout != nil {
-		toolLang = "flux"
-		if fluxIsForth() {
-			toolLang = "forth"
-		}
-	}
+	const toolLang = "wat"
 	exec := func(name, argsJSON string) string {
 		args := map[string]any{}
 		_ = json.Unmarshal([]byte(argsJSON), &args)
@@ -319,17 +239,6 @@ func buildAgenticTools(ledger *storage.LedgerEngine, cs *compiler.CompilerServic
 			return "no document with that id"
 		case "compile_check":
 			src := getStr("wat")
-			// Flux-aware: if the model checks a (cell …) program, lower it first so the
-			// error it gets back is the Flux (semantic) error, not "expected module".
-			if layout != nil {
-				if f := extractFlux(src); f != "" {
-					w, lerr := flux.Compile("cell", f, layout)
-					if lerr != nil {
-						return "FLUX COMPILE ERROR: " + lerr.Error()
-					}
-					src = w
-				}
-			}
 			art, err := cs.CompileGenotype(src)
 			if err != nil || art == nil || !art.SyntaxPassed {
 				line, msg := 0, "unknown"
@@ -342,43 +251,6 @@ func buildAgenticTools(ledger *storage.LedgerEngine, cs *compiler.CompilerServic
 				return fmt.Sprintf("COMPILE ERROR (line %d): %s", line, msg)
 			}
 			return "ok: assembles cleanly"
-		case "flux_check":
-			if layout == nil {
-				return "flux_check is unavailable for this cell"
-			}
-			src := getStr("src")
-			// Surface-aware: in Forth mode use ForthDiagnose (categorized stack/word vs
-			// type feedback naming what broke) so the model can fix a word stream; in
-			// S-expr mode lower the (cell …).
-			if fluxIsForth() {
-				if msg := flux.ForthDiagnose(src, layout); msg != "ok" {
-					return "FORTH ERROR: " + msg
-				}
-			} else if _, err := flux.Compile("cell", src, layout); err != nil {
-				return "FLUX ERROR: " + err.Error()
-			}
-			if lastFlux != nil {
-				*lastFlux = src // a verified program — the fallback answer
-			}
-			return "ok: parses, type-checks, and lowers to WASM"
-		case "flux_run":
-			if layout == nil {
-				return "flux_run is unavailable for this cell"
-			}
-			steps := 12
-			if v, ok := args["steps"].(float64); ok && v >= 1 {
-				if steps = int(v); steps > 64 {
-					steps = 64
-				}
-			}
-			out, err := runFluxCell(layout, getStr("src"), getStr("inputs"), steps)
-			if err != nil {
-				return "RUN ERROR: " + err.Error()
-			}
-			if lastFlux != nil {
-				*lastFlux = getStr("src") // ran successfully — the best fallback answer
-			}
-			return out
 		}
 		return "unknown tool: " + name
 	}

@@ -23,27 +23,32 @@ const seedDrawAtPositionWAT = `(module
     local.get $base i32.const 20 i32.add i32.const 0xFFCC33FF i32.store
     i32.const 24))`
 
-// The Flux worked examples that USED to be hard-coded in fluxSeedBlock now live here,
-// as ordinary KB examples that renderKnowledge lazily inlines — so Flux is
-// single-sourced in the example store, never embedded in a prompt string
-// (docs/language-evolution.md §6, docs/lineage.md §8). They are validated with
-// flux.Compile against a representative layout before being stored, exactly as the
-// WAT seed example is assembler-checked.
+// The macro-WAT worked examples live here as ordinary KB examples that
+// renderKnowledge lazily inlines — so the surface is single-sourced in the example
+// store, never embedded in a prompt string. They are validated with flux.Expand +
+// the assembler against a representative layout before being stored, exactly as the
+// raw-WAT seed example is assembler-checked.
 const (
-	seedRendererFlux = `(cell renderer (reads ball_x ball_y) (draw (circle ball_x ball_y 8 #xFFCC33FF)))`
-	seedPhysicsFlux  = `(cell physics
-  (reads ball_x ball_y vel_x vel_y screen_w screen_h)
-  (writes ball_x ball_y vel_x vel_y)
-  (let ([nx (+ ball_x vel_x)] [ny (+ ball_y vel_y)]
-        [bx (or (< nx 0) (>= nx screen_w))] [by (or (< ny 0) (>= ny screen_h))])
-    (write (vel_x (if bx (neg vel_x) vel_x)) (vel_y (if by (neg vel_y) vel_y))
-           (ball_x (clamp nx 0 (- screen_w 1))) (ball_y (clamp ny 0 (- screen_h 1))))))`
+	seedRendererMacro = `(cell render-frame
+  (scene (circle (get ball_x) (get ball_y) (i32.const 8) (i32.const 0xFFCC33FF))))`
+	seedPhysicsMacro = `(cell run-tick
+  (local $nx i32)
+  (local $ny i32)
+  (local.set $nx (i32.add (get ball_x) (get vel_x)))
+  (local.set $ny (i32.add (get ball_y) (get vel_y)))
+  (if (i32.or (i32.lt_s (local.get $nx) (i32.const 0)) (i32.ge_s (local.get $nx) (get screen_w)))
+    (then (set vel_x (i32.sub (i32.const 0) (get vel_x)))))
+  (if (i32.or (i32.lt_s (local.get $ny) (i32.const 0)) (i32.ge_s (local.get $ny) (get screen_h)))
+    (then (set vel_y (i32.sub (i32.const 0) (get vel_y)))))
+  (set ball_x (local.get $nx))
+  (set ball_y (local.get $ny))
+  (i32.const 0))`
 )
 
-// seedFluxLayout is a representative field layout used ONLY to type-check the Flux
-// seed examples at seed time (offsets are arbitrary; the checker cares about names +
-// types). It mirrors the fields the examples reference.
-var seedFluxLayout = flux.Layout{
+// seedMacroLayout is a representative field layout used ONLY to expand + assemble the
+// macro seed examples at seed time (offsets are arbitrary; the surface cares about
+// names + types). It mirrors the fields the examples reference.
+var seedMacroLayout = flux.Layout{
 	"ball_x":   {Type: flux.TInt, Offset: 0xB0000},
 	"ball_y":   {Type: flux.TInt, Offset: 0xB0004},
 	"vel_x":    {Type: flux.TInt, Offset: 0xB0008},
@@ -133,24 +138,24 @@ func SeedKnowledge(ledger *storage.LedgerEngine) {
 		_ = AddDocument(ledger, d)
 	}
 	svc := compiler.NewCompilerService()
-	// WAT seed examples are assembler-checked; Flux seed examples are flux.Compile-
-	// checked (parse + type-check + lower). A seed that fails its language's check is
-	// skipped, never stored — the same discipline for both languages.
+	// Raw-WAT seed examples are assembler-checked; macro-WAT seed examples are
+	// flux.Expand-ed then assembler-checked. A seed that fails is skipped, never stored
+	// — the same discipline for both surfaces.
 	watExamples := []Example{
 		{Kind: "render", Entry: "render-frame", Semantics: "read ball_x and ball_y and draw a filled circle at that position",
 			Reads: []string{"ball_x", "ball_y"}, Tags: []string{"draw-at-position"},
 			WAT: seedDrawAtPositionWAT, Score: "seed", Provenance: "seed"},
 	}
-	fluxExamples := []Example{
+	macroExamples := []Example{
 		{Kind: "render", Entry: "render-frame", Lang: "flux",
 			Semantics: "read ball_x and ball_y and draw a filled circle at that position",
 			Reads:     []string{"ball_x", "ball_y"}, Tags: []string{"draw-at-position"},
-			WAT: seedRendererFlux, Score: "seed", Provenance: "seed"},
+			WAT: seedRendererMacro, Score: "seed", Provenance: "seed"},
 		{Kind: "compute", Entry: "run-tick", Lang: "flux",
-			Semantics: "integrate position by velocity, reflect the velocity at the walls, and clamp inside the screen",
+			Semantics: "integrate position by velocity and reflect the velocity at the walls",
 			Reads:     []string{"ball_x", "ball_y", "vel_x", "vel_y", "screen_w", "screen_h"},
 			Writes:    []string{"ball_x", "ball_y", "vel_x", "vel_y"}, Tags: []string{"wall-bounce"},
-			WAT: seedPhysicsFlux, Score: "seed", Provenance: "seed"},
+			WAT: seedPhysicsMacro, Score: "seed", Provenance: "seed"},
 	}
 	kept := 0
 	for _, e := range watExamples {
@@ -162,24 +167,17 @@ func SeedKnowledge(ledger *storage.LedgerEngine) {
 			kept++
 		}
 	}
-	for _, e := range fluxExamples {
-		cell, err := (flux.SExpr{}).Read("seed", e.WAT, seedFluxLayout)
+	for _, e := range macroExamples {
+		wat, err := flux.Expand(e.WAT, seedMacroLayout)
 		if err != nil {
-			log.Printf("[DOC] flux seed example %q skipped (did not compile): %v", e.Semantics, err)
+			log.Printf("[DOC] macro seed example %q skipped (did not expand): %v", e.Semantics, err)
+			continue
+		}
+		if art, aerr := svc.CompileGenotype(wat); aerr != nil || art == nil || !art.SyntaxPassed {
+			log.Printf("[DOC] macro seed example %q skipped (expanded WAT did not assemble)", e.Semantics)
 			continue
 		}
 		if ok, _ := AddExample(ledger, e); ok {
-			kept++
-		}
-		// Also seed the SAME worked example in the Forth surface (the operational
-		// standard), transcoded via the IR — so Forth authoring retrieves a Forth
-		// example, not an S-expression one. sameShape keys on language, so the two
-		// coexist rather than displacing each other.
-		fe := e
-		fe.ID = ""
-		fe.Lang = "forth"
-		fe.WAT = flux.Forth{}.Render(cell)
-		if ok, _ := AddExample(ledger, fe); ok {
 			kept++
 		}
 	}

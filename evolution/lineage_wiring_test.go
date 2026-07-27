@@ -8,7 +8,7 @@ import (
 )
 
 // authoringLineage records the input edges knowable at build time, and distinguishes
-// a Flux authoring (language version + grammar hash) from a WAT one.
+// a macro-WAT authoring (macro language version) from a raw-WAT one.
 func TestAuthoringLineageEdges(t *testing.T) {
 	le := newLedger(t)
 	o := &Orchestrator{ledger: le, CompassPrompt: "SYSTEM PROMPT", FluxEnabled: true}
@@ -18,11 +18,8 @@ func TestAuthoringLineageEdges(t *testing.T) {
 	}
 
 	lf := o.authoringLineage("urn:hdm:app:demo:view", "urn:hdm:app:demo", RenderFrameContract, nil, layout, true, []string{"ex1"})
-	if lf.Language != FluxLanguageVersion {
-		t.Fatalf("flux cell language = %q, want %q", lf.Language, FluxLanguageVersion)
-	}
-	if lf.Grammar == "" {
-		t.Fatal("flux cell must record the grammar (GBNF) hash it decodes under")
+	if lf.Language != MacroLanguageVersion {
+		t.Fatalf("macro cell language = %q, want %q", lf.Language, MacroLanguageVersion)
 	}
 	if lf.Prompt == "" {
 		t.Fatal("must record the prompt-template hash")
@@ -35,15 +32,10 @@ func TestAuthoringLineageEdges(t *testing.T) {
 	if lw.Language != langWAT {
 		t.Fatalf("wat cell language = %q, want %q", lw.Language, langWAT)
 	}
-	if lw.Grammar != "" {
-		t.Fatal("a WAT cell has no grammar edge")
-	}
-
-	// A compute-kind and a view-kind Flux cell decode under different grammars, so
-	// their grammar edges differ.
-	lc := o.authoringLineage("urn:hdm:app:demo:phys", "urn:hdm:app:demo", RunTickContract, nil, layout, true, nil)
-	if lc.Grammar == lf.Grammar {
-		t.Fatal("compute and view cells must record distinct grammar hashes")
+	// The prompt template differs between a macro cell (it appends the macro seed block)
+	// and a raw-WAT cell (it does not), so their prompt edges differ.
+	if lf.Prompt == lw.Prompt {
+		t.Fatal("macro and raw-WAT cells must record distinct prompt-template hashes")
 	}
 }
 
@@ -53,11 +45,11 @@ func TestAuthoringLineageEdges(t *testing.T) {
 func TestRecordLineageFromStash(t *testing.T) {
 	le := newLedger(t)
 	o := &Orchestrator{ledger: le}
-	o.noteAuthoring("urn:x", Lineage{Language: FluxLanguageVersion, Examples: []string{"ex1"}})
+	o.noteAuthoring("urn:x", Lineage{Language: MacroLanguageVersion, Examples: []string{"ex1"}})
 
 	o.recordLineage("urn:x", &manifest.NodeDescriptor{GenotypeHash: "g1"})
 	got, ok := LineageOf(le, "g1")
-	if !ok || got.URN != "urn:x" || got.Language != FluxLanguageVersion || len(got.Examples) != 1 {
+	if !ok || got.URN != "urn:x" || got.Language != MacroLanguageVersion || len(got.Examples) != 1 {
 		t.Fatalf("stash was not recorded against the committed genotype: %+v ok=%v", got, ok)
 	}
 

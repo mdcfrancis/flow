@@ -133,7 +133,7 @@ func runSieve(ctx context.Context, model Reasoner, systemPrompt, seedContext str
 			last = nil
 			log.Printf("[FLUX] model authored a (cell …) that did not compile: %v", ferr)
 			taxoWAT(fluxSrc, nil, ferr.Error())
-			payload = fluxCorrectionDirective(ferr)
+			payload = macroCorrectionDirective(ferr)
 			continue
 		}
 		if fluxSrc != "" {

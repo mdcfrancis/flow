@@ -42,7 +42,7 @@ func (o *Orchestrator) JudgeProgress(ctx context.Context, urn string) (progressi
 	if layout == nil {
 		return true, "not a flux cell — keep iterating"
 	}
-	bc, err := lowerFluxToBytecode(layout, draft)
+	bc, err := lowerMacroToBytecode(layout, draft)
 	if err != nil {
 		return true, "draft did not lower — keep iterating"
 	}

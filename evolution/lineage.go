@@ -29,15 +29,14 @@ import (
 
 const lineageRef = "urn:hdm:lineage"
 
-// FluxLanguageVersion is the coarse identity of the Flux language front-end
-// (grammar + checker + lowering). It is the `language` lineage edge every Flux cell
-// is authored under; a language evolution bumps it, which moves the InputsHash of
-// every Flux cell and so invalidates the whole Flux stack in one stroke — the
-// extreme-case rebuild of docs/lineage.md §6 / docs/language-evolution.md §3. Cells
-// authored in raw WAT record langWAT instead.
+// MacroLanguageVersion is the coarse identity of the macro-WAT surface (the field
+// macros + expander). It is the `language` lineage edge every cell with a contract
+// layout is authored under; a change to the surface bumps it, which moves the
+// InputsHash of every macro cell and so invalidates the whole stack in one stroke.
+// Cells authored in raw WAT (no layout) record langWAT instead.
 const (
-	FluxLanguageVersion = "flux/v1"
-	langWAT             = "wat"
+	MacroLanguageVersion = "macro-wat"
+	langWAT              = "wat"
 )
 
 // hashStr is the content address of a derivation input (a grammar, a prompt

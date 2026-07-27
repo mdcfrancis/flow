@@ -2143,17 +2143,6 @@ func main() {
 	// that retrieval injects into synthesis. Idempotent, so it is safe every boot.
 	evolution.SeedKnowledge(ledger)
 
-	// Install the LEDGER-RESIDENT prologue: the language's derived vocabulary
-	// (neg/abs/min/max/clamp and any evolved words) is loaded from the ledger — seeded
-	// with the built-in default on first run — and made live, so the derivations are
-	// evolvable data on the substrate, not fixed Go (docs/flux-surface-ir.md).
-	if err := evolution.InstallPrologue(ledger); err != nil {
-		log.Fatalf("install prologue: %v", err)
-	}
-	// Install the promoted default authoring surface (sexpr until a PromoteSurface
-	// epoch flips it to forth). HDM_FLUX_SURFACE still overrides for a trial.
-	evolution.InstallSurface(ledger)
-
 	// 2. Wire the cognitive engine. Two backends: the local OpenAI-compatible MLX
 	//    server (default) or the Google Gemini API. Selecting Gemini needs no
 	//    rebuild: set GEMINI_API_KEY (or drop the key in .gemini_api_key), or set
