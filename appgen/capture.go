@@ -36,11 +36,17 @@ func (g *Grower) CaptureExample(urn, score string) (bool, error) {
 	if err != nil || wat == "" {
 		return false, err
 	}
-	// Under P0 the stored genome is Flux for Flux cells; tag the captured example
-	// with the language of its source so it lands in the right retrieval bucket (a
-	// captured green Flux cell must supersede the Flux seed example, not the WAT one).
-	lang := ""
-	if strings.HasPrefix(strings.TrimSpace(wat), "(cell") {
+	// Under P0 the stored genome is the SURFACE source; tag the captured example with
+	// its language so it lands in the right retrieval bucket: "(module" → raw WAT,
+	// "(cell" → S-expression Flux, otherwise the concatenative Forth surface (a word
+	// stream). This keeps a captured green cell superseding the seed example in the
+	// SAME surface.
+	src := strings.TrimSpace(wat)
+	lang := "forth"
+	switch {
+	case strings.HasPrefix(src, "(module"):
+		lang = ""
+	case strings.HasPrefix(src, "(cell"):
 		lang = "flux"
 	}
 	return evolution.AddExample(g.ledger, evolution.Example{

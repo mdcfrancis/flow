@@ -166,6 +166,23 @@ Type-stratified locals (i-pool / b-pool), shallow prologue-bound stacks, words f
 neg/clamp/?, `-> field` writes — the science-loop-evolved language, running in the
 system for identical external behavior.
 
+## Forth is the standard surface (landed)
+
+The A/B win is locked in: **Forth is now the operational default.** `LoadSurface`
+returns `forth` when the ledger hasn't pinned a surface, so a fresh system authors
+cells in Forth; the KB seeds each worked example in Forth too (transcoded through the
+IR), and `renderKnowledge` / the agentic tools show examples in the surface being
+authored. Unit tests keep the S-expression default (they were written against it);
+the operational default comes from the ledger at boot. Verified live: a fresh grow
+reports `active surface = "forth"` and commits a Forth physics genome
+(`ball_x ball_vx + =: i0 … i2 -> ball_vx`) with no override.
+
+Both surfaces lower through the identical invariant, so existing S-expression genomes
+keep working unchanged; `PromoteSurface` remains the audited path to re-author an
+existing stack into Forth. And because the self-hosted parser (below) can already
+parse the full grammar, the system can grow a richer surface on its own if it ever
+wants one — the standard is a default, not a ceiling.
+
 ## Where this goes
 
 - **Now**: the surface is a swappable `Surface` in Go; a language experiment is a new

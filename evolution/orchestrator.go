@@ -932,6 +932,9 @@ func (o *Orchestrator) buildSeed(urn, intent, genotype string, contract *EntryCo
 	knowledgeLang := "wat"
 	if fluxOn {
 		knowledgeLang = "flux"
+		if fluxIsForth() {
+			knowledgeLang = "forth" // show worked examples in the surface being authored
+		}
 	}
 	var inlinedExamples []string
 	if k, ids := o.renderKnowledge(contract, intent, knowledgeLang); k != "" {

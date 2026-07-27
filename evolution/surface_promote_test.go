@@ -4,14 +4,14 @@ import "testing"
 
 func TestSurfaceLedgerRoundTrip(t *testing.T) {
 	le := newLedger(t)
-	if s := LoadSurface(le); s != "sexpr" {
-		t.Fatalf("default surface = %q, want sexpr", s)
+	if s := LoadSurface(le); s != "forth" {
+		t.Fatalf("default surface = %q, want forth (the operational standard)", s)
 	}
-	if err := SaveSurface(le, "forth"); err != nil {
+	if err := SaveSurface(le, "sexpr"); err != nil {
 		t.Fatal(err)
 	}
-	if s := LoadSurface(le); s != "forth" {
-		t.Fatalf("after save, surface = %q, want forth", s)
+	if s := LoadSurface(le); s != "sexpr" {
+		t.Fatalf("after save, surface = %q, want sexpr", s)
 	}
 }
 
@@ -55,6 +55,7 @@ func TestPromoteSurfacePromotes(t *testing.T) {
 // refs restored).
 func TestPromoteSurfaceRollsBack(t *testing.T) {
 	le := newLedger(t)
+	_ = SaveSurface(le, "sexpr") // pin the ledger so rollback is observable vs the forth default
 	setActiveSurface("sexpr")
 	t.Cleanup(func() { setActiveSurface("sexpr") })
 

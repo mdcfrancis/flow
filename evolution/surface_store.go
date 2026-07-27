@@ -1,9 +1,13 @@
 package evolution
 
 // The SURFACE the operational sieve authors in is promotable ledger state, not just
-// an env flag. It defaults to "sexpr"; a language epoch (PromoteSurface) flips it to
-// "forth" only after the whole stack re-authors green in the new surface — the
-// acceptance discipline of docs/language-evolution.md §3 applied to a surface change.
+// an env flag. The OPERATIONAL STANDARD is now "forth" — the type-stratified
+// concatenative surface that measured a large LLM-efficiency win (docs/
+// flux-surface-ir.md); a running system authors cells in it by default. (Unit tests
+// use the package default "sexpr" — see activeSurfaceName — since they were written
+// against the S-expression surface; the operational default comes from the ledger via
+// InstallSurface at boot.) PromoteSurface remains the audited path for re-authoring an
+// existing stack into a surface.
 
 import (
 	"strings"
@@ -20,10 +24,12 @@ var (
 	activeSurfaceName = "sexpr" // set by InstallSurface at boot; overridden during a promotion rebuild
 )
 
-// LoadSurface returns the ledger-stored default surface, or "sexpr" if none set.
+// LoadSurface returns the ledger-stored default surface, or the standard "forth" if
+// none has been set — so a fresh system authors in Forth. An existing ledger that
+// pinned a surface (via PromoteSurface) keeps its choice.
 func LoadSurface(ledger *storage.LedgerEngine) string {
 	if ledger == nil {
-		return "sexpr"
+		return "forth"
 	}
 	if h, err := ledger.GetRef(surfaceRef); err == nil {
 		if raw, rerr := ledger.ReadBlock(h); rerr == nil && len(raw) > 0 {
@@ -32,7 +38,7 @@ func LoadSurface(ledger *storage.LedgerEngine) string {
 			}
 		}
 	}
-	return "sexpr"
+	return "forth"
 }
 
 // SaveSurface persists the default surface (the promote step of an accepted surface

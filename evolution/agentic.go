@@ -152,11 +152,15 @@ func buildAgenticTools(ledger *storage.LedgerEngine, cs *compiler.CompilerServic
 			inference.ToolDef{Name: "flux_run", Description: "Run your " + prog + " in the real sandbox for several ticks with inputs you choose, and get back each writable field's per-tick TRAJECTORY (or the drawn shapes) — so you can see the full behavior over time, not just one step. Use enough steps to reach the edge cases the GOAL implies (e.g. the ball hitting a wall) and confirm it behaves right (reverses/bounces, doesn't stop or leave the screen). inputs is a JSON object of field→integer; steps defaults to 12.", Parameters: objSchema(map[string]string{"src": "the full " + prog, "inputs": "JSON object mapping field names to integers, e.g. {\"ball_x\":300,\"ball_vx\":5,\"screen_width\":320}", "steps": "how many ticks to run (integer; use enough to reach an edge case, e.g. 30)"}, []string{"src", "inputs"})},
 		)
 	}
-	// The example tools show worked examples in the language this cell is authored
-	// in: Flux when a layout is present, WAT otherwise — never the other language.
+	// The example tools show worked examples in the SURFACE this cell is authored in:
+	// Forth (the operational standard) or S-expression Flux when a layout is present,
+	// WAT otherwise — never the wrong surface.
 	toolLang := "wat"
 	if layout != nil {
 		toolLang = "flux"
+		if fluxIsForth() {
+			toolLang = "forth"
+		}
 	}
 	exec := func(name, argsJSON string) string {
 		args := map[string]any{}

@@ -163,11 +163,23 @@ func SeedKnowledge(ledger *storage.LedgerEngine) {
 		}
 	}
 	for _, e := range fluxExamples {
-		if _, err := flux.Compile("cell", e.WAT, seedFluxLayout); err != nil {
+		cell, err := (flux.SExpr{}).Read("seed", e.WAT, seedFluxLayout)
+		if err != nil {
 			log.Printf("[DOC] flux seed example %q skipped (did not compile): %v", e.Semantics, err)
 			continue
 		}
 		if ok, _ := AddExample(ledger, e); ok {
+			kept++
+		}
+		// Also seed the SAME worked example in the Forth surface (the operational
+		// standard), transcoded via the IR — so Forth authoring retrieves a Forth
+		// example, not an S-expression one. sameShape keys on language, so the two
+		// coexist rather than displacing each other.
+		fe := e
+		fe.ID = ""
+		fe.Lang = "forth"
+		fe.WAT = flux.Forth{}.Render(cell)
+		if ok, _ := AddExample(ledger, fe); ok {
 			kept++
 		}
 	}
