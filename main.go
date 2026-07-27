@@ -1768,6 +1768,7 @@ type frameSkip struct {
 	pheno     map[string]string      // urn -> phenotype hash the info was built for
 	ranges    map[string][][2]uint32 // urn -> cached read-set [off,len] byte ranges
 	exclusive map[string]bool        // urn -> it is the SOLE writer of its outputs
+	ranOnce   map[string]bool        // urn -> a constant-output (no-read) cell has run this commit
 	am        map[string]*evolution.AppMap
 	ct        map[string]*evolution.AppContract
 	amAt      map[string]int // ns -> frame when map/contract were last (re)loaded
@@ -1778,7 +1779,7 @@ func newFrameSkip(hyp *execution.RuntimeManager, ledger *storage.LedgerEngine) *
 	return &frameSkip{
 		hyp: hyp, ledger: ledger,
 		inputHash: map[string]uint64{}, pheno: map[string]string{}, ranges: map[string][][2]uint32{},
-		exclusive: map[string]bool{},
+		exclusive: map[string]bool{}, ranOnce: map[string]bool{},
 		am:        map[string]*evolution.AppMap{}, ct: map[string]*evolution.AppContract{}, amAt: map[string]int{},
 	}
 }
@@ -1804,6 +1805,7 @@ func (fs *frameSkip) buildInfo(ns, urn, phenoHash string) {
 	fs.exclusive[urn] = fs.writesExclusively(ns, urn)
 	fs.pheno[urn] = phenoHash
 	delete(fs.inputHash, urn)
+	delete(fs.ranOnce, urn) // a new commit gets to run its initializer once again
 }
 
 // shouldRun reports whether to tick this cell now (and refreshes its cached info). It
@@ -1815,13 +1817,24 @@ func (fs *frameSkip) shouldRun(ns, urn, phenoHash string, bytecode []byte, frame
 	if !fs.hyp.CellIsDeterministic(phenoHash, bytecode) {
 		return true // reads a clock/random/model — output isn't a function of memory
 	}
+	ranges := fs.ranges[urn]
+	if len(ranges) == 0 {
+		// A deterministic cell that reads NOTHING produces a CONSTANT output — an
+		// INITIALIZER (set starting positions/velocities/dimensions). Run it ONCE per
+		// commit, then skip forever, even though it's non-exclusive: re-running would
+		// re-stamp the same constants every frame and STOMP the cell that animates those
+		// fields (physics) → a frozen scene. buildInfo clears ranOnce on a new commit, so
+		// a re-authored initializer runs once again.
+		if fs.ranOnce[urn] {
+			fs.skips++
+			return false
+		}
+		fs.ranOnce[urn] = true
+		return true
+	}
 	if !fs.exclusive[urn] {
 		return true // another cell also writes this cell's outputs — a skip would let
 		// them clobber its frozen result, so it must re-run every frame
-	}
-	ranges := fs.ranges[urn]
-	if len(ranges) == 0 {
-		return true // unknown or empty read-set — never skip (conservative)
 	}
 	h, ok := fs.hashRanges(ranges)
 	if !ok {
