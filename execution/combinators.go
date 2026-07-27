@@ -1,5 +1,7 @@
 package execution
 
+import "github.com/mdcfrancis/flow/stdlib"
+
 import "fmt"
 
 // Functional combinators, P1. A combinator is
@@ -55,201 +57,30 @@ const (
 // The function cell's run-tick(argPtr, argLen) receives a pointer to in[i]
 // (elemWords*4 bytes) and returns its i32 result, which map stores at out[i].
 // Returns n.
-const SysMapWAT = `(module
-  (import "hdm:kernel/hardware-io" "shared-cluster-memory" (memory 100))
-  (import "hdm:kernel/cell-dispatch" "invoke-cell" (func $invoke (param i32 i32 i32 i32) (result i32)))
-  (func (export "run-tick") (param $cfg i32) (param $len i32) (result i32)
-    (local $fnPtr i32) (local $fnLen i32) (local $inPtr i32) (local $outPtr i32)
-    (local $n i32) (local $ew i32) (local $i i32) (local $stride i32)
-    (local.set $fnPtr  (i32.load offset=0  (local.get $cfg)))
-    (local.set $fnLen  (i32.load offset=4  (local.get $cfg)))
-    (local.set $inPtr  (i32.load offset=8  (local.get $cfg)))
-    (local.set $outPtr (i32.load offset=12 (local.get $cfg)))
-    (local.set $n      (i32.load offset=16 (local.get $cfg)))
-    (local.set $ew     (i32.load offset=20 (local.get $cfg)))
-    (local.set $stride (i32.mul (local.get $ew) (i32.const 4)))
-    (local.set $i (i32.const 0))
-    (block $done
-      (loop $loop
-        (br_if $done (i32.ge_u (local.get $i) (local.get $n)))
-        (i32.store
-          (i32.add (local.get $outPtr) (i32.mul (local.get $i) (i32.const 4)))
-          (call $invoke
-            (local.get $fnPtr) (local.get $fnLen)
-            (i32.add (local.get $inPtr) (i32.mul (local.get $i) (local.get $stride)))
-            (local.get $stride)))
-        (local.set $i (i32.add (local.get $i) (i32.const 1)))
-        (br $loop)))
-    (local.get $n)))`
+var SysMapWAT = stdlib.MustCell("map")
 
 // SysFoldWAT is `fold`: acc = fn(acc, in[i]) for i in 0..n, from seed. fn reads its
 // args from argBuf: [acc, elem words...] (1+elemWords). Returns the final acc.
 // Config: {fnPtr,fnLen,inPtr,n,elemWords,seed,argBufPtr}.
-const SysFoldWAT = `(module
-  (import "hdm:kernel/hardware-io" "shared-cluster-memory" (memory 100))
-  (import "hdm:kernel/cell-dispatch" "invoke-cell" (func $invoke (param i32 i32 i32 i32) (result i32)))
-  (func (export "run-tick") (param $cfg i32) (param $len i32) (result i32)
-    (local $fnPtr i32) (local $fnLen i32) (local $inPtr i32) (local $n i32) (local $ew i32)
-    (local $acc i32) (local $arg i32) (local $i i32) (local $stride i32) (local $k i32) (local $src i32)
-    (local.set $fnPtr (i32.load offset=0 (local.get $cfg)))
-    (local.set $fnLen (i32.load offset=4 (local.get $cfg)))
-    (local.set $inPtr (i32.load offset=8 (local.get $cfg)))
-    (local.set $n     (i32.load offset=12 (local.get $cfg)))
-    (local.set $ew    (i32.load offset=16 (local.get $cfg)))
-    (local.set $acc   (i32.load offset=20 (local.get $cfg)))
-    (local.set $arg   (i32.load offset=24 (local.get $cfg)))
-    (local.set $stride (i32.mul (local.get $ew) (i32.const 4)))
-    (local.set $i (i32.const 0))
-    (block $done (loop $loop
-      (br_if $done (i32.ge_u (local.get $i) (local.get $n)))
-      (i32.store (local.get $arg) (local.get $acc))
-      (local.set $src (i32.add (local.get $inPtr) (i32.mul (local.get $i) (local.get $stride))))
-      (local.set $k (i32.const 0))
-      (block $cd (loop $cl
-        (br_if $cd (i32.ge_u (local.get $k) (local.get $ew)))
-        (i32.store
-          (i32.add (i32.add (local.get $arg) (i32.const 4)) (i32.mul (local.get $k) (i32.const 4)))
-          (i32.load (i32.add (local.get $src) (i32.mul (local.get $k) (i32.const 4)))))
-        (local.set $k (i32.add (local.get $k) (i32.const 1)))
-        (br $cl)))
-      (local.set $acc (call $invoke (local.get $fnPtr) (local.get $fnLen)
-        (local.get $arg) (i32.mul (i32.add (local.get $ew) (i32.const 1)) (i32.const 4))))
-      (local.set $i (i32.add (local.get $i) (i32.const 1)))
-      (br $loop)))
-    (local.get $acc)))`
+var SysFoldWAT = stdlib.MustCell("fold")
 
 // SysFilterWAT is `filter`: compact into out[] the elements where pred(in[i])!=0.
 // Returns the kept count. Config: {fnPtr,fnLen,inPtr,outPtr,n,elemWords}.
-const SysFilterWAT = `(module
-  (import "hdm:kernel/hardware-io" "shared-cluster-memory" (memory 100))
-  (import "hdm:kernel/cell-dispatch" "invoke-cell" (func $invoke (param i32 i32 i32 i32) (result i32)))
-  (func (export "run-tick") (param $cfg i32) (param $len i32) (result i32)
-    (local $fnPtr i32) (local $fnLen i32) (local $inPtr i32) (local $outPtr i32) (local $n i32) (local $ew i32)
-    (local $i i32) (local $j i32) (local $stride i32) (local $k i32) (local $src i32) (local $dst i32)
-    (local.set $fnPtr  (i32.load offset=0  (local.get $cfg)))
-    (local.set $fnLen  (i32.load offset=4  (local.get $cfg)))
-    (local.set $inPtr  (i32.load offset=8  (local.get $cfg)))
-    (local.set $outPtr (i32.load offset=12 (local.get $cfg)))
-    (local.set $n      (i32.load offset=16 (local.get $cfg)))
-    (local.set $ew     (i32.load offset=20 (local.get $cfg)))
-    (local.set $stride (i32.mul (local.get $ew) (i32.const 4)))
-    (local.set $i (i32.const 0)) (local.set $j (i32.const 0))
-    (block $done (loop $loop
-      (br_if $done (i32.ge_u (local.get $i) (local.get $n)))
-      (local.set $src (i32.add (local.get $inPtr) (i32.mul (local.get $i) (local.get $stride))))
-      (if (call $invoke (local.get $fnPtr) (local.get $fnLen) (local.get $src) (local.get $stride))
-        (then
-          (local.set $dst (i32.add (local.get $outPtr) (i32.mul (local.get $j) (local.get $stride))))
-          (local.set $k (i32.const 0))
-          (block $cd (loop $cl
-            (br_if $cd (i32.ge_u (local.get $k) (local.get $ew)))
-            (i32.store
-              (i32.add (local.get $dst) (i32.mul (local.get $k) (i32.const 4)))
-              (i32.load (i32.add (local.get $src) (i32.mul (local.get $k) (i32.const 4)))))
-            (local.set $k (i32.add (local.get $k) (i32.const 1)))
-            (br $cl)))
-          (local.set $j (i32.add (local.get $j) (i32.const 1)))))
-      (local.set $i (i32.add (local.get $i) (i32.const 1)))
-      (br $loop)))
-    (local.get $j)))`
+var SysFilterWAT = stdlib.MustCell("filter")
 
 // SysIterateWAT is `iterate_until`: apply fn to state (in place) up to maxSteps,
 // stopping when fn returns 0. Returns the number of steps taken. fn reads+writes
 // stateWords at statePtr and returns a continue flag. Config:
 // {fnPtr,fnLen,statePtr,stateWords,maxSteps}.
-const SysIterateWAT = `(module
-  (import "hdm:kernel/hardware-io" "shared-cluster-memory" (memory 100))
-  (import "hdm:kernel/cell-dispatch" "invoke-cell" (func $invoke (param i32 i32 i32 i32) (result i32)))
-  (func (export "run-tick") (param $cfg i32) (param $len i32) (result i32)
-    (local $fnPtr i32) (local $fnLen i32) (local $st i32) (local $sw i32) (local $max i32)
-    (local $steps i32) (local $bytes i32)
-    (local.set $fnPtr (i32.load offset=0  (local.get $cfg)))
-    (local.set $fnLen (i32.load offset=4  (local.get $cfg)))
-    (local.set $st    (i32.load offset=8  (local.get $cfg)))
-    (local.set $sw    (i32.load offset=12 (local.get $cfg)))
-    (local.set $max   (i32.load offset=16 (local.get $cfg)))
-    (local.set $bytes (i32.mul (local.get $sw) (i32.const 4)))
-    (local.set $steps (i32.const 0))
-    (block $done (loop $loop
-      (br_if $done (i32.ge_u (local.get $steps) (local.get $max)))
-      (local.set $steps (i32.add (local.get $steps) (i32.const 1)))
-      (br_if $done (i32.eqz (call $invoke (local.get $fnPtr) (local.get $fnLen) (local.get $st) (local.get $bytes))))
-      (br $loop)))
-    (local.get $steps)))`
+var SysIterateWAT = stdlib.MustCell("iterate")
 
 // SysScanWAT is `scan`: like fold but writes each running acc to out[i]. Config:
 // {fnPtr,fnLen,inPtr,outPtr,n,elemWords,seed,argBufPtr}. fn reads [acc, elem].
-const SysScanWAT = `(module
-  (import "hdm:kernel/hardware-io" "shared-cluster-memory" (memory 100))
-  (import "hdm:kernel/cell-dispatch" "invoke-cell" (func $invoke (param i32 i32 i32 i32) (result i32)))
-  (func (export "run-tick") (param $cfg i32) (param $len i32) (result i32)
-    (local $fnPtr i32) (local $fnLen i32) (local $inPtr i32) (local $outPtr i32) (local $n i32) (local $ew i32)
-    (local $acc i32) (local $arg i32) (local $i i32) (local $stride i32) (local $k i32) (local $src i32)
-    (local.set $fnPtr  (i32.load offset=0  (local.get $cfg)))
-    (local.set $fnLen  (i32.load offset=4  (local.get $cfg)))
-    (local.set $inPtr  (i32.load offset=8  (local.get $cfg)))
-    (local.set $outPtr (i32.load offset=12 (local.get $cfg)))
-    (local.set $n      (i32.load offset=16 (local.get $cfg)))
-    (local.set $ew     (i32.load offset=20 (local.get $cfg)))
-    (local.set $acc    (i32.load offset=24 (local.get $cfg)))
-    (local.set $arg    (i32.load offset=28 (local.get $cfg)))
-    (local.set $stride (i32.mul (local.get $ew) (i32.const 4)))
-    (local.set $i (i32.const 0))
-    (block $done (loop $loop
-      (br_if $done (i32.ge_u (local.get $i) (local.get $n)))
-      (i32.store (local.get $arg) (local.get $acc))
-      (local.set $src (i32.add (local.get $inPtr) (i32.mul (local.get $i) (local.get $stride))))
-      (local.set $k (i32.const 0))
-      (block $cd (loop $cl
-        (br_if $cd (i32.ge_u (local.get $k) (local.get $ew)))
-        (i32.store
-          (i32.add (i32.add (local.get $arg) (i32.const 4)) (i32.mul (local.get $k) (i32.const 4)))
-          (i32.load (i32.add (local.get $src) (i32.mul (local.get $k) (i32.const 4)))))
-        (local.set $k (i32.add (local.get $k) (i32.const 1)))
-        (br $cl)))
-      (local.set $acc (call $invoke (local.get $fnPtr) (local.get $fnLen)
-        (local.get $arg) (i32.mul (i32.add (local.get $ew) (i32.const 1)) (i32.const 4))))
-      (i32.store (i32.add (local.get $outPtr) (i32.mul (local.get $i) (i32.const 4))) (local.get $acc))
-      (local.set $i (i32.add (local.get $i) (i32.const 1)))
-      (br $loop)))
-    (local.get $n)))`
+var SysScanWAT = stdlib.MustCell("scan")
 
 // SysZipWAT is `zip`: out[i]=fn(a[i],b[i]). fn reads argBuf [a words..., b words...]
 // (2*elemWords). Config: {fnPtr,fnLen,aPtr,bPtr,outPtr,n,elemWords,argBufPtr}.
-const SysZipWAT = `(module
-  (import "hdm:kernel/hardware-io" "shared-cluster-memory" (memory 100))
-  (import "hdm:kernel/cell-dispatch" "invoke-cell" (func $invoke (param i32 i32 i32 i32) (result i32)))
-  (func (export "run-tick") (param $cfg i32) (param $len i32) (result i32)
-    (local $fnPtr i32) (local $fnLen i32) (local $aPtr i32) (local $bPtr i32) (local $outPtr i32)
-    (local $n i32) (local $ew i32) (local $arg i32) (local $i i32) (local $stride i32) (local $k i32)
-    (local.set $fnPtr  (i32.load offset=0  (local.get $cfg)))
-    (local.set $fnLen  (i32.load offset=4  (local.get $cfg)))
-    (local.set $aPtr   (i32.load offset=8  (local.get $cfg)))
-    (local.set $bPtr   (i32.load offset=12 (local.get $cfg)))
-    (local.set $outPtr (i32.load offset=16 (local.get $cfg)))
-    (local.set $n      (i32.load offset=20 (local.get $cfg)))
-    (local.set $ew     (i32.load offset=24 (local.get $cfg)))
-    (local.set $arg    (i32.load offset=28 (local.get $cfg)))
-    (local.set $stride (i32.mul (local.get $ew) (i32.const 4)))
-    (local.set $i (i32.const 0))
-    (block $done (loop $loop
-      (br_if $done (i32.ge_u (local.get $i) (local.get $n)))
-      (local.set $k (i32.const 0))
-      (block $cd (loop $cl
-        (br_if $cd (i32.ge_u (local.get $k) (local.get $ew)))
-        (i32.store
-          (i32.add (local.get $arg) (i32.mul (local.get $k) (i32.const 4)))
-          (i32.load (i32.add (i32.add (local.get $aPtr) (i32.mul (local.get $i) (local.get $stride))) (i32.mul (local.get $k) (i32.const 4)))))
-        (i32.store
-          (i32.add (i32.add (local.get $arg) (local.get $stride)) (i32.mul (local.get $k) (i32.const 4)))
-          (i32.load (i32.add (i32.add (local.get $bPtr) (i32.mul (local.get $i) (local.get $stride))) (i32.mul (local.get $k) (i32.const 4)))))
-        (local.set $k (i32.add (local.get $k) (i32.const 1)))
-        (br $cl)))
-      (i32.store (i32.add (local.get $outPtr) (i32.mul (local.get $i) (i32.const 4)))
-        (call $invoke (local.get $fnPtr) (local.get $fnLen) (local.get $arg) (i32.mul (local.get $stride) (i32.const 2))))
-      (local.set $i (i32.add (local.get $i) (i32.const 1)))
-      (br $loop)))
-    (local.get $n)))`
+var SysZipWAT = stdlib.MustCell("zip")
 
 // driverBase is the scratch region a generated composition driver uses for the
 // combinator config + the embedded URN strings — high in the sandbox, clear of the

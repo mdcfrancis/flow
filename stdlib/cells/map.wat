@@ -1,0 +1,26 @@
+(module
+  (import "hdm:kernel/hardware-io" "shared-cluster-memory" (memory 100))
+  (import "hdm:kernel/cell-dispatch" "invoke-cell" (func $invoke (param i32 i32 i32 i32) (result i32)))
+  (func (export "run-tick") (param $cfg i32) (param $len i32) (result i32)
+    (local $fnPtr i32) (local $fnLen i32) (local $inPtr i32) (local $outPtr i32)
+    (local $n i32) (local $ew i32) (local $i i32) (local $stride i32)
+    (local.set $fnPtr  (i32.load offset=0  (local.get $cfg)))
+    (local.set $fnLen  (i32.load offset=4  (local.get $cfg)))
+    (local.set $inPtr  (i32.load offset=8  (local.get $cfg)))
+    (local.set $outPtr (i32.load offset=12 (local.get $cfg)))
+    (local.set $n      (i32.load offset=16 (local.get $cfg)))
+    (local.set $ew     (i32.load offset=20 (local.get $cfg)))
+    (local.set $stride (i32.mul (local.get $ew) (i32.const 4)))
+    (local.set $i (i32.const 0))
+    (block $done
+      (loop $loop
+        (br_if $done (i32.ge_u (local.get $i) (local.get $n)))
+        (i32.store
+          (i32.add (local.get $outPtr) (i32.mul (local.get $i) (i32.const 4)))
+          (call $invoke
+            (local.get $fnPtr) (local.get $fnLen)
+            (i32.add (local.get $inPtr) (i32.mul (local.get $i) (local.get $stride)))
+            (local.get $stride)))
+        (local.set $i (i32.add (local.get $i) (i32.const 1)))
+        (br $loop)))
+    (local.get $n)))

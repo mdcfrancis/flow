@@ -4,8 +4,8 @@
 // the loaders below parse the header and return the body, so the rest of the system
 // seeds itself from these files instead of from strings scattered across packages.
 //
-//   prologue/*.macro  — the hygienic macros every cell may call as primitives
-//   examples/*.wat|.macro — worked seed cells for the knowledge base
+//	prologue/*.macro  — the hygienic macros every cell may call as primitives
+//	examples/*.wat|.macro — worked seed cells for the knowledge base
 package stdlib
 
 import (
@@ -19,6 +19,32 @@ var prologueFS embed.FS
 
 //go:embed examples/*.wat examples/*.macro
 var exampleFS embed.FS
+
+//go:embed cells
+var cellFS embed.FS
+
+// Cell returns the source of a named standard cell (its file basename without
+// extension, e.g. "map", "stream-fold"), and whether it exists. These are the live
+// system cells (combinators, collections, streams, dict, demo cells) that seed the
+// runtime — moved here from inline Go string literals.
+func Cell(name string) (string, bool) {
+	for _, ext := range []string{".wat", ".macro"} {
+		if raw, err := cellFS.ReadFile("cells/" + name + ext); err == nil {
+			_, body := splitHeaders(string(raw))
+			return body, true
+		}
+	}
+	return "", false
+}
+
+// MustCell returns a named standard cell's source or panics — for package-level var
+// initializers, where a missing embedded file is a build-time programmer error.
+func MustCell(name string) string {
+	if s, ok := Cell(name); ok {
+		return s
+	}
+	panic("stdlib: unknown standard cell " + name)
+}
 
 // Macro is one prologue macro source: the (defmacro …) body and its one-line doc.
 type Macro struct {

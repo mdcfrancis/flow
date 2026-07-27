@@ -1,0 +1,16 @@
+(module
+  (import "hdm:kernel/hardware-io" "shared-cluster-memory" (memory 100))
+  (import "hdm:kernel/cell-dispatch" "invoke-cell" (func $invoke (param i32 i32 i32 i32) (result i32)))
+  (data (i32.const 0x00020000) "urn:hdm:demo:hotleaf")
+  (func (export "run-tick") (param $p i32) (param $len i32) (result i32)
+    (local $k i32) (local $i i32) (local $acc i32)
+    (local.set $k (i32.and (i32.load (i32.const 0x00010000)) (i32.const 31)))
+    (local.set $i (i32.const 1)) (local.set $acc (i32.const 0))
+    (block $done (loop $loop
+      (br_if $done (i32.gt_u (local.get $i) (local.get $k)))
+      (i32.store (i32.const 0x00030000) (local.get $i))
+      (local.set $acc (i32.add (local.get $acc)
+        (call $invoke (i32.const 0x00020000) (i32.const 20) (i32.const 0x00030000) (i32.const 4))))
+      (local.set $i (i32.add (local.get $i) (i32.const 1)))
+      (br $loop)))
+    (local.get $acc)))
