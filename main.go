@@ -978,27 +978,26 @@ func appNamespace(urn string) string {
 // block — so a render cell whose intent text happens to miss the keyword list still
 // brings the app on-screen rather than leaving it invisible behind a default view.
 func isRenderCell(repo *manifest.Repository, desc *manifest.NodeDescriptor) bool {
-	if appgen.IsUISubsystem(desc.Semantics.FunctionalIntent) {
-		return true
-	}
+	// The GENOME is authoritative — a cell's entry decides what it is, not its prose
+	// intent (a compute cell whose intent mentions "motion"/"visual" must NOT be treated
+	// as a renderer, or it steals the canvas focus and the real renderer never shows).
 	if src, err := repo.Genotype(desc); err == nil {
-		if strings.Contains(src, "render-frame") || strings.Contains(src, "(draw") {
+		if strings.Contains(src, "render-frame") || strings.Contains(src, "(draw") || strings.Contains(src, "(scene") {
 			return true
 		}
-		// Forth render cells emit BARE draw words (no "(draw"): a trailing circle/rect/
-		// line terminal. Match them as whole words so a Forth renderer is recognized —
-		// otherwise, under the Forth default, no render cell is ever identified and the
-		// canvas focuses the wrong (compute) cell.
-		if strings.Contains(src, "(scene") {
-			return true // macro-WAT render body
-		}
+		// Forth render cells emit BARE draw words (no "(draw"): a trailing circle/rect/line.
 		for _, w := range []string{" circle", " rect", " line"} {
 			if strings.Contains(src, w) {
 				return true
 			}
 		}
+		// An explicit compute entry is DEFINITIVELY not a renderer, whatever the intent says.
+		if strings.Contains(src, "run-tick") {
+			return false
+		}
 	}
-	return false
+	// Only when the genome gives no signal (e.g. an empty scaffold) fall back to intent.
+	return appgen.IsUISubsystem(desc.Semantics.FunctionalIntent)
 }
 
 // challengeArchitectures asks, for each fully-complete grown application, whether
