@@ -113,7 +113,8 @@ func forthToSexpr(src string, layout Layout) (string, error) {
 				return "", err
 			}
 			writes = append(writes, [2]string{toks[i], e})
-		case t == "?":
+		case t == "?" || t == "if" || t == "if:":
+			// `?` is if/select; accept `if`/`if:` too — a common near-miss.
 			el, err1 := pop()
 			th, err2 := pop()
 			c, err3 := pop()
@@ -121,6 +122,8 @@ func forthToSexpr(src string, layout Layout) (string, error) {
 				return "", fmt.Errorf("forth: ? needs cond then else")
 			}
 			push("(if " + c + " " + th + " " + el + ")")
+		case forthColor(t) != "":
+			push(forthColor(t)) // #xRRGGBBAA, tolerating a missing 'x' (#RRGGBBAA)
 		case t == "clamp":
 			hi, err1 := pop()
 			lo, err2 := pop()
@@ -204,6 +207,28 @@ func forthToSexpr(src string, layout Layout) (string, error) {
 		term = "(let (" + strings.Join(parts, " ") + ") " + term + ")"
 	}
 	return "(cell c " + term + ")", nil
+}
+
+// forthColor normalizes a color literal to the canonical #xRRGGBBAA. It accepts the
+// canonical `#xRRGGBBAA` AND the common near-miss `#RRGGBBAA` (missing the `x`) that
+// models frequently emit — returning "" if the token is not a 6- or 8-digit hex color.
+func forthColor(t string) string {
+	if !strings.HasPrefix(t, "#") {
+		return ""
+	}
+	hex := t[1:]
+	if strings.HasPrefix(hex, "x") || strings.HasPrefix(hex, "X") {
+		hex = hex[1:]
+	}
+	if len(hex) != 6 && len(hex) != 8 {
+		return ""
+	}
+	for _, r := range hex {
+		if !((r >= '0' && r <= '9') || (r >= 'a' && r <= 'f') || (r >= 'A' && r <= 'F')) {
+			return ""
+		}
+	}
+	return "#x" + hex
 }
 
 // isForthLiteral reports whether a token is an int / color / bool literal.

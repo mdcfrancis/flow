@@ -205,6 +205,11 @@ func candidateWAT(resp string, layout flux.Layout) (wat, fluxSrc string, err err
 				}
 				return w, src, nil
 			}
+			// The model may also just emit raw WAT (module …); take it directly rather
+			// than feeding "(module" into the Forth parser as an unknown word.
+			if strings.Contains(resp, "(module") {
+				return extractWAT(resp), "", nil
+			}
 			if src := extractForth(resp); src != "" {
 				w, cerr := flux.CompileWith(flux.Forth{}, "cell", src, layout)
 				if cerr != nil {
