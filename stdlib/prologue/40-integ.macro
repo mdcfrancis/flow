@@ -1,0 +1,2 @@
+;; doc: advance position field p by velocity field v (p += v)
+(defmacro (integ p v) (set p (i32.add (get p) (get v))))

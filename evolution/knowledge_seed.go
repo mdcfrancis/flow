@@ -5,44 +5,8 @@ import (
 
 	"github.com/mdcfrancis/flow/compiler"
 	"github.com/mdcfrancis/flow/flux"
+	"github.com/mdcfrancis/flow/stdlib"
 	"github.com/mdcfrancis/flow/storage"
-)
-
-// seedDrawAtPositionWAT is a WORKED render cell: it reads ball_x (0xB0000) and ball_y
-// (0xB0004) from the shared contract and emits ONE circle record at those coordinates —
-// the exact "read a field, draw there" pattern the single-ball renderer kept missing. A
-// circle record is op=3 with a=cx, b=cy, c=radius; the 24-byte stream is [op,a,b,c,d,rgba].
-const seedDrawAtPositionWAT = `(module
-  (import "hdm:kernel/hardware-io" "shared-cluster-memory" (memory 100))
-  (func (export "render-frame") (param $base i32) (param $cap i32) (result i32)
-    local.get $base i32.const 3 i32.store
-    local.get $base i32.const 4 i32.add i32.const 0xB0000 i32.load i32.store
-    local.get $base i32.const 8 i32.add i32.const 0xB0004 i32.load i32.store
-    local.get $base i32.const 12 i32.add i32.const 8 i32.store
-    local.get $base i32.const 16 i32.add i32.const 0 i32.store
-    local.get $base i32.const 20 i32.add i32.const 0xFFCC33FF i32.store
-    i32.const 24))`
-
-// The macro-WAT worked examples live here as ordinary KB examples that
-// renderKnowledge lazily inlines — so the surface is single-sourced in the example
-// store, never embedded in a prompt string. They are validated with flux.Expand +
-// the assembler against a representative layout before being stored, exactly as the
-// raw-WAT seed example is assembler-checked.
-const (
-	seedRendererMacro = `(cell render-frame
-  (scene (circle (get ball_x) (get ball_y) (i32.const 8) (i32.const 0xFFCC33FF))))`
-	seedPhysicsMacro = `(cell run-tick
-  (local $nx i32)
-  (local $ny i32)
-  (local.set $nx (i32.add (get ball_x) (get vel_x)))
-  (local.set $ny (i32.add (get ball_y) (get vel_y)))
-  (if (i32.or (i32.lt_s (local.get $nx) (i32.const 0)) (i32.ge_s (local.get $nx) (get screen_w)))
-    (then (set vel_x (i32.sub (i32.const 0) (get vel_x)))))
-  (if (i32.or (i32.lt_s (local.get $ny) (i32.const 0)) (i32.ge_s (local.get $ny) (get screen_h)))
-    (then (set vel_y (i32.sub (i32.const 0) (get vel_y)))))
-  (set ball_x (local.get $nx))
-  (set ball_y (local.get $ny))
-  (i32.const 0))`
 )
 
 // seedMacroLayout is a representative field layout used ONLY to expand + assemble the
@@ -138,43 +102,29 @@ func SeedKnowledge(ledger *storage.LedgerEngine) {
 		_ = AddDocument(ledger, d)
 	}
 	svc := compiler.NewCompilerService()
-	// Raw-WAT seed examples are assembler-checked; macro-WAT seed examples are
-	// flux.Expand-ed then assembler-checked. A seed that fails is skipped, never stored
-	// — the same discipline for both surfaces.
-	watExamples := []Example{
-		{Kind: "render", Entry: "render-frame", Semantics: "read ball_x and ball_y and draw a filled circle at that position",
-			Reads: []string{"ball_x", "ball_y"}, Tags: []string{"draw-at-position"},
-			WAT: seedDrawAtPositionWAT, Score: "seed", Provenance: "seed"},
-	}
-	macroExamples := []Example{
-		{Kind: "render", Entry: "render-frame", Lang: "flux",
-			Semantics: "read ball_x and ball_y and draw a filled circle at that position",
-			Reads:     []string{"ball_x", "ball_y"}, Tags: []string{"draw-at-position"},
-			WAT: seedRendererMacro, Score: "seed", Provenance: "seed"},
-		{Kind: "compute", Entry: "run-tick", Lang: "flux",
-			Semantics: "integrate position by velocity and reflect the velocity at the walls",
-			Reads:     []string{"ball_x", "ball_y", "vel_x", "vel_y", "screen_w", "screen_h"},
-			Writes:    []string{"ball_x", "ball_y", "vel_x", "vel_y"}, Tags: []string{"wall-bounce"},
-			WAT: seedPhysicsMacro, Score: "seed", Provenance: "seed"},
-	}
+	// Seed examples are loaded from the embedded stdlib/examples source files. A raw-WAT
+	// (.wat) example is assembler-checked; a macro-WAT (.macro) example is flux.Expand-ed
+	// against a representative layout, then assembler-checked. A seed that fails is
+	// skipped, never stored — the same discipline for both surfaces.
 	kept := 0
-	for _, e := range watExamples {
-		if art, err := svc.CompileGenotype(e.WAT); err != nil || art == nil || !art.SyntaxPassed {
-			log.Printf("[DOC] seed example %q skipped (WAT did not assemble)", e.Semantics)
-			continue
+	for _, se := range stdlib.Examples() {
+		e := Example{
+			Kind: se.Kind, Entry: se.Entry, Semantics: se.Semantics,
+			Reads: se.Reads, Writes: se.Writes, Tags: se.Tags,
+			WAT: se.Src, Score: "seed", Provenance: "seed",
 		}
-		if ok, _ := AddExample(ledger, e); ok {
-			kept++
+		wat := se.Src
+		if se.IsMacro {
+			e.Lang = "flux" // macro-WAT examples are retrieved for the macro surface
+			w, err := flux.Expand(se.Src, seedMacroLayout)
+			if err != nil {
+				log.Printf("[DOC] macro seed example %q skipped (did not expand): %v", e.Semantics, err)
+				continue
+			}
+			wat = w
 		}
-	}
-	for _, e := range macroExamples {
-		wat, err := flux.Expand(e.WAT, seedMacroLayout)
-		if err != nil {
-			log.Printf("[DOC] macro seed example %q skipped (did not expand): %v", e.Semantics, err)
-			continue
-		}
-		if art, aerr := svc.CompileGenotype(wat); aerr != nil || art == nil || !art.SyntaxPassed {
-			log.Printf("[DOC] macro seed example %q skipped (expanded WAT did not assemble)", e.Semantics)
+		if art, err := svc.CompileGenotype(wat); err != nil || art == nil || !art.SyntaxPassed {
+			log.Printf("[DOC] seed example %q skipped (did not assemble)", e.Semantics)
 			continue
 		}
 		if ok, _ := AddExample(ledger, e); ok {

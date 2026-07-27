@@ -1,0 +1,18 @@
+;; kind: compute
+;; entry: run-tick
+;; semantics: integrate position by velocity and reflect the velocity at the walls
+;; reads: ball_x, ball_y, vel_x, vel_y, screen_w, screen_h
+;; writes: ball_x, ball_y, vel_x, vel_y
+;; tags: wall-bounce
+(cell run-tick
+  (local $nx i32)
+  (local $ny i32)
+  (local.set $nx (i32.add (get ball_x) (get vel_x)))
+  (local.set $ny (i32.add (get ball_y) (get vel_y)))
+  (if (i32.or (i32.lt_s (local.get $nx) (i32.const 0)) (i32.ge_s (local.get $nx) (get screen_w)))
+    (then (set vel_x (i32.sub (i32.const 0) (get vel_x)))))
+  (if (i32.or (i32.lt_s (local.get $ny) (i32.const 0)) (i32.ge_s (local.get $ny) (get screen_h)))
+    (then (set vel_y (i32.sub (i32.const 0) (get vel_y)))))
+  (set ball_x (local.get $nx))
+  (set ball_y (local.get $ny))
+  (i32.const 0))

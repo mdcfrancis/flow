@@ -1,0 +1,2 @@
+;; doc: x clamped into [lo, hi]
+(defmacro (clampi x lo hi) (maxi lo (mini x hi)))

@@ -1,0 +1,2 @@
+;; doc: the smaller of two i32 values
+(defmacro (mini a b) (select a b (i32.lt_s a b)))

@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/mdcfrancis/flow/flux"
+	"github.com/mdcfrancis/flow/stdlib"
 	"github.com/mdcfrancis/flow/storage"
 )
 
@@ -69,23 +70,23 @@ func SavePrologue(ledger *storage.LedgerEngine, ns string, ms []PrologueMacro) e
 }
 
 // DefaultPrologue is the built-in starter set of composite macros, available to every
-// cell. These are i32 helpers (game state is usually integer pixels); an app evolves
-// its own — including f32 variants — as cells define and commit them. Every default is
-// asserted to expand + assemble by TestDefaultPrologueAssembles.
+// cell. They are loaded from the embedded stdlib/prologue source files (not inline Go
+// strings); their names/params are read straight from the (defmacro …) body. These are
+// i32 helpers (game state is usually integer pixels); an app evolves its own — including
+// f32 variants — as cells define and commit them. Every default is asserted to
+// expand + assemble by TestDefaultPrologueAssembles.
 func DefaultPrologue() []PrologueMacro {
-	return []PrologueMacro{
-		{Name: "mini", Params: []string{"a", "b"}, Doc: "the smaller of two i32 values",
-			Src: "(defmacro (mini a b) (select a b (i32.lt_s a b)))"},
-		{Name: "maxi", Params: []string{"a", "b"}, Doc: "the larger of two i32 values",
-			Src: "(defmacro (maxi a b) (select a b (i32.gt_s a b)))"},
-		{Name: "clampi", Params: []string{"x", "lo", "hi"}, Doc: "x clamped into [lo, hi]",
-			Src: "(defmacro (clampi x lo hi) (maxi lo (mini x hi)))"},
-		{Name: "integ", Params: []string{"p", "v"}, Doc: "advance position field p by velocity field v (p += v)",
-			Src: "(defmacro (integ p v) (set p (i32.add (get p) (get v))))"},
-		{Name: "reflect", Params: []string{"v", "p", "lo", "hi"},
-			Doc: "if position field p is outside [lo, hi), negate velocity field v (a wall bounce)",
-			Src: "(defmacro (reflect v p lo hi) (if (i32.or (i32.lt_s (get p) lo) (i32.ge_s (get p) hi)) (then (set v (i32.sub (i32.const 0) (get v))))))"},
+	src := stdlib.Prologue()
+	out := make([]PrologueMacro, 0, len(src))
+	for _, m := range src {
+		defs, err := flux.ExtractDefmacros(m.Src)
+		if err != nil || len(defs) == 0 {
+			continue
+		}
+		d := defs[0]
+		out = append(out, PrologueMacro{Name: d.Name, Params: d.Params, Src: d.Src, Doc: m.Doc})
 	}
+	return out
 }
 
 // EffectivePrologue is the DEFAULT set overlaid with the app's stored macros: an app

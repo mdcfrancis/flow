@@ -1,0 +1,2 @@
+;; doc: the larger of two i32 values
+(defmacro (maxi a b) (select a b (i32.gt_s a b)))
