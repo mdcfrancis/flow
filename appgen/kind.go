@@ -207,9 +207,10 @@ func normalizeKinds(env *AppEnvelope) {
 // kindOf returns a subsystem's kind, reconciling on the fly if it was not
 // normalized (defensive — callers should rely on normalizeKinds having run).
 func kindOf(sub Subsystem) CellKind {
-	if k := CellKind(sub.Kind); k.valid() {
-		return k
-	}
+	// reconcileKind is the authority: it honors a valid declared kind ONLY when the
+	// ports agree, and corrects a hard contradiction (e.g. a cell DECLARED render that
+	// writes shared state — a writer, not a view — which otherwise gets a render-frame
+	// contract and is told to draw instead of initializing state).
 	k, _ := reconcileKind(sub)
 	return k
 }
