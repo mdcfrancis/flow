@@ -20,6 +20,7 @@ import (
 	"github.com/mdcfrancis/flow/appgen"
 	"github.com/mdcfrancis/flow/evolution"
 	"github.com/mdcfrancis/flow/execution"
+	"github.com/mdcfrancis/flow/macro"
 	"github.com/mdcfrancis/flow/status"
 )
 
@@ -744,7 +745,13 @@ func Serve(ctx context.Context, addr string, s Services) *http.Server {
 				return
 			}
 			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-			_, _ = io.WriteString(w, s.Flux(urn))
+			genome := s.Flux(urn)
+			// Pretty-print the s-expression genome (macro-WAT / WAT) for readability,
+			// preserving any leading draft marker/comment before the first form.
+			if i := strings.IndexByte(genome, '('); i >= 0 {
+				genome = genome[:i] + macro.Format(genome[i:])
+			}
+			_, _ = io.WriteString(w, genome)
 		})
 	}
 	if s.AppMap != nil {

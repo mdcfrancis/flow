@@ -58,6 +58,62 @@ func Expand(src string, fields map[string]Field) (string, error) {
 	return b.String(), nil
 }
 
+// Format pretty-prints an s-expression genome (macro-WAT or raw WAT) with indentation:
+// a form that fits on one line stays inline; a longer one breaks with its head on the
+// opening line and each argument on its own indented line. Non-s-expr input (a Forth
+// word stream) is returned unchanged, so it is safe to call on any stored genome.
+func Format(src string) string {
+	if !strings.HasPrefix(strings.TrimSpace(src), "(") {
+		return strings.TrimSpace(src) // not an s-expr (a Forth word stream / plain text)
+	}
+	nodes, err := parse(src)
+	if err != nil || len(nodes) == 0 {
+		return strings.TrimSpace(src)
+	}
+	var b strings.Builder
+	for i, n := range nodes {
+		if i > 0 {
+			b.WriteString("\n\n")
+		}
+		format(&b, n, 0)
+	}
+	return b.String()
+}
+
+const fmtWidth = 72
+
+func format(b *strings.Builder, n node, indent int) {
+	if n.isAtom() {
+		b.WriteString(n.atom)
+		return
+	}
+	if one := oneLine(n); len(one)+indent*2 <= fmtWidth {
+		b.WriteString(one)
+		return
+	}
+	pad := strings.Repeat("  ", indent+1)
+	b.WriteByte('(')
+	for i, k := range n.kids {
+		if i == 0 {
+			format(b, k, indent+1) // head stays on the opening line
+			continue
+		}
+		b.WriteByte('\n')
+		b.WriteString(pad)
+		format(b, k, indent+1)
+	}
+	b.WriteByte(')')
+}
+
+func oneLine(n node) string {
+	if n.isAtom() {
+		return n.atom
+	}
+	var b strings.Builder
+	serialize(&b, n, 0)
+	return b.String()
+}
+
 // node is an s-expression: an atom (leaf, kids==nil) or a list.
 type node struct {
 	atom string
