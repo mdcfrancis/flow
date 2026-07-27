@@ -34,6 +34,11 @@ func fluxSurfaceName() string {
 
 func fluxIsForth() bool { return fluxSurfaceName() == "forth" }
 
+// ActiveSurface returns the operational synthesis surface (Forth by default), for
+// callers outside the package — e.g. appgen seeds its no-op scaffold genome in this
+// surface so a cell's stored draft matches the surface the model is asked to author in.
+func ActiveSurface() flux.Surface { return activeSurface() }
+
 // activeSurface returns the flux.Surface the operational sieve currently authors in.
 func activeSurface() flux.Surface {
 	if fluxIsForth() {

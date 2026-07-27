@@ -81,17 +81,29 @@ func (g *Grower) seedNoopFlux(env *AppEnvelope, sub Subsystem) (src string, bc [
 	if layout == nil {
 		return "", nil, false
 	}
-	src, ok = noopFlux(sub, layout)
+	sexpr, ok := noopFlux(sub, layout)
 	if !ok {
 		return "", nil, false
 	}
-	wat, err := flux.Compile("cell", src, layout)
+	// Bytecode from the canonical s-expr (the Go backend is surface-invariant).
+	wat, err := flux.Compile("cell", sexpr, layout)
 	if err != nil {
 		return "", nil, false
 	}
 	art, err := g.sieve.CompileGenotype(wat)
 	if err != nil || art == nil || !art.SyntaxPassed {
 		return "", nil, false
+	}
+	// STORE the genome in the ACTIVE surface (Forth by default), so the seed is in the
+	// same surface the model is asked to author in — the synthesis loop then iterates on
+	// a same-surface draft instead of being shown s-expr while told to write Forth. The
+	// backend is identical either way; only the stored text changes. Fall back to the
+	// s-expr text if the round-trip render fails.
+	src = sexpr
+	if cell, rerr := (flux.SExpr{}).Read("seed", sexpr, layout); rerr == nil {
+		if rendered := evolution.ActiveSurface().Render(cell); strings.TrimSpace(rendered) != "" {
+			src = rendered
+		}
 	}
 	return src, art.Bytecode, true
 }
