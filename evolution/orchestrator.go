@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"os"
 	"strings"
 
 	"github.com/mdcfrancis/flow/codependency"
@@ -397,8 +398,45 @@ func (o *Orchestrator) ScoreCell(ctx context.Context, cellURN string) (passed, t
 	if err != nil {
 		return 0, 0, fmt.Errorf("load phenotype: %w", err)
 	}
-	p, t := ScoreSuite(ctx, phenotype, EntryPoint, suite, o.PayloadOffset, o.StateWindow, o.resolver())
+	p, t := ScoreSuite(ctx, phenotype, EntryPoint, suite, o.PayloadOffset, o.StateWindow, o.resolver(), o.maskFor(cellURN))
 	return p, t, nil
+}
+
+// maskFor returns the enforced shared-state boundary an app cell will RUN under —
+// the SAME ranges main.refreshMasks installs at runtime — so acceptance grades a
+// cell against the boundary it actually executes with. This closes the "static
+// ball" gap: a cell whose declared ports omit a field it must write/read no longer
+// commits green (graded unmasked) only to go static live; it fails, stalls, and its
+// boundary is re-evolved. Returns nil (grade unmasked) for a cell with no contract,
+// not yet in the app map, or when runtime enforcement is off — so grading always
+// mirrors whatever the runtime enforces (HDM_MASK / HDM_MASK_READS).
+func (o *Orchestrator) maskFor(cellURN string) *FieldMask {
+	if os.Getenv("HDM_MASK") == "0" {
+		return nil // runtime enforces nothing → grade unmasked, stay consistent
+	}
+	ns := AppNamespaceOf(cellURN)
+	if ns == "" {
+		return nil
+	}
+	ct := LoadContract(o.ledger, ns)
+	m := LoadAppMap(o.ledger, ns)
+	if ct == nil || m == nil {
+		return nil
+	}
+	var comp *ComponentMap
+	for i := range m.Components {
+		if m.Components[i].Identity == cellURN {
+			comp = &m.Components[i]
+			break
+		}
+	}
+	fm := BuildFieldMask(comp, ct)
+	// HDM_MASK_READS=0 leaves reads open at runtime (writes-only enforcement); mirror
+	// that here by dropping the poison (read-hide) side so grading matches.
+	if fm != nil && os.Getenv("HDM_MASK_READS") == "0" {
+		fm.Poison = nil
+	}
+	return fm
 }
 
 // ScenarioResult is one coordination scenario's read-only status, for inspection.
@@ -424,7 +462,7 @@ func (o *Orchestrator) ScenarioFlags(ctx context.Context, cellURN string) ([]Sce
 	if err != nil {
 		return nil, err
 	}
-	flags := ScenarioPassFlags(ctx, phenotype, suite.Scenarios, o.PayloadOffset, o.StateWindow, o.resolver())
+	flags := ScenarioPassFlags(ctx, phenotype, suite.Scenarios, o.PayloadOffset, o.StateWindow, o.resolver(), o.maskFor(cellURN))
 	out := make([]ScenarioResult, 0, len(suite.Scenarios))
 	for i, s := range suite.Scenarios {
 		pass := i < len(flags) && flags[i]
@@ -1061,8 +1099,11 @@ func (o *Orchestrator) authoringLineage(urn, ns string, contract *EntryContract,
 // back to the optimization gauntlet so a crude cell can still be trimmed.
 func (o *Orchestrator) acceptanceFrame(ctx context.Context, fr *FrameResult, baseRoot, targetURN string, desc *manifest.NodeDescriptor, baseline []byte, sieve *SieveOutcome, suite *AcceptanceSuite, contract *EntryContract) (*FrameResult, error) {
 	candidate := sieve.Artifact.Bytecode
-	basePass, total := ScoreSuite(ctx, baseline, contract.Name, suite, o.PayloadOffset, o.StateWindow, o.resolver())
-	candPass, _ := ScoreSuite(ctx, candidate, contract.Name, suite, o.PayloadOffset, o.StateWindow, o.resolver())
+	// Grade baseline and candidate under the boundary the cell RUNS under, so a cell
+	// whose declared ports are too tight cannot commit green and then go static live.
+	mask := o.maskFor(targetURN)
+	basePass, total := ScoreSuite(ctx, baseline, contract.Name, suite, o.PayloadOffset, o.StateWindow, o.resolver(), mask)
+	candPass, _ := ScoreSuite(ctx, candidate, contract.Name, suite, o.PayloadOffset, o.StateWindow, o.resolver(), mask)
 	fr.AcceptBase, fr.AcceptCand, fr.AcceptTotal = basePass, candPass, total
 	// DFS iteration: keep the model's latest NON-REGRESSING Flux as the working
 	// draft, so the next frame refines THIS candidate (goes deeper) instead of
@@ -1075,7 +1116,7 @@ func (o *Orchestrator) acceptanceFrame(ctx context.Context, fr *FrameResult, bas
 	// log WHY each scenario failed — the concrete check + expected vs actual — so a
 	// stall is traceable to a cause instead of a bare score.
 	if acceptDebug && candPass <= basePass {
-		for _, r := range SuiteFailureReasons(ctx, candidate, contract.Name, suite, o.PayloadOffset, o.StateWindow, o.resolver()) {
+		for _, r := range SuiteFailureReasons(ctx, candidate, contract.Name, suite, o.PayloadOffset, o.StateWindow, o.resolver(), mask) {
 			log.Printf("[ACCEPT] %s %d/%d: %s", shortName(targetURN), candPass, total, r)
 		}
 	}

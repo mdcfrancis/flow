@@ -160,7 +160,7 @@ func decodeDrawStream(buf []byte) []DrawRecord {
 // the entry Steps times (state persists across calls, as in production), and —
 // for render-frame — captures the decoded draw stream after each step. Guest
 // traps and host panics are recovered into an error.
-func execScenario(ctx context.Context, bytecode []byte, sc Scenario, payloadOffset, stateWindow uint32, resolver CellResolver) (results []uint64, frames [][]DrawRecord, reads, pre [][]uint32, traj [][]uint32, err error) {
+func execScenario(ctx context.Context, bytecode []byte, sc Scenario, payloadOffset, stateWindow uint32, resolver CellResolver, mask ...*FieldMask) (results []uint64, frames [][]DrawRecord, reads, pre [][]uint32, traj [][]uint32, err error) {
 	defer func() {
 		if r := recover(); r != nil {
 			err = fmt.Errorf("scenario execution panic: %v", r)
@@ -235,8 +235,38 @@ func execScenario(ctx context.Context, bytecode []byte, sc Scenario, payloadOffs
 		traj[k] = append(traj[k], readWord(sc.Expect.Trajectory[k].At))
 	}
 
+	fm := firstMask(mask)
 	for i := 0; i < steps; i++ {
+		// BOUNDARY ENFORCEMENT (matches execTrampoline): before the step, snapshot the
+		// non-writable ranges and zero the hidden (poison) ranges so an undeclared read
+		// sees 0; after the step, restore the snapshot so a write outside the declared
+		// ports does not persist. The trajectory/reads captured below therefore reflect
+		// the SAME boundary the cell runs under live — a too-tight-ported cell reads as
+		// static here and fails, instead of committing green and going static live.
+		var maskSaved [][]byte
+		if fm != nil {
+			maskSaved = make([][]byte, len(fm.Revert))
+			for k, r := range fm.Revert {
+				if b, ok := mem.Read(r[0], r[1]); ok {
+					c := make([]byte, len(b))
+					copy(c, b)
+					maskSaved[k] = c
+				}
+			}
+			for _, p := range fm.Poison {
+				if b, ok := mem.Read(p[0], p[1]); ok { // live view — zero in place
+					for j := range b {
+						b[j] = 0
+					}
+				}
+			}
+		}
 		out, cerr := fn.Call(ctx, args...)
+		for k, r := range fm.revertRanges() { // restore non-writable fields (undo stray writes)
+			if k < len(maskSaved) && maskSaved[k] != nil {
+				mem.Write(r[0], maskSaved[k])
+			}
+		}
 		if cerr != nil {
 			return nil, nil, nil, nil, nil, fmt.Errorf("scenario trap on step %d: %w", i, cerr)
 		}
@@ -264,8 +294,8 @@ func execScenario(ctx context.Context, bytecode []byte, sc Scenario, payloadOffs
 // RunTrajectory runs a scenario and returns the captured per-step value sequence
 // for each of its Trajectory entries — the observed PATH of each tracked field,
 // for inspection or LLM judgment. One inner slice per Trajectory entry, in order.
-func RunTrajectory(ctx context.Context, phenotype []byte, sc Scenario, payloadOffset, stateWindow uint32, resolver CellResolver) ([][]uint32, error) {
-	_, _, _, _, traj, err := execScenario(ctx, phenotype, sc, payloadOffset, stateWindow, resolver)
+func RunTrajectory(ctx context.Context, phenotype []byte, sc Scenario, payloadOffset, stateWindow uint32, resolver CellResolver, mask ...*FieldMask) ([][]uint32, error) {
+	_, _, _, _, traj, err := execScenario(ctx, phenotype, sc, payloadOffset, stateWindow, resolver, mask...)
 	return traj, err
 }
 
@@ -513,10 +543,10 @@ func centroid(recs []DrawRecord) (x, y float64) {
 // ScenarioPassFlags reports, per scenario, whether it passes — so callers can
 // derive what a cell is VERIFIED to do (the application map) rather than what it
 // claims. A scenario whose execution traps is a failure.
-func ScenarioPassFlags(ctx context.Context, phenotype []byte, scenarios []Scenario, payloadOffset, stateWindow uint32, resolver CellResolver) []bool {
+func ScenarioPassFlags(ctx context.Context, phenotype []byte, scenarios []Scenario, payloadOffset, stateWindow uint32, resolver CellResolver, mask ...*FieldMask) []bool {
 	out := make([]bool, len(scenarios))
 	for i, sc := range scenarios {
-		results, frames, reads, pre, traj, err := execScenario(ctx, phenotype, sc, payloadOffset, stateWindow, resolver)
+		results, frames, reads, pre, traj, err := execScenario(ctx, phenotype, sc, payloadOffset, stateWindow, resolver, mask...)
 		if err != nil {
 			continue
 		}
@@ -527,10 +557,10 @@ func ScenarioPassFlags(ctx context.Context, phenotype []byte, scenarios []Scenar
 
 // ScenarioScore runs each scenario against the phenotype and counts how many
 // pass. A scenario whose execution traps counts as a failure.
-func ScenarioScore(ctx context.Context, phenotype []byte, scenarios []Scenario, payloadOffset, stateWindow uint32, resolver CellResolver) (passed, total int) {
+func ScenarioScore(ctx context.Context, phenotype []byte, scenarios []Scenario, payloadOffset, stateWindow uint32, resolver CellResolver, mask ...*FieldMask) (passed, total int) {
 	total = len(scenarios)
 	for _, sc := range scenarios {
-		results, frames, reads, pre, traj, err := execScenario(ctx, phenotype, sc, payloadOffset, stateWindow, resolver)
+		results, frames, reads, pre, traj, err := execScenario(ctx, phenotype, sc, payloadOffset, stateWindow, resolver, mask...)
 		if err != nil {
 			continue
 		}
@@ -545,11 +575,14 @@ func ScenarioScore(ctx context.Context, phenotype []byte, scenarios []Scenario, 
 // behavioral scenarios in a suite, returning the combined pass/total. This is
 // the single scorer the orchestrator drives so UI (draw-stream) behavior and
 // compute (int-in/int-out) behavior are graded uniformly.
-func ScoreSuite(ctx context.Context, phenotype []byte, entry string, suite *AcceptanceSuite, payloadOffset, stateWindow uint32, resolver CellResolver) (passed, total int) {
+func ScoreSuite(ctx context.Context, phenotype []byte, entry string, suite *AcceptanceSuite, payloadOffset, stateWindow uint32, resolver CellResolver, mask ...*FieldMask) (passed, total int) {
 	if suite == nil {
 		return 0, 0
 	}
+	// Scalar acceptance tests are pure payload int→int transforms that don't persist
+	// shared state, so the boundary mask (which governs contract fields) does not
+	// apply to them — only the behavioral scenarios are graded under the mask.
 	tp, tt := AcceptanceScore(ctx, phenotype, entry, suite, payloadOffset, stateWindow, resolver)
-	sp, st := ScenarioScore(ctx, phenotype, suite.Scenarios, payloadOffset, stateWindow, resolver)
+	sp, st := ScenarioScore(ctx, phenotype, suite.Scenarios, payloadOffset, stateWindow, resolver, mask...)
 	return tp + sp, tt + st
 }

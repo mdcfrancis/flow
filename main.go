@@ -1828,37 +1828,15 @@ func (fs *frameSkip) shouldRun(ns, urn, phenoHash string, bytecode []byte, frame
 // declares is permitted; everything else is hidden (reads) or undone (writes). "HMI
 // input" is a declared read of the input window, not a contract field, so it is never a
 // poison target. Returns nil,nil if there are no contract fields to govern.
+// buildMasks derives a cell's runtime read/write mask (poison/revert ranges) from
+// its declared ports + the contract. It delegates to evolution.BuildFieldMask so the
+// live runtime and acceptance grading (o.maskFor) enforce the IDENTICAL boundary —
+// one source of truth. Returns nil,nil when there is nothing to enforce.
 func buildMasks(comp *evolution.ComponentMap, ct *evolution.AppContract) (poison, revert [][2]uint32) {
-	if comp == nil || ct == nil {
-		return nil, nil
+	if m := evolution.BuildFieldMask(comp, ct); m != nil {
+		return m.Poison, m.Revert
 	}
-	readable := map[string]bool{}
-	for _, f := range comp.DeclaredReads { // EXPLICIT declarations only
-		readable[strings.ToLower(f)] = true
-	}
-	writable := map[string]bool{}
-	for _, f := range comp.DeclaredWrites {
-		writable[strings.ToLower(f)] = true
-	}
-	for _, f := range ct.Fields {
-		off, n, ok := ct.FieldRange(f.Name)
-		if !ok || n <= 0 {
-			continue
-		}
-		name := strings.ToLower(f.Name)
-		r := [2]uint32{uint32(off), uint32(n)}
-		if !writable[name] {
-			revert = append(revert, r)
-			// Poison ONLY a field the cell can neither read nor write. A field it may
-			// write is left alone: zeroing it and then not rewriting it that tick would
-			// leak a 0 (poison isn't restored for writable fields since they're not in
-			// revert). This keeps poison ⊆ revert, so every hidden field is restored.
-			if !readable[name] {
-				poison = append(poison, r)
-			}
-		}
-	}
-	return poison, revert
+	return nil, nil
 }
 
 // refreshMasks registers a deny-by-default read/write mask for EVERY application cell
@@ -2831,11 +2809,13 @@ func main() {
 	// Deny-by-default read/write masks: a cell may only touch shared-state fields it
 	// EXPLICITLY declared, enforced in execTrampoline on every live path. A clean
 	// same-app A/B (toggling masks on a fixed, converged Mandelbrot via /mask) confirmed
-	// full read+write enforcement keeps the compute correct — the flips-to-0 seen in
-	// fresh grows were grow variance + evolution churn during BUILDING, not the masks;
-	// acceptance/scoring runs unmasked in a shadow sandbox, so evolution converges
-	// regardless of transient live-state masking. HDM_MASK=0 disables all enforcement;
-	// HDM_MASK_READS=0 keeps writes enforced but leaves reads open.
+	// full read+write enforcement keeps the compute correct. Acceptance/scoring now grades
+	// under the SAME boundary (o.maskFor feeds execScenario the identical ranges buildMasks
+	// installs here), so a cell whose declared ports are too tight FAILS acceptance and
+	// stalls — triggering boundary re-evolution — instead of committing green and then
+	// going static live. HDM_MASK=0 disables all enforcement (acceptance grades unmasked to
+	// match); HDM_MASK_READS=0 keeps writes enforced but leaves reads open (acceptance drops
+	// the read-hide side too).
 	denyReads := os.Getenv("HDM_MASK_READS") != "0"
 	hypervisor.SetMasksEnabled(os.Getenv("HDM_MASK") != "0")
 	refreshMasks(hypervisor, repo, ledger, registry, denyReads)
