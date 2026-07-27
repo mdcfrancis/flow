@@ -14,6 +14,7 @@ import (
 	"github.com/mdcfrancis/flow/flux"
 	"github.com/mdcfrancis/flow/inference"
 	"github.com/mdcfrancis/flow/manifest"
+	"github.com/mdcfrancis/flow/stdlib"
 	"github.com/mdcfrancis/flow/storage"
 	"github.com/mdcfrancis/flow/tapes"
 )
@@ -95,23 +96,11 @@ No prose, no markdown fences, no commentary.
 // style the hand-written cells compile with, so the model has a concrete,
 // parseable structure to imitate — directly targeting the "invalid WAT" failure
 // where a model can't balance parens. A test asserts they compile.
-const exampleRunTickWAT = `(module
-  (import "hdm:kernel/hardware-io" "shared-cluster-memory" (memory 100))
-  (func (export "run-tick") (param $ptr i32) (param $len i32) (result i32)
-    local.get $ptr i32.load8_u))`
+var exampleRunTickWAT = stdlib.MustCell("example-run-tick")
 
-const exampleRenderFrameWAT = `(module
-  (import "hdm:kernel/hardware-io" "shared-cluster-memory" (memory 100))
-  (func (export "render-frame") (param $base i32) (param $cap i32) (result i32)
-    local.get $base i32.const 257 i32.store
-    local.get $base i32.const 4 i32.add i32.const 20 i32.store
-    local.get $base i32.const 8 i32.add i32.const 30 i32.store
-    local.get $base i32.const 12 i32.add i32.const 8 i32.store
-    local.get $base i32.const 16 i32.add i32.const 8 i32.store
-    local.get $base i32.const 20 i32.add i32.const 0x33FF66FF i32.store
-    i32.const 24))`
+var exampleRenderFrameWAT = stdlib.MustCell("example-render-frame")
 
-const buildExamples = `
+var buildExamples = `
 WORKED EXAMPLES — valid WAT in the exact style to imitate (linear/stack form,
 balanced parens, one function). Match this structure:
 
@@ -127,7 +116,7 @@ UI cell (render-frame) — draws one rect on layer 1 (op=(layer<<8)|1=257) into 
 // Unlike the compass, it explicitly permits changing behavior to satisfy the
 // acceptance checks — that is the whole point of building. It is entry-agnostic:
 // the cell may export run-tick (compute) or render-frame (UI).
-const DefaultBuildPrompt = `SYSTEM ROLE: HDM BUILDER.
+var DefaultBuildPrompt = `SYSTEM ROLE: HDM BUILDER.
 You are given a cell's PLAN (the design to implement), the system it is part of,
 its current WAT genotype, and its ACCEPTANCE CHECKS. IMPLEMENT THE PLAN: write the
 cell's algorithm exactly as the plan's steps describe, reading and writing the

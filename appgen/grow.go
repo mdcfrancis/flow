@@ -18,6 +18,7 @@ import (
 	"github.com/mdcfrancis/flow/execution"
 	"github.com/mdcfrancis/flow/inference"
 	"github.com/mdcfrancis/flow/manifest"
+	"github.com/mdcfrancis/flow/stdlib"
 	"github.com/mdcfrancis/flow/storage"
 )
 
@@ -255,9 +256,7 @@ func (g *Grower) leafScenarios(ctx context.Context, sub Subsystem) *evolution.Ac
 // fallbackSkeleton is a minimal valid genesis cell used when the model cannot
 // produce a compilable skeleton — the cell exists (crude, high-energy) so the
 // annealing loop can improve it later.
-const fallbackSkeleton = `(module
-  (import "hdm:kernel/hardware-io" "shared-cluster-memory" (memory 100))
-  (func (export "run-tick") (param i32 i32) (result i32) i32.const 0))`
+var fallbackSkeleton = stdlib.MustCell("fallback-compute")
 
 // Grower runs the growth pipeline against a ledger and cognitive engine.
 type Grower struct {
@@ -969,16 +968,7 @@ Requirements:
 
 // uiFallbackSkeleton draws a single placeholder rectangle so a UI subsystem
 // renders something (not a blank canvas) even if genesis synthesis fails.
-const uiFallbackSkeleton = `(module
-  (import "hdm:kernel/hardware-io" "shared-cluster-memory" (memory 100))
-  (func (export "render-frame") (param $base i32) (param $cap i32) (result i32)
-    local.get $base i32.const 1 i32.store
-    local.get $base i32.const 4 i32.add i32.const 20 i32.store
-    local.get $base i32.const 8 i32.add i32.const 20 i32.store
-    local.get $base i32.const 12 i32.add i32.const 80 i32.store
-    local.get $base i32.const 16 i32.add i32.const 80 i32.store
-    local.get $base i32.const 20 i32.add i32.const 0x3A6EA5FF i32.store
-    i32.const 24))`
+var uiFallbackSkeleton = stdlib.MustCell("fallback-render")
 
 // IsUISubsystem is the LIVE-CELL role heuristic: it guesses whether a running
 // cell renders, from its semantic-intent text. It is the fallback used at runtime
