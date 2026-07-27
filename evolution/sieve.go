@@ -100,7 +100,7 @@ func RunSieve(ctx context.Context, model Reasoner, systemPrompt, seedContext str
 	if len(contract) > 0 {
 		want = contract[0]
 	}
-	return runSieve(ctx, model, systemPrompt, seedContext, maxIters, nil, want)
+	return runSieve(ctx, model, systemPrompt, seedContext, maxIters, nil, "", want)
 }
 
 // RunSieveWithLayout is the Flux-aware inner loop: given a shared-state field
@@ -108,10 +108,16 @@ func RunSieve(ctx context.Context, model Reasoner, systemPrompt, seedContext str
 // here) as well as one that emits raw WAT — both feed the identical downstream
 // verification. A nil layout is exactly RunSieve.
 func RunSieveWithLayout(ctx context.Context, model Reasoner, systemPrompt, seedContext string, maxIters int, layout flux.Layout, want *EntryContract) (*SieveOutcome, error) {
-	return runSieve(ctx, model, systemPrompt, seedContext, maxIters, layout, want)
+	return runSieve(ctx, model, systemPrompt, seedContext, maxIters, layout, "", want)
 }
 
-func runSieve(ctx context.Context, model Reasoner, systemPrompt, seedContext string, maxIters int, layout flux.Layout, want *EntryContract) (*SieveOutcome, error) {
+// RunSieveWithPrologue is RunSieveWithLayout plus an application prologue (macro
+// definitions) prepended to the model's program before expansion.
+func RunSieveWithPrologue(ctx context.Context, model Reasoner, systemPrompt, seedContext string, maxIters int, layout flux.Layout, prologue string, want *EntryContract) (*SieveOutcome, error) {
+	return runSieve(ctx, model, systemPrompt, seedContext, maxIters, layout, prologue, want)
+}
+
+func runSieve(ctx context.Context, model Reasoner, systemPrompt, seedContext string, maxIters int, layout flux.Layout, prologue string, want *EntryContract) (*SieveOutcome, error) {
 	if maxIters < 1 {
 		maxIters = 1
 	}
@@ -125,7 +131,7 @@ func runSieve(ctx context.Context, model Reasoner, systemPrompt, seedContext str
 		if err != nil {
 			return nil, fmt.Errorf("sieve iteration %d: reasoning invocation failed: %w", i, err)
 		}
-		wat, fluxSrc, ferr := candidateWAT(resp, layout)
+		wat, fluxSrc, ferr := candidateWAT(resp, layout, prologue)
 		if ferr != nil {
 			// The model authored Flux that did not compile — feed the semantic
 			// error back. No assembler artifact exists this round.

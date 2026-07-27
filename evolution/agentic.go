@@ -40,7 +40,7 @@ const watDirectPreamble = `Author the cell and reply with ONLY the complete, cor
 // analogue of the agentic loop, so a model that cannot call flux_check still self-
 // corrects its near-misses. Returns a compiling response as soon as one is produced,
 // else the last attempt (the caller's verification then reports its error).
-func authorWithCorrection(ctx context.Context, model ToolReasoner, cs *compiler.CompilerService, systemPrompt, seed string, layout flux.Layout, maxSteps int) (string, error) {
+func authorWithCorrection(ctx context.Context, model ToolReasoner, cs *compiler.CompilerService, systemPrompt, seed string, layout flux.Layout, prologue string, maxSteps int) (string, error) {
 	if maxSteps < 1 {
 		maxSteps = 1
 	}
@@ -51,7 +51,7 @@ func authorWithCorrection(ctx context.Context, model ToolReasoner, cs *compiler.
 			return last, err
 		}
 		last = resp
-		wat, _, ferr := candidateWAT(resp, layout)
+		wat, _, ferr := candidateWAT(resp, layout, prologue)
 		if ferr == nil {
 			if art, cerr := cs.CompileGenotype(wat); cerr == nil && art != nil && art.SyntaxPassed {
 				return resp, nil // compiles cleanly — done
@@ -103,7 +103,7 @@ ONLY the complete (cell …) program — no prose, no explanation, no markdown f
 // compile-check a draft) while it works. The final WAT is extracted, assembled, and
 // entry-checked exactly like RunSieve, so its outcome plugs into the same verification
 // gates unchanged — the tools inform synthesis, they never bypass verification.
-func RunAgenticSieve(ctx context.Context, model ToolReasoner, ledger *storage.LedgerEngine, systemPrompt, seedContext, kind, intent string, layout flux.Layout, contract *EntryContract) (*SieveOutcome, error) {
+func RunAgenticSieve(ctx context.Context, model ToolReasoner, ledger *storage.LedgerEngine, systemPrompt, seedContext, kind, intent string, layout flux.Layout, prologue string, contract *EntryContract) (*SieveOutcome, error) {
 	cs := compiler.NewCompilerService()
 	tools, exec := buildAgenticTools(ledger, cs, kind, intent, layout)
 	// A backend WITHOUT tool support (Gemini) must get a DIRECT preamble — a tool-USING
@@ -134,14 +134,14 @@ func RunAgenticSieve(ctx context.Context, model ToolReasoner, ledger *storage.Le
 		// Macro-WAT and tool-less backends both author in ONE shot. Drive a RE-PROMPT
 		// correction loop: feed the exact expand/compile error back and ask for a
 		// corrected program, up to agenticMaxSteps times.
-		resp, err = authorWithCorrection(ctx, model, cs, preamble+systemPrompt, seedContext, layout, agenticMaxSteps)
+		resp, err = authorWithCorrection(ctx, model, cs, preamble+systemPrompt, seedContext, layout, prologue, agenticMaxSteps)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("agentic sieve: %w", err)
 	}
 	// With a layout the model answered with macro-WAT (a (cell …) form), expanded to
 	// raw WAT here — the same path as the standard sieve.
-	wat, fluxSrc, ferr := candidateWAT(resp, layout)
+	wat, fluxSrc, ferr := candidateWAT(resp, layout, prologue)
 	if ferr != nil {
 		taxoWAT(fluxSrc, nil, ferr.Error())
 		return &SieveOutcome{WAT: fluxSrc, Raw: resp},

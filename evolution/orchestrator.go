@@ -516,9 +516,15 @@ func (o *Orchestrator) synthesize(ctx context.Context, targetURN, intent, sysPro
 func (o *Orchestrator) synthesizeInner(ctx context.Context, targetURN, intent, sysPrompt, seed string, contract *EntryContract) (*SieveOutcome, error) {
 	m := o.sieveModel(targetURN)
 	layout := o.fluxLayoutFor(targetURN)
-	// Flux cells are authored test-driven and agentic BY DEFAULT (the model checks
-	// and RUNS its cell via tools) — not only on escalation. Raw-WAT cells stay
-	// agentic only after they stall, as before.
+	// The application prologue (default + app-harvested macros) is prepended to the
+	// model's program before expansion, so a cell can CALL (reflect …)/(clampi …) as a
+	// primitive. Only meaningful for a macro-WAT cell (one with a contract layout).
+	prologue := ""
+	if layout != nil {
+		prologue = PrologueText(EffectivePrologue(o.ledger, AppNamespaceOf(targetURN)))
+	}
+	// Macro-WAT cells are authored agentic BY DEFAULT — not only on escalation. Raw-WAT
+	// cells stay agentic only after they stall, as before.
 	if layout != nil || o.escalation[targetURN] >= sieveEscalateThreshold {
 		if tr, ok := m.(ToolReasoner); ok {
 			kind := ""
@@ -526,14 +532,14 @@ func (o *Orchestrator) synthesizeInner(ctx context.Context, targetURN, intent, s
 				kind = "render"
 			}
 			if layout != nil {
-				log.Printf("[FLUX] %s — agentic Flux synthesis (flux_check + flux_run)", targetURN)
+				log.Printf("[FLUX] %s — agentic macro-WAT synthesis", targetURN)
 			} else {
 				log.Printf("[MODEL] %s — agentic synthesis (knowledge + compiler tools)", targetURN)
 			}
-			return RunAgenticSieve(ctx, tr, o.ledger, sysPrompt, seed, kind, intent, layout, contract)
+			return RunAgenticSieve(ctx, tr, o.ledger, sysPrompt, seed, kind, intent, layout, prologue, contract)
 		}
 	}
-	return RunSieveWithLayout(ctx, m, sysPrompt, seed, o.SieveMaxIters, layout, contract)
+	return RunSieveWithPrologue(ctx, m, sysPrompt, seed, o.SieveMaxIters, layout, prologue, contract)
 }
 
 func (o *Orchestrator) resolver() CellResolver {
@@ -1014,6 +1020,10 @@ func (o *Orchestrator) buildSeed(urn, intent, genotype string, contract *EntryCo
 		// Author in macro-WAT: the macro forms + the typed field list, and an explicit
 		// instruction to output only a (cell …) program.
 		b.WriteString(macroSeedBlock(contract, fluxLayout))
+		// The application prologue: the composite macros this cell may CALL as primitives
+		// (defaults + whatever sibling cells have already defined), so it reuses them
+		// instead of re-deriving the inline WAT.
+		b.WriteString(PrologueGuide(EffectivePrologue(o.ledger, ns)))
 		// DFS iteration: refine the model's latest working DRAFT (its most recent
 		// non-regressing attempt), not the last commit — so synthesis goes deeper on
 		// the candidate it was building instead of restarting each frame. Fall back to

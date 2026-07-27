@@ -193,16 +193,19 @@ func (o *Orchestrator) fluxLayoutFor(urn string) flux.Layout {
 // With a layout and a Flux (cell …) form present, it lowers Flux → WAT and marks
 // the source Flux; otherwise it extracts WAT as before. A Flux compile error is
 // returned so the loop can feed the semantic message back for repair.
-func candidateWAT(resp string, layout flux.Layout) (wat, fluxSrc string, err error) {
+func candidateWAT(resp string, layout flux.Layout, prologue string) (wat, fluxSrc string, err error) {
 	if layout != nil {
 		// Macro-WAT: the model wrote (cell …) with field macros; expand it against the
-		// contract to raw WAT. A bare (module …) passes straight through (flux.Expand
-		// leaves non-macro WAT untouched).
+		// contract to raw WAT. The application prologue (default + app-harvested macros)
+		// is prepended so a call to (reflect …)/(clampi …) resolves; the model may also
+		// define its own (defmacro …) inline. A bare (module …) passes straight through
+		// (flux.Expand leaves non-macro WAT untouched). fluxSrc is the model's own program
+		// (without the prologue) — the stored genome — so the prologue never bloats it.
 		src := extractMacroWAT(resp)
 		if src == "" {
 			return extractWAT(resp), "", nil
 		}
-		w, cerr := flux.Expand(src, layout)
+		w, cerr := flux.Expand(prologue+src, layout)
 		if cerr != nil {
 			return "", src, cerr
 		}
