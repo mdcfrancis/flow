@@ -40,9 +40,25 @@ func Expand(src string, fields Layout) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	out := make([]mnode, 0, len(nodes))
+	// First pass: collect any (defmacro …) definitions (an application prologue can be
+	// prepended as defmacro text, or a cell can define its own inline). They are removed
+	// from the output; only the (cell …)/(module …) forms remain.
+	macros := map[string]macroDef{}
+	body := make([]mnode, 0, len(nodes))
 	for _, n := range nodes {
-		r, err := rewrite(n, fields)
+		if n.head() == "defmacro" {
+			name, def, derr := parseDefmacro(n)
+			if derr != nil {
+				return "", derr
+			}
+			macros[name] = def
+			continue
+		}
+		body = append(body, n)
+	}
+	out := make([]mnode, 0, len(body))
+	for _, n := range body {
+		r, err := rewrite(n, fields, macros, 0)
 		if err != nil {
 			return "", err
 		}
@@ -56,6 +72,76 @@ func Expand(src string, fields Layout) (string, error) {
 		mserialize(&b, n, 0)
 	}
 	return b.String(), nil
+}
+
+// macroDef is a user-defined hygienic macro: its ordered parameter names and its
+// template body. A call (NAME arg…) is expanded by substituting each arg node for its
+// parameter atom throughout the template, then rewriting the result. v1 templates
+// introduce no (local …) bindings, so substitution is capture-free by construction.
+type macroDef struct {
+	params []string
+	body   mnode
+}
+
+// maxMacroDepth bounds nested user-macro expansion so a self-referential definition
+// cannot loop forever.
+const maxMacroDepth = 64
+
+// parseDefmacro reads (defmacro (NAME p1 p2 …) BODY): the signature list names the
+// macro and its parameters, BODY is the single template form. It rejects a template
+// that declares a (local …) — a v1 restriction that keeps expansion capture-free
+// (a macro that needs a temp would have to hoist it like (scene), a later extension).
+func parseDefmacro(n mnode) (string, macroDef, error) {
+	if len(n.kids) != 3 || !n.kids[1].list || len(n.kids[1].kids) == 0 || !n.kids[1].kids[0].isAtom() {
+		return "", macroDef{}, fmt.Errorf("(defmacro (NAME params…) BODY) is malformed")
+	}
+	sig := n.kids[1]
+	name := sig.kids[0].atom
+	params := make([]string, 0, len(sig.kids)-1)
+	for _, p := range sig.kids[1:] {
+		if !p.isAtom() {
+			return "", macroDef{}, fmt.Errorf("macro %q: parameters must be plain names", name)
+		}
+		params = append(params, p.atom)
+	}
+	body := n.kids[2]
+	if declaresLocal(body) {
+		return "", macroDef{}, fmt.Errorf("macro %q: templates may not declare (local …) (v1)", name)
+	}
+	return name, macroDef{params: params, body: body}, nil
+}
+
+// declaresLocal reports whether any node in the template is a (local …) declaration.
+func declaresLocal(n mnode) bool {
+	if n.isAtom() {
+		return false
+	}
+	if n.head() == "local" {
+		return true
+	}
+	for _, k := range n.kids {
+		if declaresLocal(k) {
+			return true
+		}
+	}
+	return false
+}
+
+// subst returns a copy of the template with each parameter atom replaced by the
+// argument node bound to it. A parameter may be substituted by a full sub-expression
+// (e.g. (get screen_w)), so substitution is node-level, not textual.
+func subst(n mnode, binding map[string]mnode) mnode {
+	if n.isAtom() {
+		if r, ok := binding[n.atom]; ok {
+			return r
+		}
+		return n
+	}
+	kids := make([]mnode, len(n.kids))
+	for i, k := range n.kids {
+		kids[i] = subst(k, binding)
+	}
+	return mnode{kids: kids, list: true}
 }
 
 // Format pretty-prints an s-expression genome (macro-WAT or raw WAT) with indentation:
@@ -134,13 +220,31 @@ func (n mnode) head() string {
 
 // rewrite expands macros bottom-up: children first (so a (set x (get y)) resolves its
 // inner (get) before the outer (set)), then the node itself if its head is a macro.
-func rewrite(n mnode, fields Layout) (mnode, error) {
+// A USER macro (one named in `macros`) is expanded top-down instead: its raw arguments
+// are substituted into its template, which is then rewritten — so a macro may itself
+// use (get)/(set)/other macros. depth bounds nested user-macro expansion.
+func rewrite(n mnode, fields Layout, macros map[string]macroDef, depth int) (mnode, error) {
 	if n.isAtom() {
 		return n, nil
 	}
+	// User-defined macro: substitute args into the template and rewrite the expansion.
+	if def, ok := macros[n.head()]; ok {
+		if depth >= maxMacroDepth {
+			return mnode{}, fmt.Errorf("macro %q expanded too deeply (recursive definition?)", n.head())
+		}
+		args := n.kids[1:]
+		if len(args) != len(def.params) {
+			return mnode{}, fmt.Errorf("macro %q takes %d argument(s), got %d", n.head(), len(def.params), len(args))
+		}
+		binding := make(map[string]mnode, len(def.params))
+		for i, p := range def.params {
+			binding[p] = args[i]
+		}
+		return rewrite(subst(def.body, binding), fields, macros, depth+1)
+	}
 	kids := make([]mnode, 0, len(n.kids))
 	for _, k := range n.kids {
-		r, err := rewrite(k, fields)
+		r, err := rewrite(k, fields, macros, depth)
 		if err != nil {
 			return mnode{}, err
 		}
