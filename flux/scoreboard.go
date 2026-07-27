@@ -278,9 +278,11 @@ operator. Values are Int, Bool, or Color; keep them straight:
             a comparison-then-two-Ints if:  cond iThen iElse ?  (-- Int)
     Bool  ← comparisons < <= > >= = != (Int Int -- Bool), and or (Bool Bool -- Bool), not (Bool -- Bool), true/false
     Color ← #xRRGGBBAA
+    Array ← read an element:  buf idx at  (buf Int -- Int), idx bounds-clamped
 LOCALS ARE TYPED: bind an Int result with ` + "`" + `=: i0` + "`" + ` (pool i0..i3); bind a Bool result with ` + "`" + `=: b0` + "`" + ` (pool b0..b3).
 Then use i0 where an Int is needed and b0 where a Bool is needed.
-- ` + "`" + `iexpr -> field` + "`" + ` writes an Int to a shared field.   For a view:  cx cy r #color circle (or rect/line).
+- ` + "`" + `iexpr -> field` + "`" + ` writes an Int to a shared field; ` + "`" + `val buf idx store` + "`" + ` writes an Int to element idx
+  of an ARRAY field.   For a view:  cx cy r #color circle (or rect/line).
 Keep every stack shallow — bind the moment a value is reused or an expression is >2 deep. Reads/writes are inferred.
 Example (physics: bind the ints and the wall test, then write):
     ball_x vel_x + =: i0

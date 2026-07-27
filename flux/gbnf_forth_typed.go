@@ -28,7 +28,7 @@ func gbnfForthTyped(layout Layout, kind CellKind, maxDepth int) string {
 	if maxDepth < 1 {
 		maxDepth = 1
 	}
-	var ifields, iwrites, cfields []string
+	var ifields, iwrites, cfields, bfields, bwrites []string
 	for n, f := range layout {
 		switch f.Type {
 		case TInt:
@@ -38,12 +38,25 @@ func gbnfForthTyped(layout Layout, kind CellKind, maxDepth int) string {
 			}
 		case TColor:
 			cfields = append(cfields, n)
+		case TBuffer:
+			bfields = append(bfields, n) // `buf idx at` reads an Int element
+			if !f.ReadOnly {
+				bwrites = append(bwrites, n) // `val buf idx store` writes one
+			}
 		}
 	}
 	sort.Strings(ifields)
 	sort.Strings(iwrites)
 	sort.Strings(cfields)
-	if len(ifields) == 0 || (kind == KindCompute && len(iwrites) == 0) {
+	sort.Strings(bfields)
+	sort.Strings(bwrites)
+	hasBuf := len(bfields) > 0
+	// Need an Int source to read (buffer reads count) and, for compute, something to
+	// write (a scalar field or a buffer element).
+	if len(ifields) == 0 && !hasBuf {
+		return ""
+	}
+	if kind == KindCompute && len(iwrites) == 0 && len(bwrites) == 0 {
 		return ""
 	}
 	alt := func(ns []string) string {
@@ -55,7 +68,15 @@ func gbnfForthTyped(layout Layout, kind CellKind, maxDepth int) string {
 	}
 
 	var b strings.Builder
-	fmt.Fprintf(&b, "ifield ::= %s\n", alt(ifields))
+	iatomParts := []string{}
+	if len(ifields) > 0 {
+		fmt.Fprintf(&b, "ifield ::= %s\n", alt(ifields))
+		iatomParts = append(iatomParts, "ifield")
+	}
+	if hasBuf {
+		fmt.Fprintf(&b, "buffield ::= %s\n", alt(bfields))
+	}
+	iatomParts = append(iatomParts, "ilocal", "int")
 	b.WriteString(`ilocal ::= "i0" | "i1" | "i2" | "i3"` + "\n")
 	b.WriteString(`blocal ::= "b0" | "b1" | "b2" | "b3"` + "\n")
 	b.WriteString(`int ::= "-"? [0-9] [0-9]{0,8}` + "\n")
@@ -66,7 +87,7 @@ func gbnfForthTyped(layout Layout, kind CellKind, maxDepth int) string {
 		catom = "color | cfield"
 	}
 	fmt.Fprintf(&b, "catom ::= %s\n", catom)
-	b.WriteString(`iatom ::= ifield | ilocal | int` + "\n")
+	fmt.Fprintf(&b, "iatom ::= %s\n", strings.Join(iatomParts, " | "))
 	b.WriteString(`batom ::= blocal | "true" | "false"` + "\n")
 	b.WriteString(`ibinop ::= "+" | "-" | "*" | "/" | "mod" | "min" | "max"` + "\n")
 	b.WriteString(`cmp ::= "<=" | ">=" | "<" | ">" | "=" | "!="` + "\n")
@@ -78,9 +99,14 @@ func gbnfForthTyped(layout Layout, kind CellKind, maxDepth int) string {
 	for d := 1; d <= maxDepth; d++ {
 		ip := fmt.Sprintf("iexpr%d", d-1)
 		bp := fmt.Sprintf("bexpr%d", d-1)
-		// Int: atom | binop | neg/abs | clamp | if(select) with a Bool cond.
-		fmt.Fprintf(&b, "iexpr%d ::= iatom | %s \" \" %s \" \" ibinop | %s \" neg\" | %s \" abs\" | %s \" \" %s \" \" %s \" clamp\" | %s \" \" %s \" \" %s \" ?\"\n",
-			d, ip, ip, ip, ip, ip, ip, ip, bp, ip, ip)
+		// A buffer READ is an Int: `buf idx at`, idx a shallower iexpr (bounds-clamped).
+		bufread := ""
+		if hasBuf {
+			bufread = fmt.Sprintf(" | buffield \" \" %s \" at\"", ip)
+		}
+		// Int: atom | binop | neg/abs | clamp | if(select) with a Bool cond | buffer read.
+		fmt.Fprintf(&b, "iexpr%d ::= iatom | %s \" \" %s \" \" ibinop | %s \" neg\" | %s \" abs\" | %s \" \" %s \" \" %s \" clamp\" | %s \" \" %s \" \" %s \" ?\"%s\n",
+			d, ip, ip, ip, ip, ip, ip, ip, bp, ip, ip, bufread)
 		// Bool: atom | comparison of Ints | and/or of Bools | not.
 		fmt.Fprintf(&b, "bexpr%d ::= batom | %s \" \" %s \" \" cmp | %s \" \" %s \" and\" | %s \" \" %s \" or\" | %s \" not\"\n",
 			d, ip, ip, bp, bp, bp, bp, bp)
@@ -96,9 +122,20 @@ func gbnfForthTyped(layout Layout, kind CellKind, maxDepth int) string {
 		b.WriteString(`prim ::= iexpr " " iexpr " " iexpr " " catom " circle" | iexpr " " iexpr " " iexpr " " iexpr " " catom " rect" | iexpr " " iexpr " " iexpr " " iexpr " " catom " line"` + "\n")
 		fmt.Fprintf(&b, "root ::= (binding \" \"){0,%d} prim (\" \" prim){0,%d}\n", gbnfMaxList, gbnfMaxList)
 	default: // compute
-		fmt.Fprintf(&b, "iwrite ::= %s\n", alt(iwrites))
-		b.WriteString(`write ::= iexpr " -> " iwrite` + "\n")
-		fmt.Fprintf(&b, "root ::= (binding \" \"){0,%d} write (\" \" write){0,%d}\n", gbnfMaxList, gbnfMaxList)
+		var stmts []string
+		if len(iwrites) > 0 {
+			fmt.Fprintf(&b, "iwrite ::= %s\n", alt(iwrites))
+			b.WriteString(`write ::= iexpr " -> " iwrite` + "\n")
+			stmts = append(stmts, "write")
+		}
+		if len(bwrites) > 0 {
+			// A buffer STORE terminal: `val buf idx store` writes an Int to element idx.
+			fmt.Fprintf(&b, "bwrite ::= %s\n", alt(bwrites))
+			b.WriteString(`bstore ::= iexpr " " bwrite " " iexpr " store"` + "\n")
+			stmts = append(stmts, "bstore")
+		}
+		fmt.Fprintf(&b, "stmt ::= %s\n", strings.Join(stmts, " | "))
+		fmt.Fprintf(&b, "root ::= (binding \" \"){0,%d} stmt (\" \" stmt){0,%d}\n", gbnfMaxList, gbnfMaxList)
 	}
 	return b.String()
 }
