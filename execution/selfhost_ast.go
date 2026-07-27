@@ -201,11 +201,9 @@ func (rm *RuntimeManager) RunSelfHostASTParse(toks []int32) (*ASTResult, error) 
 	wr(SelfHostASTNC, 0)
 	wr(SelfHostASTWC, 0)
 	wr(SelfHostASTLC, 0)
-	rm.reasoningNanos = 0
-	for range toks {
-		if _, _, _, err := rm.execTrampoline(SelfHostASTParserURN, SelfHostASTParserURN, "run-tick", 0, 0); err != nil {
-			return nil, fmt.Errorf("ast tick: %w", err)
-		}
+	// Parse the whole token stream in a single micro-tick burst (one tick per token).
+	if _, _, _, err := rm.burstLocked(SelfHostASTParserURN, SelfHostASTParserURN, len(toks)); err != nil {
+		return nil, fmt.Errorf("ast burst: %w", err)
 	}
 	nc, wc, lc := int(rd(SelfHostASTNC)), int(rd(SelfHostASTWC)), int(rd(SelfHostASTLC))
 	res := &ASTResult{NC: nc, WC: wc, LC: lc,

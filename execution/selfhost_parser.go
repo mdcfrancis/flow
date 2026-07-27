@@ -202,23 +202,19 @@ func (rm *RuntimeManager) RunSelfHostParse(text string) (int32, error) {
 	for i, ch := range []byte(text) {
 		wr(SelfHostSrc+uint32(i)*4, int32(ch))
 	}
-	// Stage 1: tokenize the whole input, one tick per byte.
+	// Stage 1: tokenize the whole input in a single micro-tick burst (one tick per byte,
+	// all within this frame — never capped at one byte per display frame).
 	wr(SelfHostLexCur, 0)
 	wr(SelfHostOutp, 0)
-	rm.reasoningNanos = 0
-	for range text {
-		if _, _, _, err := rm.execTrampoline(SelfHostParserURN, SelfHostLexerURN, "run-tick", 0, 0); err != nil {
-			return 0, fmt.Errorf("lex tick: %w", err)
-		}
+	if _, _, _, err := rm.burstLocked(SelfHostParserURN, SelfHostLexerURN, len(text)); err != nil {
+		return 0, fmt.Errorf("lex burst: %w", err)
 	}
 	nTok := int(rd(SelfHostOutp))
-	// Stage 2: shift-reduce the token stream, one tick per token.
+	// Stage 2: shift-reduce the token stream in one burst (one tick per token).
 	wr(SelfHostRpnCur, 0)
 	wr(SelfHostSp, 0)
-	for i := 0; i < nTok; i++ {
-		if _, _, _, err := rm.execTrampoline(SelfHostParserURN, SelfHostParserURN, "run-tick", 0, 0); err != nil {
-			return 0, fmt.Errorf("reduce tick: %w", err)
-		}
+	if _, _, _, err := rm.burstLocked(SelfHostParserURN, SelfHostParserURN, nTok); err != nil {
+		return 0, fmt.Errorf("reduce burst: %w", err)
 	}
 	return rd(SelfHostStk), nil
 }

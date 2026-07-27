@@ -2040,7 +2040,10 @@ func runFrameLoop(ctx context.Context, hyp *execution.RuntimeManager, repo *mani
 				// per-frame cost so an over-budget cell can be optimized to fit. The cell's
 				// enforced mask (if any) is applied inside execTrampoline automatically.
 				t0 := time.Now()
-				_, _, _, _ = hyp.TickAppCell("urn:hdm:sys:frame", u, desc.PhenotypeHash, bc)
+				// Micro-tick enrollment: a cell enrolled for N ticks/frame advances N
+				// internal steps in one burst (a parser draining a buffer, an integrator
+				// sub-stepping) instead of being capped at one step per display frame.
+				_, _, _, _ = hyp.TickAppCellN("urn:hdm:sys:frame", u, desc.PhenotypeHash, bc, hyp.MicroTicksFor(u))
 				budget.record(u, float64(time.Since(t0).Nanoseconds()))
 			}
 		}

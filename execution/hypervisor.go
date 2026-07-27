@@ -143,6 +143,10 @@ type RuntimeManager struct {
 	visionClient *inference.LocalModelClient
 	sharedMem    api.Memory
 	scratchNext  uint32
+	// microTicks enrols a cell to advance N run-ticks per scheduling slot (a MICRO-TICK
+	// burst) instead of one, so an iterative/stream cell (a parser, a sub-stepping
+	// integrator) is not capped at one step per display frame. Absent ⇒ one tick.
+	microTicks map[string]int
 	// Software paging (pages.go): physical private pages + the per-cell window mapping.
 	pages       []pageRec         // host-managed physical pages in the page zone
 	pageNext    uint32            // bump pointer within the page zone
@@ -803,6 +807,17 @@ func (rm *RuntimeManager) LoadCell(urn string, wasmBytecode []byte) error {
 // the freshly-loaded phenotype (hash + bytecode) it read from the manifest; nothing
 // is recompiled while the hash is unchanged.
 func (rm *RuntimeManager) TickAppCell(sourceURN, targetURN, phenotypeHash string, bytecode []byte) (res uint32, fuel uint64, tokens uint64, err error) {
+	return rm.TickAppCellN(sourceURN, targetURN, phenotypeHash, bytecode, 1)
+}
+
+// TickAppCellN runs a cell's run-tick n times in a SINGLE lock acquisition — a MICRO-TICK
+// BURST. It decouples a cell's internal step rate from the frame rate: an iterative or
+// stream cell (a parser consuming a token buffer, a physics integrator sub-stepping) can
+// advance many steps per scheduling slot instead of one per display frame. State persists
+// across the inner ticks exactly as it does across frames. Returns the LAST tick's result
+// and the SUMMED fuel/tokens; n<=1 behaves like a single tick. A trap on any inner tick
+// stops the burst and returns the error (the writes of the ticks before it persist).
+func (rm *RuntimeManager) TickAppCellN(sourceURN, targetURN, phenotypeHash string, bytecode []byte, n int) (res uint32, fuel uint64, tokens uint64, err error) {
 	rm.mu.Lock()
 	defer rm.mu.Unlock()
 	if rm.loadedHash == nil {
@@ -816,8 +831,51 @@ func (rm *RuntimeManager) TickAppCell(sourceURN, targetURN, phenotypeHash string
 		rm.cells[targetURN] = compiled
 		rm.loadedHash[targetURN] = phenotypeHash
 	}
-	rm.reasoningNanos = 0
-	return rm.execTrampoline(sourceURN, targetURN, "run-tick", 0, 0)
+	return rm.burstLocked(sourceURN, targetURN, n)
+}
+
+// burstLocked is the shared micro-tick engine: run run-tick n times, summing fuel/tokens
+// and returning the last result. The caller MUST hold rm.mu and the target cell MUST be
+// loaded. Used by TickAppCellN (per-frame enrollment) and the on-demand parser bursts.
+func (rm *RuntimeManager) burstLocked(sourceURN, targetURN string, n int) (res uint32, fuel uint64, tokens uint64, err error) {
+	if n < 1 {
+		n = 1
+	}
+	for i := 0; i < n; i++ {
+		rm.reasoningNanos = 0
+		r, f, tk, e := rm.execTrampoline(sourceURN, targetURN, "run-tick", 0, 0)
+		res, fuel, tokens = r, fuel+f, tokens+tk
+		if e != nil {
+			return res, fuel, tokens, e
+		}
+	}
+	return res, fuel, tokens, nil
+}
+
+// EnrollMicroTick enrols a cell to advance n run-ticks per frame (a micro-tick burst),
+// so an iterative/stream cell is not capped at one step per display frame. n<=1 clears
+// the enrollment (normal one-tick cadence).
+func (rm *RuntimeManager) EnrollMicroTick(urn string, n int) {
+	rm.mu.Lock()
+	defer rm.mu.Unlock()
+	if rm.microTicks == nil {
+		rm.microTicks = map[string]int{}
+	}
+	if n <= 1 {
+		delete(rm.microTicks, urn)
+		return
+	}
+	rm.microTicks[urn] = n
+}
+
+// MicroTicksFor reports how many ticks per frame a cell is enrolled to run (default 1).
+func (rm *RuntimeManager) MicroTicksFor(urn string) int {
+	rm.mu.Lock()
+	defer rm.mu.Unlock()
+	if n, ok := rm.microTicks[urn]; ok && n > 1 {
+		return n
+	}
+	return 1
 }
 
 // cellMask is a cell's enforced read/write mask over shared memory: absolute
