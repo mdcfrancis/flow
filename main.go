@@ -129,6 +129,17 @@ func buildClient(provider, model, url, geminiKey string) *inference.LocalModelCl
 	return inference.NewLocalModelClient(url, model)
 }
 
+// fluxDisabled reports whether the macro-WAT surface has been explicitly turned OFF
+// via HDM_FLUX=0/false/off/no. It is ON by default (the only synthesis surface for a
+// cell with a contract layout); the opt-out authors raw WAT everywhere instead.
+func fluxDisabled() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("HDM_FLUX"))) {
+	case "0", "false", "off", "no":
+		return true
+	}
+	return false
+}
+
 // buildModelClient constructs the BASE cognitive-engine client (see baseModelConfig).
 func buildModelClient() *inference.LocalModelClient {
 	provider, model, url, geminiKey := baseModelConfig()
@@ -2258,13 +2269,13 @@ func main() {
 	//    recording isolation passes.
 	orchestrator := evolution.NewOrchestrator(ledger, router)
 	orchestrator.Gravity = codependency.NewTracker(ledger)
-	// Flux functional-IR synthesis path (opt-in via HDM_FLUX): the sieve accepts a
-	// model that authors a Flux (cell …) program, lowered to WAT against the app
-	// contract. Off by default — raw-WAT synthesis is unchanged. See
-	// docs/functional-ir.md.
-	if os.Getenv("HDM_FLUX") != "" {
-		orchestrator.FluxEnabled = true
-		log.Printf("[FLUX] functional-IR synthesis path enabled (HDM_FLUX)")
+	// Flux (the macro-WAT surface) is the DEFAULT synthesis path: for a cell with an
+	// app-contract layout the model authors a (cell …) macro-WAT program (field macros
+	// over native WAT), expanded against the contract. Opt out with HDM_FLUX=0/false/off
+	// to author raw WAT everywhere.
+	orchestrator.FluxEnabled = !fluxDisabled()
+	if orchestrator.FluxEnabled {
+		log.Printf("[FLUX] macro-WAT synthesis surface enabled (default; set HDM_FLUX=0 to disable)")
 	}
 	// Route the evolution-loop sieve by the target cell's kind (render → vision,
 	// compute/leaf → code). Injected to avoid an evolution→appgen import cycle.
@@ -2306,7 +2317,7 @@ func main() {
 	}
 	grower := appgen.NewGrower(ledger, router)
 	grower.Activity = activity
-	grower.FluxEnabled = os.Getenv("HDM_FLUX") != "" // seed scaffolds as no-op Flux, not WAT
+	grower.FluxEnabled = !fluxDisabled() // seed scaffolds as no-op macro-WAT, not raw WAT (default)
 
 	// Resume: re-enroll application subsystems grown in previous sessions so the
 	// loop picks up where it left off (the ledger persists them; the in-memory

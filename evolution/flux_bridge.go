@@ -51,14 +51,14 @@ func extractMacroWAT(resp string) string {
 	return best
 }
 
-// Flux DRAFT store: the most recent Flux program the model authored for a cell,
+// Flux DRAFT store: the most recent macro-WAT program the model authored for a cell,
 // whether or not it committed. The committed genome is the source of truth (P0),
-// but a cell shows its WAT stub until a Flux candidate commits — so for the
-// console we also keep the latest draft, to display the Flux the model is
-// actively writing even while a cell is still building.
+// but a cell shows its stub until a candidate commits — so for the console we also
+// keep the latest draft, to display the macro-WAT the model is actively writing even
+// while a cell is still building.
 func fluxDraftRef(urn string) string { return urn + ":flux-draft" }
 
-// SaveFluxDraft records the latest Flux source authored for a cell.
+// SaveFluxDraft records the latest macro-WAT source authored for a cell.
 func SaveFluxDraft(ledger *storage.LedgerEngine, urn, src string) error {
 	if ledger == nil || strings.TrimSpace(src) == "" {
 		return nil
@@ -109,12 +109,11 @@ func lowerMacroToBytecode(layout flux.Layout, src string) ([]byte, error) {
 	return art.Bytecode, nil
 }
 
-// This file bridges the Flux functional IR (docs/functional-ir.md) into the
-// operational synthesis path. When a layout is available, the sieve accepts a
-// model that authors a Flux (cell …) program: it is parsed, type-checked, and
-// lowered to WAT here, then verified by the identical downstream gates. A model
-// that still emits raw WAT is unaffected — extractFlux returns "" and the WAT
-// path runs exactly as before.
+// This file bridges the macro-WAT surface into the operational synthesis path. When
+// a contract layout is available, the sieve accepts a model that authors a (cell …)
+// macro-WAT program: it is expanded against the layout to raw WAT here (flux.Expand),
+// then verified by the identical downstream gates. A model that emits a bare (module …)
+// is unaffected — flux.Expand leaves non-macro WAT untouched.
 
 // hmiFields are the fixed HARDWARE CAPABILITY fields every cell may read: the HMI
 // Input Event Register (execution.InputBase = 0x50000). They are read-only (the

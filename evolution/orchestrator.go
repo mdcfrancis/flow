@@ -145,26 +145,25 @@ No prose, no markdown fences.
 ` + buildExamples + `
 ` + Capabilities
 
-// FluxBuildPrompt is the system prompt for the Flux synthesis path (HDM_FLUX):
-// the builder authors a typed functional program, not WAT. It carries no WAT
-// examples/ABI — the grammar, the typed field list, and a worked example are
-// injected into the build seed (fluxSeedBlock), so nothing pulls the model back
-// toward WAT.
-const FluxBuildPrompt = `SYSTEM ROLE: HDM BUILDER (FLUX).
+// FluxBuildPrompt is the system prompt for the macro-WAT synthesis path (the default
+// "flux" surface): the builder authors native WAT but uses field MACROS so it never
+// hand-writes the module boilerplate or a memory offset. The macro forms, the typed
+// field list, and a worked example are injected into the build seed (macroSeedBlock).
+const FluxBuildPrompt = `SYSTEM ROLE: HDM BUILDER (MACRO-WAT).
 You are given a cell's PLAN (the design to implement), the system it is part of,
-its shared-state fields, and its ACCEPTANCE CHECKS. IMPLEMENT THE PLAN as a FLUX
-functional program: write the cell's algorithm exactly as the plan's steps
-describe, reading and writing the shared fields it names. The acceptance checks
-VERIFY the plan — pass AS MANY as possible.
+its shared-state fields, and its ACCEPTANCE CHECKS. IMPLEMENT THE PLAN as a macro-WAT
+program: write the cell's algorithm exactly as the plan's steps describe, reading and
+writing the shared fields it names. The acceptance checks VERIFY the plan — pass AS
+MANY as possible.
 
-Flux is a small, typed functional language: a cell is a PURE FUNCTION over shared
-state. You write ONLY the logic; a compiler lowers it to WASM and owns all memory,
-stack, and types — so you never write WAT, never manage a stack, never touch an
-offset. The exact grammar, your typed field list, and a worked example are in the
-build context below; follow them precisely.
+You write native WebAssembly text (WAT), but you name shared-state fields with MACROS
+instead of hand-computing offsets, and you wrap the body in (cell ENTRY …) instead of
+the module/import/function boilerplate: (get NAME)/(set NAME EXPR) read/write a field,
+(scene …) emits a draw stream. Everything else is ordinary WAT (i32.*/f32.* math,
+typed locals). The exact macro forms, your typed field list, and a worked example are
+in the build context below; follow them precisely. Use f32 for continuous physics.
 
-OUTPUT: only a single complete (cell …) Flux program. No prose, no markdown
-fences, and never WAT/WASM/(module …).`
+OUTPUT: only a single complete (cell …) program. No prose, no markdown fences.`
 
 const (
 	// EntryPoint is the exported function the scheduler drives on each cell.

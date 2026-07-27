@@ -266,10 +266,10 @@ type Grower struct {
 	sieve     *compiler.CompilerService
 	model     Reasoner
 	SieveIter int
-	// FluxEnabled mirrors the orchestrator's Flux path: when on, a freshly
-	// scaffolded cell is seeded with a no-op FLUX program (not a WAT skeleton), so
-	// the stored genome is Flux from birth and the synthesis loop iterates on a
-	// Flux draft ("improve THIS") instead of building from scratch atop WAT.
+	// FluxEnabled mirrors the orchestrator's macro-WAT path: when on, a freshly
+	// scaffolded cell is seeded with a no-op macro-WAT program (not a raw-WAT
+	// skeleton), so the stored genome is macro-WAT from birth and the synthesis loop
+	// iterates on that draft ("improve THIS") instead of building from scratch atop WAT.
 	FluxEnabled bool
 	// Activity, when set, receives growth progress so the console can show the
 	// app being scaffolded subsystem by subsystem. Optional; nil-safe.
