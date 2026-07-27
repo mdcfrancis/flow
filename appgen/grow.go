@@ -1001,6 +1001,21 @@ func isUISubsystem(semantics string) bool {
 	return false
 }
 
+// isInitSubsystem reports whether a subsystem's role is INITIALIZATION — seeding the
+// shared state to its starting values. Such a cell is compute (run-tick), never a
+// renderer, even if it under-declared its write ports or its semantics also mention the
+// "screen". The verb forms are deliberately specific so a view that merely "draws the
+// initial screen" is not swept in (it says draw/render, not initialize).
+func isInitSubsystem(semantics string) bool {
+	s := strings.ToLower(semantics)
+	for _, kw := range []string{"initializ", "initialis", "seed the initial", "set up the initial"} {
+		if strings.Contains(s, kw) {
+			return true
+		}
+	}
+	return false
+}
+
 // extractWIT isolates the WIT text from a completion, dropping fences/prose by
 // starting at the "package " declaration when present.
 func extractWIT(resp string) string {

@@ -124,6 +124,14 @@ func deriveKind(sub Subsystem) CellKind {
 		}
 		return KindCompute
 	}
+	// An INITIALIZER seeds shared state — it is a compute cell that writes, never a view
+	// that draws. A mis-designed init that declared reads-only (or nothing) must still be
+	// run-tick, not render-frame, so it initializes state instead of drawing a frame
+	// buffer. (A real writer is already compute above; this only rescues an
+	// under-declared init before the reads-only branch turns it into a renderer.)
+	if isInitSubsystem(sub.Semantics) && !hasHMIRead(sub.Reads) {
+		return KindCompute
+	}
 	if nonHMIReads(sub.Reads) > 0 { // reads state, writes none ⇒ a live view that draws it
 		return KindRender
 	}
@@ -157,7 +165,8 @@ func reconcileKind(sub Subsystem) (kind CellKind, overridden bool) {
 	//  - declared non-render but the ports say pure view (writes nothing, reads state)
 	//    is allowed to stand as compute ONLY if it truly writes nothing AND the
 	//    declaration is render/leaf; a writer declared render is the dangerous case.
-	if decl == KindRender && (len(sub.Writes) > 0 || hasHMIRead(sub.Reads)) {
+	//  - declared render but its role is INITIALIZATION → it seeds state, never draws.
+	if decl == KindRender && (len(sub.Writes) > 0 || hasHMIRead(sub.Reads) || isInitSubsystem(sub.Semantics)) {
 		return derived, true
 	}
 	// declared leaf is honored only when the ports are truly empty (a leaf works on

@@ -37,6 +37,12 @@ func TestDeriveKindFromPorts(t *testing.T) {
 		{"empty ports, render-y semantics -> render (keyword tiebreaker)",
 			Subsystem{Semantics: "render the view to the canvas", Reads: nil, Writes: nil},
 			KindRender},
+		{"init cell, reads-only, mentions screen -> compute (not a renderer)",
+			Subsystem{Semantics: "initialize the game state and screen dimensions", Reads: []string{"screen_width"}, Writes: nil},
+			KindCompute},
+		{"init cell, empty ports -> compute",
+			Subsystem{Semantics: "set up the initial ball positions", Reads: nil, Writes: nil},
+			KindCompute},
 		{"HMI + writes -> input",
 			Subsystem{Reads: []string{"HMI input"}, Writes: []string{"player_x"}},
 			KindInput},
@@ -63,6 +69,13 @@ func TestReconcileKindPortsWin(t *testing.T) {
 	sub = Subsystem{Kind: KindRender, Reads: []string{"ball_positions"}, Writes: nil}
 	if got, over := reconcileKind(sub); got != KindRender || over {
 		t.Fatalf("consistent render must stand, got %q over=%v", got, over)
+	}
+
+	// The init bug: model declares render for an INITIALIZER (reads-only), so it draws a
+	// frame buffer instead of seeding state → override to compute.
+	sub = Subsystem{Kind: KindRender, Semantics: "initialize the ball position and velocity", Reads: []string{"screen_width"}, Writes: nil}
+	if got, over := reconcileKind(sub); got != KindCompute || !over {
+		t.Fatalf("declared-render init must override to compute, got %q over=%v", got, over)
 	}
 
 	// No declaration → derive silently.
