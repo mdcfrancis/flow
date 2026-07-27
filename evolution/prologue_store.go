@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"strings"
 
+	"github.com/mdcfrancis/flow/flux"
 	"github.com/mdcfrancis/flow/storage"
 )
 
@@ -123,6 +124,43 @@ func PrologueText(ms []PrologueMacro) string {
 		b.WriteByte('\n')
 	}
 	return b.String()
+}
+
+// HarvestPrologue promotes any NEW (defmacro …) the committed genome defined into the
+// app's stored prologue, so sibling cells can reuse it. A new macro needs no extra
+// verification: the committing cell already expanded + assembled + passed acceptance
+// WITH it. A definition whose name already exists (a default or a prior app macro) is
+// NOT promoted — the committing cell keeps its own inline copy, and existing cells are
+// never silently rebound to a changed body (the conservative half of the redefinition
+// gate). Best-effort; a parse failure just harvests nothing.
+func HarvestPrologue(ledger *storage.LedgerEngine, ns, genome string) int {
+	defs, err := flux.ExtractDefmacros(genome)
+	if err != nil || len(defs) == 0 {
+		return 0
+	}
+	known := map[string]bool{}
+	for _, m := range DefaultPrologue() {
+		known[m.Name] = true
+	}
+	app := LoadPrologue(ledger, ns)
+	for _, m := range app {
+		known[m.Name] = true
+	}
+	added := 0
+	for _, d := range defs {
+		if known[d.Name] {
+			continue
+		}
+		app = append(app, PrologueMacro{Name: d.Name, Params: d.Params, Src: d.Src})
+		known[d.Name] = true
+		added++
+	}
+	if added > 0 {
+		if err := SavePrologue(ledger, ns, app); err != nil {
+			return 0
+		}
+	}
+	return added
 }
 
 // PrologueGuide renders the available macros for the build prompt: each signature with

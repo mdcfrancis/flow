@@ -846,6 +846,12 @@ func (o *Orchestrator) commit(ctx context.Context, fr *FrameResult, baseRoot, ta
 	fr.NewRoot = newRoot
 	fr.Reason = reason
 	o.recordLineage(targetURN, newDesc)
+	// Promote any NEW macro this genome defined inline into the app prologue, so sibling
+	// cells can call it as a primitive. The committing cell already proved it (expanded +
+	// assembled + passed acceptance).
+	if n := HarvestPrologue(o.ledger, AppNamespaceOf(targetURN), sieve.Genotype()); n > 0 {
+		log.Printf("[PROLOGUE] %s contributed %d new macro(s) to the app prologue", shortName(targetURN), n)
+	}
 	// Emit a lifecycle event whose kind matches the structural change, so the
 	// activity visual transitions the cell correctly (live / split / fused).
 	kind := "commit"

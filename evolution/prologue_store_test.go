@@ -60,6 +60,32 @@ func TestDefaultPrologueAssembles(t *testing.T) {
 	}
 }
 
+// Harvest promotes a NEW inline macro from a committed genome into the app prologue,
+// and declines names that already exist (a default or a prior app macro).
+func TestHarvestProloguePromotesNewOnly(t *testing.T) {
+	le := newLedger(t)
+	ns := "urn:hdm:apps:demo"
+	genome := `(defmacro (approach cur target step)
+  (if (i32.lt_s (get cur) target) (then (set cur (i32.add (get cur) step)))))
+(defmacro (reflect v p lo hi) (set v (i32.const 0)))
+(cell run-tick (approach ball_x (i32.const 100) (i32.const 2)) (i32.const 0))`
+	// "approach" is new → promoted; "reflect" is a default → declined (kept inline).
+	if n := HarvestPrologue(le, ns, genome); n != 1 {
+		t.Fatalf("expected 1 new macro harvested, got %d", n)
+	}
+	app := LoadPrologue(le, ns)
+	if len(app) != 1 || app[0].Name != "approach" {
+		t.Fatalf("only the new macro should be stored, got %+v", app)
+	}
+	// A second commit that redefines "approach" does not duplicate or overwrite it.
+	if n := HarvestPrologue(le, ns, `(defmacro (approach a b c) (i32.const 9)) (cell run-tick (i32.const 0))`); n != 0 {
+		t.Fatalf("a name already stored must not be re-harvested, got %d", n)
+	}
+	if app := LoadPrologue(le, ns); len(app) != 1 || !strings.Contains(app[0].Src, "i32.lt_s") {
+		t.Fatalf("existing app macro must be preserved unchanged, got %+v", app)
+	}
+}
+
 // The effective prologue overlays app-stored macros on the defaults, with the app
 // version winning on a name clash.
 func TestEffectivePrologueOverlaysApp(t *testing.T) {

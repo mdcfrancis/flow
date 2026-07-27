@@ -87,6 +87,38 @@ type macroDef struct {
 // cannot loop forever.
 const maxMacroDepth = 64
 
+// Defmacro is one extracted macro definition: its name, parameters, and canonical
+// (defmacro …) source (re-serialized, so whitespace is normalized).
+type Defmacro struct {
+	Name   string
+	Params []string
+	Src    string
+}
+
+// ExtractDefmacros returns every top-level (defmacro …) form in src, validated and
+// canonicalized. Used to harvest a committed genome's inline macros into an
+// application prologue. A malformed defmacro is an error (the same rule Expand applies).
+func ExtractDefmacros(src string) ([]Defmacro, error) {
+	nodes, err := mparse(src)
+	if err != nil {
+		return nil, err
+	}
+	var out []Defmacro
+	for _, n := range nodes {
+		if n.head() != "defmacro" {
+			continue
+		}
+		name, def, derr := parseDefmacro(n)
+		if derr != nil {
+			return nil, derr
+		}
+		var b strings.Builder
+		mserialize(&b, n, 0)
+		out = append(out, Defmacro{Name: name, Params: def.params, Src: b.String()})
+	}
+	return out, nil
+}
+
 // parseDefmacro reads (defmacro (NAME p1 p2 …) BODY): the signature list names the
 // macro and its parameters, BODY is the single template form. It rejects a template
 // that declares a (local …) — a v1 restriction that keeps expansion capture-free
