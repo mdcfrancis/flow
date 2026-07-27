@@ -982,7 +982,18 @@ func isRenderCell(repo *manifest.Repository, desc *manifest.NodeDescriptor) bool
 		return true
 	}
 	if src, err := repo.Genotype(desc); err == nil {
-		return strings.Contains(src, "render-frame") || strings.Contains(src, "(draw")
+		if strings.Contains(src, "render-frame") || strings.Contains(src, "(draw") {
+			return true
+		}
+		// Forth render cells emit BARE draw words (no "(draw"): a trailing circle/rect/
+		// line terminal. Match them as whole words so a Forth renderer is recognized —
+		// otherwise, under the Forth default, no render cell is ever identified and the
+		// canvas focuses the wrong (compute) cell.
+		for _, w := range []string{" circle", " rect", " line"} {
+			if strings.Contains(src, w) {
+				return true
+			}
+		}
 	}
 	return false
 }

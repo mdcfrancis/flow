@@ -193,6 +193,18 @@ func (o *Orchestrator) fluxLayoutFor(urn string) flux.Layout {
 func candidateWAT(resp string, layout flux.Layout) (wat, fluxSrc string, err error) {
 	if layout != nil {
 		if fluxIsForth() {
+			// The model may answer in Forth (the requested surface) OR fall back to the
+			// s-expr (cell …) form — Gemini in particular defaults to s-expr for a
+			// functional language. ACCEPT EITHER: both lower to the identical IR, so a
+			// surface-stubborn model still yields a usable cell instead of failing with
+			// `unknown word "(cell"`. Prefer an explicit (cell …) when present.
+			if src := extractFlux(resp); src != "" {
+				w, cerr := flux.Compile("cell", src, layout)
+				if cerr != nil {
+					return "", src, cerr
+				}
+				return w, src, nil
+			}
 			if src := extractForth(resp); src != "" {
 				w, cerr := flux.CompileWith(flux.Forth{}, "cell", src, layout)
 				if cerr != nil {
