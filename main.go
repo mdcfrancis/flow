@@ -3079,10 +3079,21 @@ func main() {
 						// The system refining its own prompts: any prompt whose outputs have
 						// repeatedly been invalid gets auto-refined (adversarially validated).
 						grower.AutoOptimizePrompts(ctx)
+						// ORDER MATTERS. evolveBoundaries runs BEFORE retryStalled's deeper
+						// recovery: once a cell has spent its base retries (Parked beyond
+						// maxStallRetries), challenge its BOUNDARY first. A cell whose declared
+						// ports are too tight is graded under a mask that reverts/poisons the
+						// undeclared fields, so it can NEVER progress by re-synthesis — every
+						// draft caps at the masked score. Burning the judge-deepen ladder and
+						// then letting RecertifySuite drop the mask-failing checks as
+						// "unfaithful" (both inside retryStalled) is wasted and lossy. Evolving
+						// the boundary first corrects the ports; only a cell whose boundary is
+						// already STABLE (BoundaryCheck) falls through to retryStalled's
+						// judge/recertify/fracture path, where the problem really is the code.
 						progressed := ensureContracts(ctx, grower, registry) > 0 ||
 							recoverOrphanedCells(ctx, grower, orchestrator, registry, repo, ledger, hypervisor, orphanReauthors, activity) > 0 ||
-							retryStalled(ctx, orchestrator, registry.List(), friction, root, persistFriction, activity) > 0 ||
 							evolveBoundaries(ctx, grower, orchestrator, registry, friction, root, persistFriction, activity, boundaryEvaluated) > 0 ||
+							retryStalled(ctx, orchestrator, registry.List(), friction, root, persistFriction, activity) > 0 ||
 							fractureStalled(ctx, grower, orchestrator, registry, friction, root, activity, ledger) > 0 ||
 							expandCompleteSuites(ctx, grower, orchestrator, registry, root, persistFriction, activity) > 0 ||
 							challengeArchitectures(ctx, grower, orchestrator, registry, activity, ledger) > 0 ||
