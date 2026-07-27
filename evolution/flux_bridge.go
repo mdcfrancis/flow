@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"sort"
 	"strings"
 
@@ -11,6 +12,35 @@ import (
 	"github.com/mdcfrancis/flow/flux"
 	"github.com/mdcfrancis/flow/storage"
 )
+
+// fluxSurfaceName selects the SURFACE the operational sieve authors cells in:
+// "sexpr" (default, the S-expression Flux) or "forth" (the type-stratified
+// concatenative surface that measured a large LLM-efficiency win — see
+// docs/flux-surface-ir.md). Both read to the same IR and lower through the identical
+// invariant, so the choice only changes what the model generates. Opt-in via
+// HDM_FLUX_SURFACE so default behavior is unchanged.
+func fluxSurfaceName() string {
+	// An explicit env override wins (for testing a surface without promoting it);
+	// otherwise the promoted default from the ledger (currentSurface), set at boot by
+	// InstallSurface and flipped by a successful PromoteSurface epoch.
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("HDM_FLUX_SURFACE"))) {
+	case "forth":
+		return "forth"
+	case "sexpr":
+		return "sexpr"
+	}
+	return currentSurface()
+}
+
+func fluxIsForth() bool { return fluxSurfaceName() == "forth" }
+
+// activeSurface returns the flux.Surface the operational sieve currently authors in.
+func activeSurface() flux.Surface {
+	if fluxIsForth() {
+		return flux.Forth{}
+	}
+	return flux.SExpr{}
+}
 
 // Flux DRAFT store: the most recent Flux program the model authored for a cell,
 // whether or not it committed. The committed genome is the source of truth (P0),
@@ -151,6 +181,16 @@ func (o *Orchestrator) fluxLayoutFor(urn string) flux.Layout {
 // returned so the loop can feed the semantic message back for repair.
 func candidateWAT(resp string, layout flux.Layout) (wat, fluxSrc string, err error) {
 	if layout != nil {
+		if fluxIsForth() {
+			if src := extractForth(resp); src != "" {
+				w, cerr := flux.CompileWith(flux.Forth{}, "cell", src, layout)
+				if cerr != nil {
+					return "", src, cerr
+				}
+				return w, src, nil
+			}
+			return extractWAT(resp), "", nil
+		}
 		if src := extractFlux(resp); src != "" {
 			w, cerr := flux.Compile("cell", src, layout)
 			if cerr != nil {
@@ -160,6 +200,26 @@ func candidateWAT(resp string, layout flux.Layout) (wat, fluxSrc string, err err
 		}
 	}
 	return extractWAT(resp), "", nil
+}
+
+// extractForth isolates the Forth word stream from a completion: the contents of a
+// fenced code block if present, else the trimmed whole. Unlike (cell …) there is no
+// bracketing form to key on, so the checker/repair loop (not extraction) rejects any
+// prose the model leaves in.
+func extractForth(resp string) string {
+	s := resp
+	if i := strings.Index(s, "```"); i >= 0 {
+		rest := s[i+3:]
+		if nl := strings.IndexByte(rest, '\n'); nl >= 0 {
+			rest = rest[nl+1:]
+		}
+		if j := strings.Index(rest, "```"); j >= 0 {
+			s = rest[:j]
+		} else {
+			s = rest
+		}
+	}
+	return strings.TrimSpace(s)
 }
 
 // extractFlux isolates the outermost balanced (cell …) form from a completion,
@@ -205,10 +265,16 @@ func extractFlux(resp string) string {
 
 // fluxSeedBlock renders the Flux authoring instructions appended to the build
 // seed when the Flux path is on: it tells the model to output a (cell …) program
-// (not WAT), gives the grammar + the typed field list + a worked example matching
-// the cell's entry, so the model writes only logic and the lowerer owns the
-// encoding.
+// (not WAT) and gives the language description — the grammar + the typed field
+// list — so the model writes only logic and the lowerer owns the encoding. It
+// deliberately embeds NO worked Flux program: the worked example is retrieved from
+// the knowledge base and lazily inlined by renderKnowledge, so Flux lives in exactly
+// one place (the example store) and a language change never has to hunt for Flux
+// hard-coded in a prompt. See docs/language-evolution.md §6 and docs/lineage.md §8.
 func fluxSeedBlock(contract *EntryContract, layout flux.Layout) string {
+	if fluxIsForth() {
+		return forthSeedBlock(contract, layout)
+	}
 	view := contract != nil && contract.Name == "render-frame"
 	var stateFields, inputFields []string
 	for n, f := range layout {
@@ -243,20 +309,43 @@ func fluxSeedBlock(contract *EntryContract, layout flux.Layout) string {
 		b.WriteString("  hmi_event_type: 2 mousedown, 3 mouseup, 4 click, 5 keydown, 6 keyup. Detect a NEW discrete event by comparing hmi_event_seq to the value you saw last tick. hmi_key is the key code; hmi_mouse_x/y is the live cursor; hmi_buttons/hmi_modifiers are bit masks.\n")
 	}
 	b.WriteString("\n")
-	if view {
-		b.WriteString("WORKED EXAMPLE (a view cell that draws AT its read position):\n")
-		b.WriteString("  (cell renderer (reads ball_x ball_y) (draw (circle ball_x ball_y 8 #xFFCC33FF)))\n\n")
-	} else {
-		b.WriteString("WORKED EXAMPLE (a physics cell: integrate, reflect at the walls, clamp):\n")
-		b.WriteString("  (cell physics\n")
-		b.WriteString("    (reads ball_x ball_y vel_x vel_y screen_w screen_h)\n")
-		b.WriteString("    (writes ball_x ball_y vel_x vel_y)\n")
-		b.WriteString("    (let ([nx (+ ball_x vel_x)] [ny (+ ball_y vel_y)]\n")
-		b.WriteString("          [bx (or (< nx 0) (>= nx screen_w))] [by (or (< ny 0) (>= ny screen_h))])\n")
-		b.WriteString("      (write (vel_x (if bx (neg vel_x) vel_x)) (vel_y (if by (neg vel_y) vel_y))\n")
-		b.WriteString("             (ball_x (clamp nx 0 (- screen_w 1))) (ball_y (clamp ny 0 (- screen_h 1))))))\n\n")
-	}
+	b.WriteString("A WORKED FLUX EXAMPLE for this cell's kind is provided above under RELEVANT KNOWLEDGE — follow its shape.\n")
 	b.WriteString("Output only your (cell …) program.\n")
+	return b.String()
+}
+
+// forthSeedBlock is the authoring block when the Forth surface is active: it inlines
+// the type-stratified Forth dictionary (the atomic building blocks) plus the cell's
+// writable/read-only field lists, and instructs the model to emit only the word
+// stream. Same IR, so downstream verification is unchanged.
+func forthSeedBlock(contract *EntryContract, layout flux.Layout) string {
+	view := contract != nil && contract.Name == "render-frame"
+	var stateFields, inputFields []string
+	for n, f := range layout {
+		if f.ReadOnly {
+			inputFields = append(inputFields, n)
+		} else {
+			stateFields = append(stateFields, n)
+		}
+	}
+	sort.Strings(stateFields)
+	sort.Strings(inputFields)
+
+	var b strings.Builder
+	b.WriteString("\n=== OUTPUT FORMAT: FORTH (a postfix word stream — NOT WAT, NOT S-expression) ===\n")
+	b.WriteString(flux.ForthTypedGuide())
+	b.WriteString("\n\n")
+	fmt.Fprintf(&b, "SHARED STATE fields you may write with `-> field`:\n  %s\n", strings.Join(stateFields, ", "))
+	if len(inputFields) > 0 {
+		fmt.Fprintf(&b, "INPUT fields (READ-ONLY hardware — push to read, NEVER write):\n  %s\n", strings.Join(inputFields, ", "))
+		b.WriteString("  hmi_event_type: 2 mousedown 3 mouseup 4 click 5 keydown 6 keyup; compare hmi_event_seq to last tick for a NEW event; hmi_key is the key code.\n")
+	}
+	if view {
+		b.WriteString("This is a VIEW cell: emit draws (e.g. `ball_x ball_y 8 #xFFCC33FF circle`). Do not use ->.\n")
+	} else {
+		b.WriteString("This is a COMPUTE cell: write each updated field with `-> field`.\n")
+	}
+	b.WriteString("Output ONLY the word stream (a ``` fence is fine). No prose, no (cell …), no WAT.\n")
 	return b.String()
 }
 
@@ -267,7 +356,7 @@ func fluxSeedBlock(contract *EntryContract, layout flux.Layout) string {
 // the authoring model TEST its cell empirically — set inputs, see outputs, iterate
 // — instead of guessing. inputsJSON is a JSON object of field name → integer.
 func runFluxCell(layout flux.Layout, src, inputsJSON string, steps int) (string, error) {
-	wat, err := flux.Compile("cell", src, layout)
+	wat, err := flux.CompileWith(activeSurface(), "cell", src, layout)
 	if err != nil {
 		return "", err
 	}
@@ -378,8 +467,12 @@ func sampleSeq(seq []uint32) string {
 // fluxCorrectionDirective renders the sieve repair prompt for a Flux compile
 // error — a semantic sentence (a type/shape/parse message), not a stack trace.
 func fluxCorrectionDirective(err error) string {
+	form := "(cell …) program"
+	if fluxIsForth() {
+		form = "Forth word stream"
+	}
 	return fmt.Sprintf(`[INNER SIEVE CORRECTION DIRECTIVE]
-Your Flux program did not compile.
+Your %s did not compile.
 DEFECT: %v
-Regenerate the complete (cell …) program, fixing exactly that. Output only the Flux program.`, err)
+Regenerate the complete %s, fixing exactly that (watch the stack effects; bind reused/deep values with =:). Output only the program.`, form, err, form)
 }

@@ -4,6 +4,7 @@ import (
 	"log"
 
 	"github.com/mdcfrancis/flow/compiler"
+	"github.com/mdcfrancis/flow/flux"
 	"github.com/mdcfrancis/flow/storage"
 )
 
@@ -21,6 +22,35 @@ const seedDrawAtPositionWAT = `(module
     local.get $base i32.const 16 i32.add i32.const 0 i32.store
     local.get $base i32.const 20 i32.add i32.const 0xFFCC33FF i32.store
     i32.const 24))`
+
+// The Flux worked examples that USED to be hard-coded in fluxSeedBlock now live here,
+// as ordinary KB examples that renderKnowledge lazily inlines — so Flux is
+// single-sourced in the example store, never embedded in a prompt string
+// (docs/language-evolution.md §6, docs/lineage.md §8). They are validated with
+// flux.Compile against a representative layout before being stored, exactly as the
+// WAT seed example is assembler-checked.
+const (
+	seedRendererFlux = `(cell renderer (reads ball_x ball_y) (draw (circle ball_x ball_y 8 #xFFCC33FF)))`
+	seedPhysicsFlux  = `(cell physics
+  (reads ball_x ball_y vel_x vel_y screen_w screen_h)
+  (writes ball_x ball_y vel_x vel_y)
+  (let ([nx (+ ball_x vel_x)] [ny (+ ball_y vel_y)]
+        [bx (or (< nx 0) (>= nx screen_w))] [by (or (< ny 0) (>= ny screen_h))])
+    (write (vel_x (if bx (neg vel_x) vel_x)) (vel_y (if by (neg vel_y) vel_y))
+           (ball_x (clamp nx 0 (- screen_w 1))) (ball_y (clamp ny 0 (- screen_h 1))))))`
+)
+
+// seedFluxLayout is a representative field layout used ONLY to type-check the Flux
+// seed examples at seed time (offsets are arbitrary; the checker cares about names +
+// types). It mirrors the fields the examples reference.
+var seedFluxLayout = flux.Layout{
+	"ball_x":   {Type: flux.TInt, Offset: 0xB0000},
+	"ball_y":   {Type: flux.TInt, Offset: 0xB0004},
+	"vel_x":    {Type: flux.TInt, Offset: 0xB0008},
+	"vel_y":    {Type: flux.TInt, Offset: 0xB000C},
+	"screen_w": {Type: flux.TInt, Offset: 0xB0010},
+	"screen_h": {Type: flux.TInt, Offset: 0xB0014},
+}
 
 // seedDocs is the starter DOCUMENT set — the ABI/pattern knowledge that today lives only
 // inside evolution.Capabilities and the prompts, lifted into the retrievable store.
@@ -103,18 +133,53 @@ func SeedKnowledge(ledger *storage.LedgerEngine) {
 		_ = AddDocument(ledger, d)
 	}
 	svc := compiler.NewCompilerService()
-	seedExamples := []Example{
+	// WAT seed examples are assembler-checked; Flux seed examples are flux.Compile-
+	// checked (parse + type-check + lower). A seed that fails its language's check is
+	// skipped, never stored — the same discipline for both languages.
+	watExamples := []Example{
 		{Kind: "render", Entry: "render-frame", Semantics: "read ball_x and ball_y and draw a filled circle at that position",
 			Reads: []string{"ball_x", "ball_y"}, Tags: []string{"draw-at-position"},
 			WAT: seedDrawAtPositionWAT, Score: "seed", Provenance: "seed"},
 	}
+	fluxExamples := []Example{
+		{Kind: "render", Entry: "render-frame", Lang: "flux",
+			Semantics: "read ball_x and ball_y and draw a filled circle at that position",
+			Reads:     []string{"ball_x", "ball_y"}, Tags: []string{"draw-at-position"},
+			WAT: seedRendererFlux, Score: "seed", Provenance: "seed"},
+		{Kind: "compute", Entry: "run-tick", Lang: "flux",
+			Semantics: "integrate position by velocity, reflect the velocity at the walls, and clamp inside the screen",
+			Reads:     []string{"ball_x", "ball_y", "vel_x", "vel_y", "screen_w", "screen_h"},
+			Writes:    []string{"ball_x", "ball_y", "vel_x", "vel_y"}, Tags: []string{"wall-bounce"},
+			WAT: seedPhysicsFlux, Score: "seed", Provenance: "seed"},
+	}
 	kept := 0
-	for _, e := range seedExamples {
+	for _, e := range watExamples {
 		if art, err := svc.CompileGenotype(e.WAT); err != nil || art == nil || !art.SyntaxPassed {
-			log.Printf("[DOC] seed example %q skipped (did not compile)", e.Semantics)
+			log.Printf("[DOC] seed example %q skipped (WAT did not assemble)", e.Semantics)
 			continue
 		}
 		if ok, _ := AddExample(ledger, e); ok {
+			kept++
+		}
+	}
+	for _, e := range fluxExamples {
+		cell, err := (flux.SExpr{}).Read("seed", e.WAT, seedFluxLayout)
+		if err != nil {
+			log.Printf("[DOC] flux seed example %q skipped (did not compile): %v", e.Semantics, err)
+			continue
+		}
+		if ok, _ := AddExample(ledger, e); ok {
+			kept++
+		}
+		// Also seed the SAME worked example in the Forth surface (the operational
+		// standard), transcoded via the IR — so Forth authoring retrieves a Forth
+		// example, not an S-expression one. sameShape keys on language, so the two
+		// coexist rather than displacing each other.
+		fe := e
+		fe.ID = ""
+		fe.Lang = "forth"
+		fe.WAT = flux.Forth{}.Render(cell)
+		if ok, _ := AddExample(ledger, fe); ok {
 			kept++
 		}
 	}

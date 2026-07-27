@@ -9,11 +9,10 @@ package flux
 // type/shape error from the checker), suitable to feed straight back into the
 // synthesis correction loop.
 func Compile(filename, src string, layout Layout) (string, error) {
-	f, err := Parse(filename, src)
-	if err != nil {
-		return "", err
-	}
-	cell, err := Check(f, layout)
+	// The invariant path is exactly Surface.Read → Lower: the surface (evolvable) reads
+	// text into the IR; Lower (the sole Go invariant) turns the IR into WAT. See
+	// surface.go / docs/flux-surface-ir.md.
+	cell, err := DefaultSurface.Read(filename, src, layout)
 	if err != nil {
 		return "", err
 	}
