@@ -865,6 +865,37 @@ func activeCandidates(all []string, friction map[string]evolution.FrictionState,
 // Growth persists an envelope per app (with its subsystem list); on boot we
 // replay those envelopes and re-enroll every subsystem whose descriptor is
 // still live. Returns the first UI subsystem URN found, to refocus the canvas.
+// retiredCellURNs are cells removed from the codebase whose committed ledger state
+// may linger in a long-lived hdm.db from a prior session. purgeRetiredCells drops them.
+var retiredCellURNs = []string{
+	"urn:hdm:sys:flux-lexer",
+	"urn:hdm:sys:flux-parser",
+	"urn:hdm:sys:flux-ast-parser",
+}
+
+// purgeRetiredCells removes each retired cell's ledger refs (its descriptor, acceptance
+// suite, and any working draft) and un-enrolls it from the in-memory registry, so a
+// retired cell no longer appears in the cell space or gets rehydrated. Idempotent:
+// DeleteRefs on an absent key is a no-op, so this is safe on every boot.
+func purgeRetiredCells(ledger *storage.LedgerEngine, registry *evolution.CellRegistry) {
+	var refs []string
+	purged := 0
+	for _, u := range retiredCellURNs {
+		if _, err := ledger.GetRef(u); err == nil {
+			purged++
+		}
+		refs = append(refs, u, u+":acceptance", u+":flux-draft")
+	}
+	if err := ledger.DeleteRefs(refs...); err != nil {
+		log.Printf("[PURGE] retired-cell cleanup failed: %v", err)
+		return
+	}
+	registry.Remove(retiredCellURNs...)
+	if purged > 0 {
+		log.Printf("[PURGE] removed %d retired self-hosted parser cell(s) from the ledger", purged)
+	}
+}
+
 func rehydrateApps(ledger *storage.LedgerEngine, repo *manifest.Repository, registry *evolution.CellRegistry, activity *status.Broker) string {
 	refs, err := ledger.Refs()
 	if err != nil {
@@ -2318,6 +2349,11 @@ func main() {
 	grower := appgen.NewGrower(ledger, router)
 	grower.Activity = activity
 	grower.FluxEnabled = !fluxDisabled() // seed scaffolds as no-op macro-WAT, not raw WAT (default)
+
+	// Drop cells that were RETIRED from the system but whose committed ledger state
+	// persists from an earlier session (e.g. the self-hosted Flux parser cells) — so
+	// they no longer surface in the cell space or get re-enrolled.
+	purgeRetiredCells(ledger, registry)
 
 	// Resume: re-enroll application subsystems grown in previous sessions so the
 	// loop picks up where it left off (the ledger persists them; the in-memory
