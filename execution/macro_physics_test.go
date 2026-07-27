@@ -74,3 +74,59 @@ func TestMacroFloatGravityCurves(t *testing.T) {
 		t.Errorf("orbiter should have moved toward the well: x=%.3f, want > 100", x)
 	}
 }
+
+// A macro render cell, run for real: it must emit a well-formed 24-byte draw record —
+// op = circle on the app layer (259), coords truncated from the float position fields,
+// and the color — so the canvas can decode and draw it.
+func TestMacroRenderEmitsDrawRecord(t *testing.T) {
+	ctx := context.Background()
+	le, _ := storage.NewLedgerEngine(filepath.Join(t.TempDir(), "hdm.db"))
+	defer le.Close()
+	rm, _ := NewRuntimeManager(ctx, le, inference.NewLocalModelClient("http://127.0.0.1:0", "test"))
+	defer rm.Close(ctx)
+
+	const xOff, yOff = 0xB0010, 0xB0014
+	fields := map[string]macro.Field{
+		"orbiter_x": {Offset: xOff, Float: true},
+		"orbiter_y": {Offset: yOff, Float: true},
+	}
+	src := `(cell render-frame
+  (scene (circle (geti orbiter_x) (geti orbiter_y) (i32.const 12) (i32.const 0xFF00FFFF))))`
+	wat, err := macro.Expand(src, fields)
+	if err != nil {
+		t.Fatalf("expand: %v", err)
+	}
+	art, cerr := compiler.NewCompilerService().CompileGenotype(wat)
+	if cerr != nil || !art.SyntaxPassed {
+		t.Fatalf("assemble: %v", cerr)
+	}
+	if err := rm.LoadCell("urn:hdm:test:rnd", art.Bytecode); err != nil {
+		t.Fatal(err)
+	}
+	// seed float position 250.7, 130.2 → truncates to 250, 130
+	for off, v := range map[uint32]float32{xOff: 250.7, yOff: 130.2} {
+		var b [4]byte
+		binary.LittleEndian.PutUint32(b[:], math.Float32bits(v))
+		rm.sharedMem.Write(off, b[:])
+	}
+	const base = 0xC0000
+	res, _, _, err := rm.ExecuteTrampoline("h", "urn:hdm:test:rnd", "render-frame", base, 4096)
+	if err != nil {
+		t.Fatalf("render: %v", err)
+	}
+	if res != 24 {
+		t.Errorf("one circle → 24-byte stream, got %d", res)
+	}
+	rd := func(o uint32) uint32 { b, _ := rm.sharedMem.Read(o, 4); return binary.LittleEndian.Uint32(b) }
+	op, x, y, color := rd(base), int32(rd(base+4)), int32(rd(base+8)), rd(base+20)
+	t.Logf("record: op=%d x=%d y=%d color=0x%X", op, x, y, color)
+	if op != 259 { // (1<<8)|3
+		t.Errorf("op = %d, want 259 (circle, app layer)", op)
+	}
+	if x != 250 || y != 130 {
+		t.Errorf("coords = (%d,%d), want (250,130) truncated from float", x, y)
+	}
+	if color != 0xFF00FFFF {
+		t.Errorf("color = 0x%X, want 0xFF00FFFF", color)
+	}
+}

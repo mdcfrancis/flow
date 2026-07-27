@@ -81,13 +81,19 @@ func rewrite(n node, fields map[string]Field) (node, error) {
 	if n.isAtom() {
 		return n, nil
 	}
-	kids := make([]node, len(n.kids))
-	for i, k := range n.kids {
+	kids := make([]node, 0, len(n.kids))
+	for _, k := range n.kids {
 		r, err := rewrite(k, fields)
 		if err != nil {
 			return node{}, err
 		}
-		kids[i] = r
+		// A macro that expands to MANY instructions returns a (__splice …); flatten it
+		// into this list so e.g. (scene …) becomes a run of stores in the function body.
+		if r.list && r.head() == "__splice" {
+			kids = append(kids, r.kids[1:]...)
+		} else {
+			kids = append(kids, r)
+		}
 	}
 	n.kids = kids
 
@@ -128,6 +134,27 @@ func rewrite(n node, fields map[string]Field) (node, error) {
 			st = "f32.store"
 		}
 		return lst(atom(st), off(f.Offset), n.kids[2]), nil
+
+	case "geti":
+		// (geti NAME) → the field's value as an i32: an f32 field is truncated (for pixel
+		// coords), an i32 field loaded directly.
+		if len(n.kids) != 2 || !n.kids[1].isAtom() {
+			return node{}, fmt.Errorf("(geti NAME) takes one field name")
+		}
+		f, err := fieldOff(n.kids[1].atom)
+		if err != nil {
+			return node{}, err
+		}
+		if f.Float {
+			return lst(atom("i32.trunc_f32_s"), lst(atom("f32.load"), off(f.Offset))), nil
+		}
+		return lst(atom("i32.load"), off(f.Offset)), nil
+
+	case "scene":
+		// (scene PRIM…) is a render body: it writes each prim as a 24-byte draw record
+		// starting at the base pointer (param 0) and returns the total byte length. Prims:
+		//   (circle X Y R COLOR) (rect X Y W H COLOR) (line X1 Y1 X2 Y2 COLOR)
+		return expandScene(n.kids[1:])
 
 	case "field":
 		if len(n.kids) != 2 || !n.kids[1].isAtom() {
@@ -182,6 +209,60 @@ func rewrite(n node, fields map[string]Field) (node, error) {
 		), nil
 	}
 	return n, nil
+}
+
+// appLayer is the compositing layer app draws use; drawPrims maps a prim name to its
+// opcode and how many coordinate args precede the color.
+const appLayer = 1
+
+var drawPrims = map[string]struct {
+	op    int
+	coords int
+}{"rect": {1, 4}, "line": {2, 4}, "circle": {3, 3}}
+
+// expandScene builds the render body: a draw pointer local initialized to the base
+// param, one 24-byte record per prim, and a trailing (length = pointer - base). Returns
+// a (__splice …) so the caller flattens it into the function body.
+func expandScene(prims []node) (node, error) {
+	const dp = "$__mdp"
+	dpGet := lst(atom("local.get"), atom(dp))
+	out := []node{
+		atom("__splice"),
+		lst(atom("local"), atom(dp), atom("i32")),
+		lst(atom("local.set"), atom(dp), lst(atom("local.get"), atom("0"))),
+	}
+	store := func(slot int, val node) node {
+		return lst(atom("i32.store"),
+			lst(atom("i32.add"), dpGet, lst(atom("i32.const"), atom(fmt.Sprintf("%d", slot*4)))),
+			val)
+	}
+	zero := lst(atom("i32.const"), atom("0"))
+	for _, p := range prims {
+		if !p.list || len(p.kids) == 0 || !p.kids[0].isAtom() {
+			return node{}, fmt.Errorf("scene expects draw prims (circle/rect/line …)")
+		}
+		spec, ok := drawPrims[p.kids[0].atom]
+		if !ok {
+			return node{}, fmt.Errorf("unknown draw prim %q (want circle/rect/line)", p.kids[0].atom)
+		}
+		args := p.kids[1:]
+		if len(args) != spec.coords+1 {
+			return node{}, fmt.Errorf("(%s …) takes %d coords + a color", p.kids[0].atom, spec.coords)
+		}
+		abcd := []node{zero, zero, zero, zero}
+		for i := 0; i < spec.coords; i++ {
+			abcd[i] = args[i]
+		}
+		color := args[spec.coords]
+		out = append(out,
+			store(0, lst(atom("i32.const"), atom(fmt.Sprintf("%d", (appLayer<<8)|spec.op)))),
+			store(1, abcd[0]), store(2, abcd[1]), store(3, abcd[2]), store(4, abcd[3]),
+			store(5, color),
+			lst(atom("local.set"), atom(dp), lst(atom("i32.add"), dpGet, lst(atom("i32.const"), atom("24")))),
+		)
+	}
+	out = append(out, lst(atom("i32.sub"), dpGet, lst(atom("local.get"), atom("0"))))
+	return lst(out...), nil
 }
 
 // --- s-expression parser (tolerant of ;; line and (; ;) block comments) ---
