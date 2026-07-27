@@ -73,6 +73,15 @@ func entryContractFor(genotype string) *EntryContract {
 	if strings.Contains(genotype, `"render-frame"`) {
 		return RenderFrameContract
 	}
+	// A FORTH render cell has neither "(draw" nor "render-frame" — it ends in a bare
+	// draw terminal word (circle/rect/line). Recognize those so a Forth renderer gets
+	// the render-frame contract instead of compute's run-tick (otherwise its correct
+	// draw output is rejected with "no exported function run-tick").
+	for _, w := range []string{" circle", " rect", " line"} {
+		if strings.Contains(genotype, w) {
+			return RenderFrameContract
+		}
+	}
 	return RunTickContract
 }
 
