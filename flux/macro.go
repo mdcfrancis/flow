@@ -119,44 +119,94 @@ func ExtractDefmacros(src string) ([]Defmacro, error) {
 	return out, nil
 }
 
+// reservedMacroWord is a set of names a macro or parameter may NOT take, because
+// substituting or shadowing one would corrupt an expansion: the built-in macro heads
+// (a user macro named "get" would hide the field-read primitive) and the bare WAT
+// keywords that appear as heads (a parameter named "if" would be substituted into the
+// (if …) the template writes). WAT numeric ops (i32.add, f32.mul, …) contain a '.', so
+// isIdent already excludes them and they need no entry here.
+var reservedMacroWord = map[string]bool{
+	// built-in macro heads
+	"cell": true, "get": true, "set": true, "geti": true, "atidx": true,
+	"setidx": true, "field": true, "scene": true, "defmacro": true,
+	// bare WAT structural / control keywords
+	"module": true, "func": true, "export": true, "import": true, "memory": true,
+	"param": true, "result": true, "local": true, "if": true, "then": true,
+	"else": true, "select": true, "block": true, "loop": true, "br_if": true,
+	"mut": true, "circle": true, "rect": true, "line": true,
+}
+
+// isIdent reports whether s is a plain identifier: a letter/underscore start, then
+// letters/digits/underscores. Excludes WAT ops (which contain '.'), numbers, and $-locals.
+func isIdent(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		ok := c == '_' || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (i > 0 && c >= '0' && c <= '9')
+		if !ok {
+			return false
+		}
+	}
+	return true
+}
+
 // parseDefmacro reads (defmacro (NAME p1 p2 …) BODY): the signature list names the
-// macro and its parameters, BODY is the single template form. It rejects a template
-// that declares a (local …) — a v1 restriction that keeps expansion capture-free
-// (a macro that needs a temp would have to hoist it like (scene), a later extension).
+// macro and its parameters, BODY is the single template form. Hygiene rules (v1):
+//   - NAME and every parameter must be a plain identifier that is not a reserved word,
+//     so substitution/shadowing can never corrupt a built-in form.
+//   - the template may reference NO $-local (neither a (local …) declaration nor a
+//     local.get/set/tee $x). A macro is therefore a closed term over its parameters,
+//     shared fields, and constants — it cannot capture, or be captured by, a caller's
+//     locals. (A macro that needs a temp would hoist it like (scene), a later extension.)
 func parseDefmacro(n mnode) (string, macroDef, error) {
 	if len(n.kids) != 3 || !n.kids[1].list || len(n.kids[1].kids) == 0 || !n.kids[1].kids[0].isAtom() {
 		return "", macroDef{}, fmt.Errorf("(defmacro (NAME params…) BODY) is malformed")
 	}
 	sig := n.kids[1]
 	name := sig.kids[0].atom
+	if !isIdent(name) || reservedMacroWord[name] {
+		return "", macroDef{}, fmt.Errorf("macro name %q is not a valid, non-reserved identifier", name)
+	}
 	params := make([]string, 0, len(sig.kids)-1)
+	seen := map[string]bool{}
 	for _, p := range sig.kids[1:] {
-		if !p.isAtom() {
-			return "", macroDef{}, fmt.Errorf("macro %q: parameters must be plain names", name)
+		if !p.isAtom() || !isIdent(p.atom) || reservedMacroWord[p.atom] {
+			return "", macroDef{}, fmt.Errorf("macro %q: parameter %q must be a plain, non-reserved name", name, p.atom)
 		}
+		if seen[p.atom] {
+			return "", macroDef{}, fmt.Errorf("macro %q: duplicate parameter %q", name, p.atom)
+		}
+		seen[p.atom] = true
 		params = append(params, p.atom)
 	}
 	body := n.kids[2]
-	if declaresLocal(body) {
-		return "", macroDef{}, fmt.Errorf("macro %q: templates may not declare (local …) (v1)", name)
+	if bad := referencesLocal(body); bad != "" {
+		return "", macroDef{}, fmt.Errorf("macro %q: templates may not reference a local (%s) — a macro must be a closed term over its parameters and fields (v1)", name, bad)
 	}
 	return name, macroDef{params: params, body: body}, nil
 }
 
-// declaresLocal reports whether any node in the template is a (local …) declaration.
-func declaresLocal(n mnode) bool {
+// referencesLocal returns the first $-local token found anywhere in the template, or ""
+// if there is none. Any $-token is a hygiene violation: a (local …) declaration, or a
+// local.get/set/tee $x that would capture the caller's local.
+func referencesLocal(n mnode) string {
 	if n.isAtom() {
-		return false
+		if strings.HasPrefix(n.atom, "$") {
+			return n.atom
+		}
+		return ""
 	}
 	if n.head() == "local" {
-		return true
+		return "local declaration"
 	}
 	for _, k := range n.kids {
-		if declaresLocal(k) {
-			return true
+		if bad := referencesLocal(k); bad != "" {
+			return bad
 		}
 	}
-	return false
+	return ""
 }
 
 // subst returns a copy of the template with each parameter atom replaced by the

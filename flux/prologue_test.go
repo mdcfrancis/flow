@@ -100,3 +100,55 @@ func TestMacroRecursionCapped(t *testing.T) {
 		t.Fatal("a recursive macro must hit the depth cap and error")
 	}
 }
+
+// HYGIENE: a template may not REFERENCE any $-local (a local.get/set/tee), so a macro
+// can never read or clobber a caller's local. This is the capture guard.
+func TestMacroTemplateLocalReferenceRejected(t *testing.T) {
+	for _, tmpl := range []string{
+		"(defmacro (bad x) (local.get $t))",
+		"(defmacro (bad x) (i32.add x (local.get $tmp)))",
+		"(defmacro (bad x) (local.set $t x))",
+	} {
+		src := tmpl + "\n(cell run-tick (set ball_x (bad (get ball_x))) (i32.const 0))"
+		if _, err := Expand(src, ballLayout()); err == nil {
+			t.Fatalf("a template referencing a $-local must be rejected: %s", tmpl)
+		}
+	}
+}
+
+// HYGIENE, the other side: passing a caller's $-local AS AN ARGUMENT is fine — the
+// arg is substituted into the (clean) template, it is not the template referencing a
+// local. This is the template/argument distinction the live physics cell relies on.
+func TestMacroArgumentLocalIsAllowed(t *testing.T) {
+	src := `(defmacro (clampi x lo hi) (select (select x hi (i32.lt_s x hi)) lo (i32.gt_s lo (select x hi (i32.lt_s x hi)))))
+(cell run-tick
+  (local $nx i32)
+  (local.set $nx (i32.add (get ball_x) (get vel_x)))
+  (set ball_x (clampi (local.get $nx) (i32.const 0) (get screen_w)))
+  (i32.const 0))`
+	wat, err := Expand(src, ballLayout())
+	if err != nil {
+		t.Fatalf("passing a $-local as an argument must be allowed: %v", err)
+	}
+	if _, cerr := compiler.NewCompilerService().CompileGenotype(wat); cerr != nil {
+		t.Fatalf("assemble: %v\n%s", cerr, wat)
+	}
+}
+
+// HYGIENE: a macro name or parameter may not shadow a built-in head or a bare WAT
+// keyword — substituting/shadowing one would corrupt an expansion.
+func TestMacroReservedNamesRejected(t *testing.T) {
+	cases := []string{
+		"(defmacro (get x) x)",       // name shadows the field-read primitive
+		"(defmacro (set x) x)",       // name shadows the field-write primitive
+		"(defmacro (f if) (get if))", // parameter shadows the WAT (if …) keyword
+		"(defmacro (f select) select)",
+		"(defmacro (f x x) (i32.add x x))", // duplicate parameter
+	}
+	for _, def := range cases {
+		src := def + "\n(cell run-tick (i32.const 0))"
+		if _, err := Expand(src, ballLayout()); err == nil {
+			t.Fatalf("must be rejected: %s", def)
+		}
+	}
+}
