@@ -989,6 +989,9 @@ func isRenderCell(repo *manifest.Repository, desc *manifest.NodeDescriptor) bool
 		// line terminal. Match them as whole words so a Forth renderer is recognized —
 		// otherwise, under the Forth default, no render cell is ever identified and the
 		// canvas focuses the wrong (compute) cell.
+		if strings.Contains(src, "(scene") {
+			return true // macro-WAT render body
+		}
 		for _, w := range []string{" circle", " rect", " line"} {
 			if strings.Contains(src, w) {
 				return true

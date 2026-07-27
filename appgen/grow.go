@@ -931,7 +931,11 @@ func (g *Grower) genesis(ctx context.Context, env *AppEnvelope, sub Subsystem, w
 	// contract (or the no-op doesn't compile) — exactly where the orchestrator's
 	// Flux path also falls back to WAT.
 	if g.FluxEnabled {
-		if src, bc, ok := g.seedNoopFlux(env, sub); ok {
+		if evolution.IsMacro() {
+			if src, bc, ok := g.seedNoopMacro(env, sub); ok {
+				return src, bc
+			}
+		} else if src, bc, ok := g.seedNoopFlux(env, sub); ok {
 			return src, bc
 		}
 	}

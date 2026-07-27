@@ -9,6 +9,7 @@ import (
 // A Flux-authored cell's GENOME is the Flux source (WAT is a derived artifact),
 // so the next solver frame refines it instead of restarting.
 func TestSieveOutcomeGenomeIsFlux(t *testing.T) {
+	t.Setenv("HDM_FLUX_SURFACE", "sexpr")
 	model := &scriptedFlux{responses: []string{
 		"```\n" + fluxPhysics + "\n```",
 	}}

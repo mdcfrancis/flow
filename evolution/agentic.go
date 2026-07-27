@@ -102,6 +102,34 @@ func authorWithCorrection(ctx context.Context, model ToolReasoner, cs *compiler.
 	return last, nil
 }
 
+// macroPreamble teaches the MACRO-WAT surface (the operational default): the model
+// writes native WebAssembly text, but names shared-state fields and skips the module
+// boilerplate via a handful of macros. Native f32 — use it for continuous quantities
+// (position, velocity, force) to avoid integer-division underflow.
+const macroPreamble = `You write a cell in WAT (WebAssembly text) using these MACROS — do not hand-write the module, the memory import, or field offsets:
+
+  (cell run-tick BODY…)                  a COMPUTE cell. BODY ends with (i32.const 0).
+  (cell render-frame (scene PRIM…))      a UI cell. PRIM = (circle X Y R COLOR) |
+                                         (rect X Y W H COLOR) | (line X1 Y1 X2 Y2 COLOR).
+                                         COLOR is (i32.const 0xRRGGBBAA). scene returns the length.
+  (get NAME)        read shared field NAME  (f32 if the field is f32, else i32)
+  (set NAME EXPR)   write EXPR to field NAME (store type matches the field)
+  (geti NAME)       field NAME as an i32 — TRUNCATES an f32 field, for pixel coords
+  (atidx NAME IDX)  / (setidx NAME IDX EXPR)   array element read / write
+  (field NAME)      the raw i32 base offset of NAME
+
+Everything else is ordinary WAT: i32.add/sub/mul/div, f32.add/sub/mul/div, f32.const 1.5,
+i32.trunc_f32_s, (local $t f32), (local.set $t …)/(local.get $t), etc. Declare locals FIRST.
+
+USE FLOATS for continuous physics: if a field is f32, (get it) loads f32 and you do f32.*
+math — so 500000.0 / dist does NOT floor to zero the way integer division does. Convert
+to int only at the edges (geti for draw coords).
+
+Your typed fields, the cell's role, and a worked example are in the task below. Reply with
+ONLY the complete (cell …) program — no prose, no explanation, no markdown fence.
+
+`
+
 // RunAgenticSieve synthesizes a cell with the CLIENT-SIDE agentic loop: the model may
 // call knowledge-base + compiler tools (retrieve a worked example, read a how-to,
 // compile-check a draft) while it works. The final WAT is extracted, assembled, and
@@ -123,8 +151,11 @@ func RunAgenticSieve(ctx context.Context, model ToolReasoner, ledger *storage.Le
 	if st, ok := model.(interface{ SupportsTools() bool }); ok {
 		hasTools = st.SupportsTools()
 	}
+	macroMode := layout != nil && isMacro()
 	var preamble string
 	switch {
+	case macroMode:
+		preamble = macroPreamble
 	case !hasTools && layout != nil && fluxIsForth():
 		preamble = forthDirectPreamble
 	case !hasTools && layout != nil:
@@ -140,13 +171,13 @@ func RunAgenticSieve(ctx context.Context, model ToolReasoner, ledger *storage.Le
 	}
 	var resp string
 	var err error
-	if hasTools {
+	if hasTools && !macroMode {
 		resp, err = model.InvokeTools(ctx, preamble+systemPrompt, seedContext, tools, exec, agenticMaxSteps)
 	} else {
-		// A tool-less backend (Gemini) can't call flux_check to iterate, so it emits a
-		// one-shot near-miss (a color missing its 'x', a stray import) with no chance to
-		// fix it. Drive a RE-PROMPT correction loop instead: feed the exact compile error
-		// back and ask for a corrected program, up to agenticMaxSteps times.
+		// Macro-WAT and tool-less backends both author in ONE shot (the flux_check tools
+		// are Flux-specific and don't apply to macro-WAT). Drive a RE-PROMPT correction
+		// loop: feed the exact expand/compile error back and ask for a corrected program,
+		// up to agenticMaxSteps times.
 		resp, err = authorWithCorrection(ctx, model, cs, preamble+systemPrompt, seedContext, layout, agenticMaxSteps)
 	}
 	if err != nil {

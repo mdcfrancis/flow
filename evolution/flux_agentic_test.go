@@ -22,6 +22,7 @@ func (m toolModelStub) InvokeTools(_ context.Context, _, _ string, _ []inference
 }
 
 func TestAgenticFallsBackToToolVerifiedFlux(t *testing.T) {
+	t.Setenv("HDM_FLUX_SURFACE", "sexpr") // exercise the legacy Flux tool path, not macro-WAT
 	le := kbLedger(t)
 	out, err := RunAgenticSieve(context.Background(), toolModelStub{fluxPhysics}, le,
 		"sys", "seed", "", "bounce", fluxBallLayout(), RunTickContract)

@@ -10,6 +10,7 @@ import (
 
 	"github.com/mdcfrancis/flow/compiler"
 	"github.com/mdcfrancis/flow/flux"
+	"github.com/mdcfrancis/flow/macro"
 	"github.com/mdcfrancis/flow/storage"
 )
 
@@ -33,6 +34,73 @@ func fluxSurfaceName() string {
 }
 
 func fluxIsForth() bool { return fluxSurfaceName() == "forth" }
+
+// isMacro reports whether the OPERATIONAL surface is macro-WAT — the default. The model
+// writes native WAT with (cell)/(get)/(set)/(scene) macros (macro.Expand), rather than a
+// Flux/Forth program. HDM_FLUX_SURFACE=forth|sexpr opts back into the (now legacy) Flux
+// language path; anything else (unset, or "macro") is macro-WAT.
+func isMacro() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("HDM_FLUX_SURFACE"))) {
+	case "forth", "sexpr":
+		return false
+	}
+	return true
+}
+
+// IsMacro reports whether the operational surface is macro-WAT (the default), for
+// callers outside the package (appgen seeds a macro-WAT no-op in that case).
+func IsMacro() bool { return isMacro() }
+
+// macroFields projects the app's Flux layout to the macro field map (name → offset +
+// whether it's an f32). Array (TBuffer) fields carry their base offset with i32 elements.
+func macroFields(layout flux.Layout) map[string]macro.Field {
+	m := make(map[string]macro.Field, len(layout))
+	for name, f := range layout {
+		m[name] = macro.Field{Offset: f.Offset, Float: f.Type == flux.TFloat}
+	}
+	return m
+}
+
+// extractMacroWAT isolates the model's macro-WAT program — the outermost balanced
+// (cell …) or (module …) — tolerating markdown fences, <think> blocks, and surrounding
+// prose. Returns "" if none.
+func extractMacroWAT(resp string) string {
+	s := stripThink(resp)
+	best := ""
+	for _, key := range []string{"(cell", "(module"} {
+		start := strings.Index(s, key)
+		if start < 0 {
+			continue
+		}
+		depth, inStr := 0, false
+		for i := start; i < len(s); i++ {
+			c := s[i]
+			switch {
+			case inStr:
+				if c == '"' {
+					inStr = false
+				}
+			case c == '"':
+				inStr = true
+			case c == '(':
+				depth++
+			case c == ')':
+				depth--
+				if depth == 0 {
+					cand := s[start : i+1]
+					if best == "" || strings.HasPrefix(strings.TrimSpace(cand), "(cell") {
+						best = cand
+					}
+					i = len(s)
+				}
+			}
+		}
+		if strings.HasPrefix(strings.TrimSpace(best), "(cell") {
+			break // prefer a (cell …) macro program
+		}
+	}
+	return best
+}
 
 // ActiveSurface returns the operational synthesis surface (Forth by default), for
 // callers outside the package — e.g. appgen seeds its no-op scaffold genome in this
@@ -191,6 +259,20 @@ func (o *Orchestrator) fluxLayoutFor(urn string) flux.Layout {
 // the source Flux; otherwise it extracts WAT as before. A Flux compile error is
 // returned so the loop can feed the semantic message back for repair.
 func candidateWAT(resp string, layout flux.Layout) (wat, fluxSrc string, err error) {
+	if layout != nil && isMacro() {
+		// Macro-WAT (the default): the model wrote (cell …) with field macros; expand it
+		// against the contract to raw WAT. A bare (module …) passes straight through
+		// (macro.Expand leaves non-macro WAT untouched).
+		src := extractMacroWAT(resp)
+		if src == "" {
+			return extractWAT(resp), "", nil
+		}
+		w, cerr := macro.Expand(src, macroFields(layout))
+		if cerr != nil {
+			return "", src, cerr
+		}
+		return w, src, nil
+	}
 	if layout != nil {
 		if fluxIsForth() {
 			// The model may answer in Forth (the requested surface) OR fall back to the

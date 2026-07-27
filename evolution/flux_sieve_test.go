@@ -44,6 +44,7 @@ func physicsScenarios() []Scenario {
 // verified — assembled AND behaviorally correct through ScenarioScore. This is
 // the synthesis path a live grow uses, minus a live model.
 func TestSieveLowersFluxToVerifiedCell(t *testing.T) {
+	t.Setenv("HDM_FLUX_SURFACE", "sexpr")
 	model := &scriptedFlux{responses: []string{
 		"Here is the cell:\n```lisp\n" + fluxPhysics + "\n```",
 	}}
@@ -67,6 +68,7 @@ func TestSieveLowersFluxToVerifiedCell(t *testing.T) {
 // error (an unknown name) is fed the message back and the model's next draft
 // converges.
 func TestSieveRepairsBadFlux(t *testing.T) {
+	t.Setenv("HDM_FLUX_SURFACE", "sexpr")
 	bad := `(cell physics (reads ball_x) (writes ball_x)
 	  (write (ball_x (+ ball_x nonexistent))))`
 	model := &scriptedFlux{responses: []string{bad, fluxPhysics}}

@@ -65,7 +65,9 @@ func entryContractFor(genotype string) *EntryContract {
 	// A Flux genome names its shape by its terminal: a view cell has a (draw …),
 	// a compute cell a (write …). WAT names it by the export.
 	if strings.Contains(genotype, "(cell") {
-		if strings.Contains(genotype, "(draw") {
+		// s-expr Flux names a view by its (draw …); macro-WAT names it by the
+		// (cell render-frame …) entry or a (scene …) body.
+		if strings.Contains(genotype, "(draw") || strings.Contains(genotype, "(scene") || strings.Contains(genotype, "render-frame") {
 			return RenderFrameContract
 		}
 		return RunTickContract
