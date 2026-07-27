@@ -13,6 +13,7 @@ import (
 	"github.com/mdcfrancis/flow/compiler"
 	"github.com/mdcfrancis/flow/inference"
 	"github.com/mdcfrancis/flow/manifest"
+	"github.com/mdcfrancis/flow/stdlib"
 	"github.com/mdcfrancis/flow/storage"
 	"github.com/mdcfrancis/flow/telemetry"
 	"github.com/tetratelabs/wazero"
@@ -207,7 +208,7 @@ func NewRuntimeManager(ctx context.Context, ledger *storage.LedgerEngine, model 
 	// Allocate the shared cluster memory by compiling a memory module with the
 	// native WAT compiler and instantiating it under the hardware-io module.
 	memArtifact, err := rm.sieve.CompileGenotype(
-		fmt.Sprintf(`(module (memory (export "%s") %d))`, sharedMemName, sharedPages))
+		stdlib.MustTemplate("mem-export", map[string]any{"Name": sharedMemName, "Pages": sharedPages}))
 	if err != nil {
 		_ = r.Close(ctx)
 		return nil, fmt.Errorf("failed to compile shared memory module: %w", err)

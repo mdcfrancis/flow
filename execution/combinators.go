@@ -2,8 +2,6 @@ package execution
 
 import "github.com/mdcfrancis/flow/stdlib"
 
-import "fmt"
-
 // Functional combinators, P1. A combinator is
 // an ordinary system CELL that takes a config and applies a passed-in FUNCTION CELL
 // across data via the existing cell-dispatch bridge (invoke-cell). "Passing a WAT as
@@ -96,26 +94,12 @@ func GenerateMapDriver(leafURN string, inOff, outOff, n, elemWords int) string {
 	cfg := driverBase
 	mapOff := cfg + 24
 	leafOff := mapOff + len(SysMapURN)
-	return fmt.Sprintf(`(module
-  (import "hdm:kernel/hardware-io" "shared-cluster-memory" (memory 100))
-  (import "hdm:kernel/cell-dispatch" "invoke-cell" (func $invoke (param i32 i32 i32 i32) (result i32)))
-  (data (i32.const %d) %q)
-  (data (i32.const %d) %q)
-  (func (export "run-tick") (param i32 i32) (result i32)
-    (i32.store (i32.const %d) (i32.const %d))   ;; fnPtr = leaf urn
-    (i32.store (i32.const %d) (i32.const %d))   ;; fnLen
-    (i32.store (i32.const %d) (i32.const %d))   ;; inPtr
-    (i32.store (i32.const %d) (i32.const %d))   ;; outPtr
-    (i32.store (i32.const %d) (i32.const %d))   ;; n
-    (i32.store (i32.const %d) (i32.const %d))   ;; elemWords
-    (call $invoke (i32.const %d) (i32.const %d) (i32.const %d) (i32.const 24))))`,
-		mapOff, SysMapURN,
-		leafOff, leafURN,
-		cfg+0, leafOff,
-		cfg+4, len(leafURN),
-		cfg+8, inOff,
-		cfg+12, outOff,
-		cfg+16, n,
-		cfg+20, elemWords,
-		mapOff, len(SysMapURN), cfg)
+	return stdlib.MustTemplate("map-driver", map[string]any{
+		"MapOff": mapOff, "MapURN": SysMapURN, "MapLen": len(SysMapURN),
+		"LeafOff": leafOff, "LeafURN": leafURN, "LeafLen": len(leafURN),
+		"CfgFnPtr": cfg + 0, "CfgFnLen": cfg + 4, "CfgInPtr": cfg + 8,
+		"CfgOutPtr": cfg + 12, "CfgN": cfg + 16, "CfgElemWords": cfg + 20,
+		"InOff": inOff, "OutOff": outOff, "N": n, "ElemWords": elemWords,
+		"CfgBase": cfg,
+	})
 }

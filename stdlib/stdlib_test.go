@@ -31,6 +31,29 @@ func TestEmbeddedCellsAssemble(t *testing.T) {
 	}
 }
 
+// The WAT templates instantiate and assemble with representative data.
+func TestTemplatesInstantiateAndAssemble(t *testing.T) {
+	svc := compiler.NewCompilerService()
+	mem := MustTemplate("mem-export", map[string]any{"Name": "shared-cluster-memory", "Pages": 100})
+	if art, err := svc.CompileGenotype(mem); err != nil || art == nil || !art.SyntaxPassed {
+		t.Fatalf("mem-export template did not assemble: %v\n%s", err, mem)
+	}
+	drv := MustTemplate("map-driver", map[string]any{
+		"MapOff": 1024, "MapURN": "urn:hdm:sys:map", "MapLen": 15,
+		"LeafOff": 1039, "LeafURN": "urn:hdm:sys:test-double", "LeafLen": 23,
+		"CfgFnPtr": 1000, "CfgFnLen": 1004, "CfgInPtr": 1008,
+		"CfgOutPtr": 1012, "CfgN": 1016, "CfgElemWords": 1020,
+		"InOff": 0xB0000, "OutOff": 0xB0100, "N": 8, "ElemWords": 1,
+		"CfgBase": 1000,
+	})
+	if art, err := svc.CompileGenotype(drv); err != nil || art == nil || !art.SyntaxPassed {
+		t.Fatalf("map-driver template did not assemble: %v\n%s", err, drv)
+	}
+	if !strings.Contains(drv, `"urn:hdm:sys:map"`) || !strings.Contains(drv, `"urn:hdm:sys:test-double"`) {
+		t.Errorf("map-driver did not %%q-quote the urns:\n%s", drv)
+	}
+}
+
 // The embedded prologue and examples load with non-empty bodies and parsed metadata.
 func TestEmbeddedLibraryLoads(t *testing.T) {
 	if len(Prologue()) == 0 {

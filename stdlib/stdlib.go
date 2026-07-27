@@ -12,6 +12,7 @@ import (
 	"embed"
 	"sort"
 	"strings"
+	"text/template"
 )
 
 //go:embed prologue/*.macro
@@ -44,6 +45,40 @@ func MustCell(name string) string {
 		return s
 	}
 	panic("stdlib: unknown standard cell " + name)
+}
+
+//go:embed templates
+var templateFS embed.FS
+
+// Template instantiates a parameterized WAT template (templates/<name>.wat.tmpl) with
+// data, using Go's text/template — for the generated cells (dispatch drivers, bare
+// memory modules) that a static file cannot capture. WAT never uses the {{ }}
+// delimiters, so there is no clash. Returns an error only on a malformed template or
+// data mismatch (a programmer error, since templates are embedded).
+func Template(name string, data any) (string, error) {
+	raw, err := templateFS.ReadFile("templates/" + name + ".wat.tmpl")
+	if err != nil {
+		return "", err
+	}
+	t, err := template.New(name).Parse(string(raw))
+	if err != nil {
+		return "", err
+	}
+	var b strings.Builder
+	if err := t.Execute(&b, data); err != nil {
+		return "", err
+	}
+	return strings.TrimRight(b.String(), "\n"), nil
+}
+
+// MustTemplate is Template but panics on error — for call sites where the template and
+// its data are fixed, so any failure is a build-time bug.
+func MustTemplate(name string, data any) string {
+	s, err := Template(name, data)
+	if err != nil {
+		panic("stdlib: template " + name + ": " + err.Error())
+	}
+	return s
 }
 
 // Macro is one prologue macro source: the (defmacro …) body and its one-line doc.

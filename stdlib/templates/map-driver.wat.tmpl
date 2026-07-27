@@ -1,0 +1,13 @@
+(module
+  (import "hdm:kernel/hardware-io" "shared-cluster-memory" (memory 100))
+  (import "hdm:kernel/cell-dispatch" "invoke-cell" (func $invoke (param i32 i32 i32 i32) (result i32)))
+  (data (i32.const {{.MapOff}}) {{printf "%q" .MapURN}})
+  (data (i32.const {{.LeafOff}}) {{printf "%q" .LeafURN}})
+  (func (export "run-tick") (param i32 i32) (result i32)
+    (i32.store (i32.const {{.CfgFnPtr}}) (i32.const {{.LeafOff}}))   ;; fnPtr = leaf urn
+    (i32.store (i32.const {{.CfgFnLen}}) (i32.const {{.LeafLen}}))   ;; fnLen
+    (i32.store (i32.const {{.CfgInPtr}}) (i32.const {{.InOff}}))   ;; inPtr
+    (i32.store (i32.const {{.CfgOutPtr}}) (i32.const {{.OutOff}}))   ;; outPtr
+    (i32.store (i32.const {{.CfgN}}) (i32.const {{.N}}))   ;; n
+    (i32.store (i32.const {{.CfgElemWords}}) (i32.const {{.ElemWords}}))   ;; elemWords
+    (call $invoke (i32.const {{.MapOff}}) (i32.const {{.MapLen}}) (i32.const {{.CfgBase}}) (i32.const 24))))
