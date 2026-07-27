@@ -68,8 +68,42 @@ func SelfHostParserAcceptance() map[string]*evolution.AcceptanceSuite {
 		},
 	}}
 
+	// AST parser: a compute-cell TOKEN stream → AST node records + write/let pairs.
+	// Token encoding: field f(i)=-100-i, op (add=-1), write wr(i)=-200-i, let-bind
+	// lb(i)=-400-i, local-ref lref(i)=-300-i. Node tags: 99=field 98=local 1-20=op.
+	ff := func(i int32) uint32 { return u(-100 - i) }
+	wrt := func(i int32) uint32 { return u(-200 - i) }
+	ast := &evolution.AcceptanceSuite{Scenarios: []evolution.Scenario{
+		{
+			// (write (ball_x (+ ball_x vel_x)))  →  nodes: field0, field2, (+ h0 h1); write(f0,h2)
+			Name:  "ast write of a binary op",
+			Seed:  []evolution.SeedWrite{{At: off(execution.SelfHostASTTok), U32: []uint32{ff(0), ff(2), u(-1), wrt(0)}}},
+			Steps: 4,
+			Expect: evolution.ScenarioExpect{Reads: []evolution.SeedWrite{
+				{At: off(execution.SelfHostASTNC), U32: []uint32{3}},
+				{At: off(execution.SelfHostASTWC), U32: []uint32{1}},
+				{At: off(execution.SelfHostASTNodes), U32: []uint32{99, 0, 0, 0, 99, 2, 0, 0, 1, 0, 1, 0}},
+				{At: off(execution.SelfHostASTWbuf), U32: []uint32{0, 2}},
+			}},
+		},
+		{
+			// (let ([t0 (+ ball_x vel_x)]) (write (ball_x t0)))
+			Name:  "ast let then write of the local",
+			Seed:  []evolution.SeedWrite{{At: off(execution.SelfHostASTTok), U32: []uint32{ff(0), ff(2), u(-1), u(-400), u(-300), wrt(0)}}},
+			Steps: 6,
+			Expect: evolution.ScenarioExpect{Reads: []evolution.SeedWrite{
+				{At: off(execution.SelfHostASTNC), U32: []uint32{4}},
+				{At: off(execution.SelfHostASTLC), U32: []uint32{1}},
+				{At: off(execution.SelfHostASTWC), U32: []uint32{1}},
+				{At: off(execution.SelfHostASTLbuf), U32: []uint32{0, 2}},
+				{At: off(execution.SelfHostASTWbuf), U32: []uint32{0, 3}},
+			}},
+		},
+	}}
+
 	return map[string]*evolution.AcceptanceSuite{
-		execution.SelfHostLexerURN:  lex,
-		execution.SelfHostParserURN: rpn,
+		execution.SelfHostLexerURN:     lex,
+		execution.SelfHostParserURN:    rpn,
+		execution.SelfHostASTParserURN: ast,
 	}
 }

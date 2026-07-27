@@ -2253,6 +2253,16 @@ func main() {
 			}
 		}
 	}
+	// The FULL cell-grammar AST parser: parses a compute-cell token stream (fields,
+	// ops, lets, writes) into AST records — the authoring parse path, self-hosted.
+	if astCell, perr := execution.SelfHostASTParserCell(); perr != nil {
+		log.Fatalf("Failed to compile self-hosted AST parser: %v", perr)
+	} else if err := seedCell(ledger, repo, sieve, astCell.URN, astCell.WAT, manifest.SemanticManifest{
+		FunctionalIntent: astCell.Intent,
+		DomainTags:       []string{"sys", "parser"},
+	}); err != nil {
+		log.Fatalf("Failed to seed self-hosted AST parser: %v", err)
+	}
 
 	// 5. Bring the evolutionary orchestrator online, with co-mutation tracking
 	//    recording isolation passes.
@@ -2411,6 +2421,13 @@ func main() {
 		log.Printf("[SELFHOST] parser liveness check failed: %v", perr)
 	} else {
 		log.Printf("[SELFHOST] Flux parser live as cells (%s + %s): parse(\"34+2*\") = %d", execution.SelfHostLexerURN, execution.SelfHostParserURN, v)
+	}
+	// The authoring parse path: parse the canonical physics cell through the live AST
+	// parser cell and prove it reconstructs byte-identical to the Go compiler.
+	if _, perr := hypervisor.SelfHostASTSelfCheck(); perr != nil {
+		log.Printf("[SELFHOST] AST parser (authoring path) check failed: %v", perr)
+	} else {
+		log.Printf("[SELFHOST] Flux AST parser live as a cell (%s): full compute-cell parse == Go compiler", execution.SelfHostASTParserURN)
 	}
 	// HDM_HOTPATH seeds the crafted expensive+cacheable demo cell for proving the structural
 	// optimizer: an irreducible per-input sum (plateaus on local optimization) that a cache

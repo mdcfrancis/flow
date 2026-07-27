@@ -17,6 +17,10 @@ func TestSelfHostParserAcceptancePasses(t *testing.T) {
 	if err != nil {
 		t.Fatalf("compile self-host parser: %v", err)
 	}
+	astWAT, err := execution.CompileSelfHostASTParser()
+	if err != nil {
+		t.Fatalf("compile self-host AST parser: %v", err)
+	}
 	cs := compiler.NewCompilerService()
 	wasm := func(wat string) []byte {
 		art, cerr := cs.CompileGenotype(wat)
@@ -26,8 +30,9 @@ func TestSelfHostParserAcceptancePasses(t *testing.T) {
 		return art.Bytecode
 	}
 	bc := map[string][]byte{
-		execution.SelfHostLexerURN:  wasm(lexWAT),
-		execution.SelfHostParserURN: wasm(reduceWAT),
+		execution.SelfHostLexerURN:     wasm(lexWAT),
+		execution.SelfHostParserURN:    wasm(reduceWAT),
+		execution.SelfHostASTParserURN: wasm(astWAT),
 	}
 	ctx := context.Background()
 	for urn, suite := range SelfHostParserAcceptance() {
