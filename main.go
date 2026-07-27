@@ -2236,6 +2236,24 @@ func main() {
 		}
 	}
 
+	// Seed the SELF-HOSTED PARSER: the language's own lexer + shift-reduce parser,
+	// expressed as Flux cells that run LIVE in the cluster (compiled by the Go backend,
+	// which stays the trust anchor, but executed as cells). Seeded like the combinators;
+	// enrolled behind a behavior pin below so they evolve toward lower fuel yet can never
+	// parse wrong. This makes the self-hosting operational, not just test-demonstrated.
+	if parserCells, perr := execution.SelfHostParserCells(); perr != nil {
+		log.Fatalf("Failed to compile self-hosted parser: %v", perr)
+	} else {
+		for _, c := range parserCells {
+			if err := seedCell(ledger, repo, sieve, c.URN, c.WAT, manifest.SemanticManifest{
+				FunctionalIntent: c.Intent,
+				DomainTags:       []string{"sys", "parser"},
+			}); err != nil {
+				log.Fatalf("Failed to seed self-hosted parser %s: %v", c.URN, err)
+			}
+		}
+	}
+
 	// 5. Bring the evolutionary orchestrator online, with co-mutation tracking
 	//    recording isolation passes.
 	orchestrator := evolution.NewOrchestrator(ledger, router)
@@ -2376,6 +2394,23 @@ func main() {
 				log.Printf("[SYS] %s enrolled in evolution (gated %d/%d acceptance scenarios) — evolvable toward lower fuel", prim.urn, passed, total)
 			}
 		}
+		// Enrol the self-hosted parser cells behind their behavior pin: they become
+		// visible, evolvable-toward-lower-fuel system cells whose parse behavior is
+		// protected — any mutation that changes a parse is rejected by acceptance.
+		for urn, suite := range appgen.SelfHostParserAcceptance() {
+			if err := evolution.SaveAcceptance(ledger, urn, suite); err == nil {
+				registry.Add(urn)
+				log.Printf("[SYS] %s enrolled in evolution (%d acceptance scenarios) — evolvable toward lower fuel", urn, len(suite.Scenarios))
+			}
+		}
+	}
+
+	// Self-hosted parser liveness: parse a real expression THROUGH the live Flux cells
+	// at boot, proving the language's parser runs as cells — not just in tests.
+	if v, perr := hypervisor.RunSelfHostParse("34+2*"); perr != nil {
+		log.Printf("[SELFHOST] parser liveness check failed: %v", perr)
+	} else {
+		log.Printf("[SELFHOST] Flux parser live as cells (%s + %s): parse(\"34+2*\") = %d", execution.SelfHostLexerURN, execution.SelfHostParserURN, v)
 	}
 	// HDM_HOTPATH seeds the crafted expensive+cacheable demo cell for proving the structural
 	// optimizer: an irreducible per-input sum (plateaus on local optimization) that a cache
