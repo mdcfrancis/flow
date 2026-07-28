@@ -19,6 +19,11 @@ var seedMacroLayout = flux.Layout{
 	"vel_y":    {Type: flux.TInt, Offset: 0xB000C},
 	"screen_w": {Type: flux.TInt, Offset: 0xB0010},
 	"screen_h": {Type: flux.TInt, Offset: 0xB0014},
+	// Array (buffer) fields, so the LOOPED seed examples (for/draw over a particle
+	// field, map over an array) validate at seed time.
+	"px":    {Type: flux.TBuffer, Offset: 0xB1000, Len: 256},
+	"py":    {Type: flux.TBuffer, Offset: 0xB2000, Len: 256},
+	"count": {Type: flux.TInt, Offset: 0xB0018},
 }
 
 // seedDocs is the starter DOCUMENT set — the ABI/pattern knowledge that today lives only
