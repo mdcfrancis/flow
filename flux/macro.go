@@ -57,8 +57,9 @@ func Expand(src string, fields Layout) (string, error) {
 		body = append(body, n)
 	}
 	out := make([]mnode, 0, len(body))
+	sym := new(int) // monotonic gensym counter for hygienic loop labels
 	for _, n := range body {
-		r, err := rewrite(n, fields, macros, 0)
+		r, err := rewrite(n, fields, macros, 0, sym)
 		if err != nil {
 			return "", err
 		}
