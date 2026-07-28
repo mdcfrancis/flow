@@ -355,6 +355,15 @@ func rewrite(n mnode, fields Layout, macros map[string]macroDef, depth int, sym 
 		return f, nil
 	}
 	off := func(o uint32) mnode { return mlst(matom("i32.const"), matom(fmt.Sprintf("0x%X", o))) }
+	// addr resolves a field's base address: an ELEMENT field of a combinator leaf is at
+	// (argPtr + Offset) — argPtr = param 0, the element the combinator handed the leaf —
+	// while an ordinary shared-state field is at the absolute Offset.
+	addr := func(f Field) mnode {
+		if f.Elem {
+			return mlst(matom("i32.add"), mlst(matom("local.get"), matom("0")), off(f.Offset))
+		}
+		return off(f.Offset)
+	}
 
 	switch n.head() {
 	case "get":
@@ -369,7 +378,7 @@ func rewrite(n mnode, fields Layout, macros map[string]macroDef, depth int, sym 
 		if f.Type == TFloat {
 			ld = "f32.load"
 		}
-		return mlst(matom(ld), off(f.Offset)), nil
+		return mlst(matom(ld), addr(f)), nil
 
 	case "set":
 		if len(n.kids) != 3 || !n.kids[1].isAtom() {
@@ -383,7 +392,7 @@ func rewrite(n mnode, fields Layout, macros map[string]macroDef, depth int, sym 
 		if f.Type == TFloat {
 			st = "f32.store"
 		}
-		return mlst(matom(st), off(f.Offset), n.kids[2]), nil
+		return mlst(matom(st), addr(f), n.kids[2]), nil
 
 	case "geti":
 		// (geti NAME) → the field's value as an i32: an f32 field is truncated (for pixel
@@ -396,9 +405,9 @@ func rewrite(n mnode, fields Layout, macros map[string]macroDef, depth int, sym 
 			return mnode{}, err
 		}
 		if f.Type == TFloat {
-			return mlst(matom("i32.trunc_f32_s"), mlst(matom("f32.load"), off(f.Offset))), nil
+			return mlst(matom("i32.trunc_f32_s"), mlst(matom("f32.load"), addr(f))), nil
 		}
-		return mlst(matom("i32.load"), off(f.Offset)), nil
+		return mlst(matom("i32.load"), addr(f)), nil
 
 	case "scene":
 		// (scene PRIM…) is now SUGAR for a run of (draw PRIM): each prim appends one
@@ -436,10 +445,10 @@ func rewrite(n mnode, fields Layout, macros map[string]macroDef, depth int, sym 
 		if err != nil {
 			return mnode{}, err
 		}
-		return off(f.Offset), nil
+		return addr(f), nil
 
 	case "atidx":
-		// (atidx NAME IDX) → (i32.load (i32.add (i32.const base) (i32.mul IDX (i32.const 4))))
+		// (atidx NAME IDX) → (i32.load (i32.add base (i32.mul IDX (i32.const 4))))
 		if len(n.kids) != 3 || !n.kids[1].isAtom() {
 			return mnode{}, fmt.Errorf("(atidx NAME IDX) takes a field name and an index")
 		}
@@ -447,8 +456,8 @@ func rewrite(n mnode, fields Layout, macros map[string]macroDef, depth int, sym 
 		if err != nil {
 			return mnode{}, err
 		}
-		addr := mlst(matom("i32.add"), off(f.Offset), mlst(matom("i32.mul"), idxVal(n.kids[2]), mlst(matom("i32.const"), matom("4"))))
-		return mlst(matom("i32.load"), addr), nil
+		a := mlst(matom("i32.add"), addr(f), mlst(matom("i32.mul"), idxVal(n.kids[2]), mlst(matom("i32.const"), matom("4"))))
+		return mlst(matom("i32.load"), a), nil
 
 	case "setidx":
 		if len(n.kids) != 4 || !n.kids[1].isAtom() {
@@ -458,8 +467,8 @@ func rewrite(n mnode, fields Layout, macros map[string]macroDef, depth int, sym 
 		if err != nil {
 			return mnode{}, err
 		}
-		addr := mlst(matom("i32.add"), off(f.Offset), mlst(matom("i32.mul"), idxVal(n.kids[2]), mlst(matom("i32.const"), matom("4"))))
-		return mlst(matom("i32.store"), addr, n.kids[3]), nil
+		a := mlst(matom("i32.add"), addr(f), mlst(matom("i32.mul"), idxVal(n.kids[2]), mlst(matom("i32.const"), matom("4"))))
+		return mlst(matom("i32.store"), a, n.kids[3]), nil
 
 	case "cell":
 		// (cell ENTRY BODY…) → module + memory import + exported function.

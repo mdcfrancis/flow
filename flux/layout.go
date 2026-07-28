@@ -45,6 +45,12 @@ type Field struct {
 	Offset   uint32
 	ReadOnly bool   // a host-written capability field (e.g. the HMI input registers)
 	Len      uint32 // element count for a TBuffer field; zero for scalars
+	// Elem marks an ELEMENT field of a combinator LEAF: its Offset is relative to the
+	// leaf's ARG POINTER (param 0 = a pointer to one element the combinator handed it),
+	// not an absolute shared-memory offset. So (get x)/(set x) on a leaf read/write this
+	// particle's x at argPtr+Offset, letting a per-element leaf author macro-WAT over its
+	// own element instead of the whole global array.
+	Elem bool
 }
 
 // Layout maps each shared-state field name to its type and offset — the ground truth

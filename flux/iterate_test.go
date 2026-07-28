@@ -93,3 +93,41 @@ func TestSceneStillAccumulates(t *testing.T) {
 		t.Fatalf("scene sugar must assemble: %v\n%s", cerr, wat)
 	}
 }
+
+// A combinator LEAF authors physics over ITS ELEMENT: (get/set NAME) on an Elem field
+// read/write argPtr+offset (this particle), not the global array. Gravity toward a
+// GLOBAL attractor + in-place integrate, in macro-WAT — the thing a leaf could not do
+// when handed the global contract layout (it fell to raw-WAT render code).
+func TestLeafElementLayout(t *testing.T) {
+	layout := Layout{
+		// element fields (arg-pointer-relative): this particle's x,y,vx,vy
+		"x":  {Type: TFloat, Offset: 0, Elem: true},
+		"y":  {Type: TFloat, Offset: 4, Elem: true},
+		"vx": {Type: TFloat, Offset: 8, Elem: true},
+		"vy": {Type: TFloat, Offset: 12, Elem: true},
+		// global fields (absolute): the shared attractor
+		"attractor_x": {Type: TFloat, Offset: 0xB0000},
+		"attractor_y": {Type: TFloat, Offset: 0xB0004},
+	}
+	src := `(cell run-tick
+  (set vx (f32.add (get vx) (f32.div (f32.sub (get attractor_x) (get x)) (f32.const 100.0))))
+  (set vy (f32.add (get vy) (f32.div (f32.sub (get attractor_y) (get y)) (f32.const 100.0))))
+  (set x (f32.add (get x) (get vx)))
+  (set y (f32.add (get y) (get vy)))
+  (i32.const 0))`
+	wat, err := Expand(src, layout)
+	if err != nil {
+		t.Fatalf("expand: %v", err)
+	}
+	// Element reads/writes must be argPtr-relative: (i32.add (local.get 0) (i32.const …)).
+	if !strings.Contains(wat, "(local.get 0)") {
+		t.Fatalf("element access is not arg-pointer-relative:\n%s", wat)
+	}
+	// The global attractor must stay absolute.
+	if !strings.Contains(wat, "0xB0000") {
+		t.Fatalf("global attractor field not absolute:\n%s", wat)
+	}
+	if _, cerr := compiler.NewCompilerService().CompileGenotype(wat); cerr != nil {
+		t.Fatalf("leaf element physics must assemble: %v\n%s", cerr, wat)
+	}
+}
