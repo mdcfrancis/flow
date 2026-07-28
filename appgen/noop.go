@@ -2,11 +2,61 @@ package appgen
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/mdcfrancis/flow/evolution"
 	"github.com/mdcfrancis/flow/flux"
 )
+
+// positionArrays finds an x/y POSITION array pair in a layout (e.g. particle_x/particle_y,
+// both i32[N]) and a loop bound for it, so an array-backed render cell can be scaffolded
+// as a loop over the field. It pairs an array whose name ends in x with its y sibling
+// (…_x/…_y, or …x/…y) — excluding velocity arrays (…vx/…vy) — and picks the loop count
+// from a scalar count/num field if present, else the array's declared length. Deterministic
+// (names are sorted). ok=false when there is no such pair.
+func positionArrays(fields flux.Layout) (xf, yf, count string, ok bool) {
+	isArr := func(n string) bool { f, o := fields[n]; return o && f.Type == flux.TBuffer }
+	names := make([]string, 0, len(fields))
+	for n := range fields {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	for _, n := range names {
+		if !isArr(n) || strings.HasSuffix(n, "vx") {
+			continue
+		}
+		var y string
+		switch {
+		case strings.HasSuffix(n, "_x"):
+			y = strings.TrimSuffix(n, "_x") + "_y"
+		case strings.HasSuffix(n, "x"):
+			y = strings.TrimSuffix(n, "x") + "y"
+		default:
+			continue
+		}
+		if isArr(y) {
+			xf, yf, ok = n, y, true
+			break
+		}
+	}
+	if !ok {
+		return
+	}
+	for _, n := range names {
+		if f, o := fields[n]; o && f.Type != flux.TBuffer {
+			ln := strings.ToLower(n)
+			if strings.Contains(ln, "count") || strings.Contains(ln, "num") || ln == "n" {
+				count = "(get " + n + ")"
+				break
+			}
+		}
+	}
+	if count == "" {
+		count = fmt.Sprintf("(i32.const %d)", fields[xf].Len)
+	}
+	return
+}
 
 // macroFieldsFromContract builds the macro field Layout (name → type + offset) from the
 // app contract — the same ground truth the synthesis path expands against.
@@ -27,10 +77,20 @@ func macroFieldsFromContract(c *evolution.AppContract) flux.Layout {
 
 // macroNoop builds a no-op MACRO-WAT genome: a compute cell writes each addressable
 // write-port back unchanged (scalar via (set/get), array via (setidx/atidx element 0));
-// a render cell draws a magenta checkerboard placeholder. Returns ok=false if there is
-// nothing addressable to write (caller keeps the WAT skeleton).
+// a render cell draws its natural shape — a LOOP over the position arrays if the app has
+// them (an array-backed visual), else a magenta checkerboard placeholder. Returns
+// ok=false if there is nothing addressable to write (caller keeps the WAT skeleton).
 func macroNoop(sub Subsystem, fields flux.Layout, arrays map[string]bool) (string, bool) {
 	if kindOf(sub) == KindRender {
+		// If the contract has an x/y position ARRAY pair, the render is array-backed:
+		// scaffold the ITERATION SHAPE — a circle per element — so the cell is born with a
+		// loop over the field to refine, not a static checkerboard it must discard. This is
+		// the render analogue of the compute no-op writing each port back.
+		if xf, yf, count, ok := positionArrays(fields); ok {
+			// A per-element varied colour so the field is many-hued (nudges visual_coverage).
+			color := "(i32.or (i32.shl (i32.and (i32.mul (local.get $i) (i32.const 20)) (i32.const 255)) (i32.const 24)) (i32.const 0x40E0FF))"
+			return fmt.Sprintf("(cell render-frame (for $i %s (draw (circle (atidx %s $i) (atidx %s $i) (i32.const 3) %s))))", count, xf, yf, color), true
+		}
 		const cw, ch, tile = 320, 240, 80
 		var prims strings.Builder
 		for y := 0; y < ch; y += tile {
