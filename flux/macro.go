@@ -306,7 +306,7 @@ func (n mnode) head() string {
 // A USER macro (one named in `macros`) is expanded top-down instead: its raw arguments
 // are substituted into its template, which is then rewritten — so a macro may itself
 // use (get)/(set)/other macros. depth bounds nested user-macro expansion.
-func rewrite(n mnode, fields Layout, macros map[string]macroDef, depth int) (mnode, error) {
+func rewrite(n mnode, fields Layout, macros map[string]macroDef, depth int, sym *int) (mnode, error) {
 	if n.isAtom() {
 		return n, nil
 	}
@@ -323,11 +323,17 @@ func rewrite(n mnode, fields Layout, macros map[string]macroDef, depth int) (mno
 		for i, p := range def.params {
 			binding[p] = args[i]
 		}
-		return rewrite(subst(def.body, binding), fields, macros, depth+1)
+		return rewrite(subst(def.body, binding), fields, macros, depth+1, sym)
+	}
+	// (for $v COUNT BODY…) is expanded BEFORE its children so its loop var $v is in
+	// scope while BODY (which may reference it) is rewritten. Everything else is
+	// children-first (bottom-up).
+	if n.head() == "for" {
+		return expandFor(n, fields, macros, depth, sym)
 	}
 	kids := make([]mnode, 0, len(n.kids))
 	for _, k := range n.kids {
-		r, err := rewrite(k, fields, macros, depth)
+		r, err := rewrite(k, fields, macros, depth, sym)
 		if err != nil {
 			return mnode{}, err
 		}
@@ -395,10 +401,32 @@ func rewrite(n mnode, fields Layout, macros map[string]macroDef, depth int) (mno
 		return mlst(matom("i32.load"), off(f.Offset)), nil
 
 	case "scene":
-		// (scene PRIM…) is a render body: it writes each prim as a 24-byte draw record
-		// starting at the base pointer (param 0) and returns the total byte length. Prims:
-		//   (circle X Y R COLOR) (rect X Y W H COLOR) (line X1 Y1 X2 Y2 COLOR)
-		return expandScene(n.kids[1:])
+		// (scene PRIM…) is now SUGAR for a run of (draw PRIM): each prim appends one
+		// 24-byte record to the render cell's z-ordered draw stream. The cursor + length
+		// are owned by the enclosing (cell render-frame …) accumulator, so scene no longer
+		// sets up the pointer itself — it just emits the records in order.
+		out := []mnode{matom("__splice")}
+		for _, p := range n.kids[1:] {
+			recs, err := drawRecord(p)
+			if err != nil {
+				return mnode{}, err
+			}
+			out = append(out, recs...)
+		}
+		return mlst(out...), nil
+
+	case "draw":
+		// (draw PRIM) appends ONE 24-byte record to the draw stream at the current cursor
+		// and advances it — a statement usable ANYWHERE in a render body, including inside
+		// a (for …). This is the z-ordered accumulator's emit primitive.
+		if len(n.kids) != 2 {
+			return mnode{}, fmt.Errorf("(draw PRIM) takes one primitive (circle/rect/line …)")
+		}
+		recs, err := drawRecord(n.kids[1])
+		if err != nil {
+			return mnode{}, err
+		}
+		return mlst(append([]mnode{matom("__splice")}, recs...)...), nil
 
 	case "field":
 		if len(n.kids) != 2 || !n.kids[1].isAtom() {
@@ -419,7 +447,7 @@ func rewrite(n mnode, fields Layout, macros map[string]macroDef, depth int) (mno
 		if err != nil {
 			return mnode{}, err
 		}
-		addr := mlst(matom("i32.add"), off(f.Offset), mlst(matom("i32.mul"), n.kids[2], mlst(matom("i32.const"), matom("4"))))
+		addr := mlst(matom("i32.add"), off(f.Offset), mlst(matom("i32.mul"), idxVal(n.kids[2]), mlst(matom("i32.const"), matom("4"))))
 		return mlst(matom("i32.load"), addr), nil
 
 	case "setidx":
@@ -430,7 +458,7 @@ func rewrite(n mnode, fields Layout, macros map[string]macroDef, depth int) (mno
 		if err != nil {
 			return mnode{}, err
 		}
-		addr := mlst(matom("i32.add"), off(f.Offset), mlst(matom("i32.mul"), n.kids[2], mlst(matom("i32.const"), matom("4"))))
+		addr := mlst(matom("i32.add"), off(f.Offset), mlst(matom("i32.mul"), idxVal(n.kids[2]), mlst(matom("i32.const"), matom("4"))))
 		return mlst(matom("i32.store"), addr, n.kids[3]), nil
 
 	case "cell":
@@ -439,13 +467,30 @@ func rewrite(n mnode, fields Layout, macros map[string]macroDef, depth int) (mno
 			return mnode{}, fmt.Errorf("(cell ENTRY BODY…) needs an entry name (run-tick or render-frame)")
 		}
 		entry := n.kids[1].atom
+		instrs := append([]mnode{}, n.kids[2:]...)
+		// A render cell is a z-ordered draw-stream ACCUMULATOR: a cursor local $__mdp
+		// starts at the base param, each (draw …)/(scene …) appends a record and advances
+		// it, and the cell returns the accumulated byte length. This lets draws appear
+		// inside loops/conditionals, not just a fixed (scene) list.
+		if entry == "render-frame" {
+			pre := []mnode{
+				mlst(matom("local"), matom(dpLocal), matom("i32")),
+				mlst(matom("local.set"), matom(dpLocal), mlst(matom("local.get"), matom("0"))),
+			}
+			ret := mlst(matom("i32.sub"), mlst(matom("local.get"), matom(dpLocal)), mlst(matom("local.get"), matom("0")))
+			instrs = append(append(pre, instrs...), ret)
+		}
+		// Hoist every (local …) declaration to the top of the function — WAT requires
+		// locals before instructions, so (for) and the draw cursor can declare inline.
+		locals, body := hoistLocals(instrs)
 		fn := []mnode{
 			matom("func"),
 			mlst(matom("export"), matom(`"`+entry+`"`)),
 			mlst(matom("param"), matom("i32"), matom("i32")),
 			mlst(matom("result"), matom("i32")),
 		}
-		fn = append(fn, n.kids[2:]...)
+		fn = append(fn, locals...)
+		fn = append(fn, body...)
 		return mlst(
 			matom("module"),
 			mlst(matom("import"), matom(`"hdm:kernel/hardware-io"`), matom(`"shared-cluster-memory"`), mlst(matom("memory"), matom("100"))),
@@ -456,57 +501,144 @@ func rewrite(n mnode, fields Layout, macros map[string]macroDef, depth int) (mno
 }
 
 // appLayer is the compositing layer app draws use; drawPrims maps a prim name to its
-// opcode and how many coordinate args precede the color.
+// opcode and how many coordinate args precede the color. dpLocal is the render cell's
+// draw cursor (owned by the (cell render-frame …) accumulator).
 const appLayer = 1
+const dpLocal = "$__mdp"
 
 var drawPrims = map[string]struct {
 	op     int
 	coords int
 }{"rect": {1, 4}, "line": {2, 4}, "circle": {3, 3}}
 
-// expandScene builds the render body: a draw pointer local initialized to the base
-// param, one 24-byte record per prim, and a trailing (length = pointer - base). Returns
-// a (__splice …) so the caller flattens it into the function body.
-func expandScene(prims []mnode) (mnode, error) {
-	const dp = "$__mdp"
-	dpGet := mlst(matom("local.get"), matom(dp))
-	out := []mnode{
-		matom("__splice"),
-		mlst(matom("local"), matom(dp), matom("i32")),
-		mlst(matom("local.set"), matom(dp), mlst(matom("local.get"), matom("0"))),
+// idxVal reads an index argument as a value: a bare $-local (e.g. a (for) loop variable)
+// is wrapped in (local.get …) — WAT requires it, and writing the bare $i is the natural
+// thing a model does — while any other expression (a const, a load, arithmetic) is used
+// as-is.
+func idxVal(n mnode) mnode {
+	if n.isAtom() && strings.HasPrefix(n.atom, "$") {
+		return mlst(matom("local.get"), n)
 	}
+	return n
+}
+
+// drawRecord emits the instructions that write ONE 24-byte draw record for prim p at the
+// render cursor dpLocal, then advance the cursor by 24. The prim's coord/color args are
+// used as-is (already rewritten), so they may be constants, field loads, or (atidx …)
+// element reads inside a loop.
+func drawRecord(p mnode) ([]mnode, error) {
+	if !p.list || len(p.kids) == 0 || !p.kids[0].isAtom() {
+		return nil, fmt.Errorf("draw expects a prim (circle/rect/line …)")
+	}
+	spec, ok := drawPrims[p.kids[0].atom]
+	if !ok {
+		return nil, fmt.Errorf("unknown draw prim %q (want circle/rect/line)", p.kids[0].atom)
+	}
+	args := p.kids[1:]
+	if len(args) != spec.coords+1 {
+		return nil, fmt.Errorf("(%s …) takes %d coords + a color", p.kids[0].atom, spec.coords)
+	}
+	dpGet := mlst(matom("local.get"), matom(dpLocal))
 	store := func(slot int, val mnode) mnode {
 		return mlst(matom("i32.store"),
 			mlst(matom("i32.add"), dpGet, mlst(matom("i32.const"), matom(fmt.Sprintf("%d", slot*4)))),
 			val)
 	}
 	zero := mlst(matom("i32.const"), matom("0"))
-	for _, p := range prims {
-		if !p.list || len(p.kids) == 0 || !p.kids[0].isAtom() {
-			return mnode{}, fmt.Errorf("scene expects draw prims (circle/rect/line …)")
-		}
-		spec, ok := drawPrims[p.kids[0].atom]
-		if !ok {
-			return mnode{}, fmt.Errorf("unknown draw prim %q (want circle/rect/line)", p.kids[0].atom)
-		}
-		args := p.kids[1:]
-		if len(args) != spec.coords+1 {
-			return mnode{}, fmt.Errorf("(%s …) takes %d coords + a color", p.kids[0].atom, spec.coords)
-		}
-		abcd := []mnode{zero, zero, zero, zero}
-		for i := 0; i < spec.coords; i++ {
-			abcd[i] = args[i]
-		}
-		color := args[spec.coords]
-		out = append(out,
-			store(0, mlst(matom("i32.const"), matom(fmt.Sprintf("%d", (appLayer<<8)|spec.op)))),
-			store(1, abcd[0]), store(2, abcd[1]), store(3, abcd[2]), store(4, abcd[3]),
-			store(5, color),
-			mlst(matom("local.set"), matom(dp), mlst(matom("i32.add"), dpGet, mlst(matom("i32.const"), matom("24")))),
-		)
+	abcd := []mnode{zero, zero, zero, zero}
+	for i := 0; i < spec.coords; i++ {
+		abcd[i] = args[i]
 	}
-	out = append(out, mlst(matom("i32.sub"), dpGet, mlst(matom("local.get"), matom("0"))))
-	return mlst(out...), nil
+	color := args[spec.coords]
+	return []mnode{
+		store(0, mlst(matom("i32.const"), matom(fmt.Sprintf("%d", (appLayer<<8)|spec.op)))),
+		store(1, abcd[0]), store(2, abcd[1]), store(3, abcd[2]), store(4, abcd[3]),
+		store(5, color),
+		mlst(matom("local.set"), matom(dpLocal), mlst(matom("i32.add"), dpGet, mlst(matom("i32.const"), matom("24")))),
+	}, nil
+}
+
+// expandFor lowers (for $v COUNT BODY…) to the WAT loop boilerplate: index local $v,
+// iterate 0..COUNT-1 running BODY (which may reference $v), with hygienic per-loop block/
+// loop labels. Returns a (__splice …) the caller flattens; the (local $v) is hoisted to
+// the function top by the (cell) wrapper. COUNT and BODY are rewritten here (the loop is
+// expanded top-down so $v is in scope while BODY is rewritten).
+func expandFor(n mnode, fields Layout, macros map[string]macroDef, depth int, sym *int) (mnode, error) {
+	if len(n.kids) < 3 || !n.kids[1].isAtom() {
+		return mnode{}, fmt.Errorf("(for $v COUNT BODY…) needs a loop var, a count, and a body")
+	}
+	v := n.kids[1].atom
+	if !strings.HasPrefix(v, "$") {
+		return mnode{}, fmt.Errorf("(for %s …): the loop variable must be a $-local", v)
+	}
+	count, err := rewrite(n.kids[2], fields, macros, depth, sym)
+	if err != nil {
+		return mnode{}, err
+	}
+	body := make([]mnode, 0, len(n.kids)-3)
+	for _, k := range n.kids[3:] {
+		r, err := rewrite(k, fields, macros, depth, sym)
+		if err != nil {
+			return mnode{}, err
+		}
+		if r.list && r.head() == "__splice" {
+			body = append(body, r.kids[1:]...)
+		} else {
+			body = append(body, r)
+		}
+	}
+	*sym++
+	end := fmt.Sprintf("$__for_end_%d", *sym)
+	top := fmt.Sprintf("$__for_top_%d", *sym)
+	vget := mlst(matom("local.get"), matom(v))
+	loopKids := []mnode{
+		matom("loop"), matom(top),
+		mlst(matom("br_if"), matom(end), mlst(matom("i32.ge_s"), vget, count)),
+	}
+	loopKids = append(loopKids, body...)
+	loopKids = append(loopKids,
+		mlst(matom("local.set"), matom(v), mlst(matom("i32.add"), vget, mlst(matom("i32.const"), matom("1")))),
+		mlst(matom("br"), matom(top)),
+	)
+	return mlst(
+		matom("__splice"),
+		mlst(matom("local"), matom(v), matom("i32")),
+		mlst(matom("local.set"), matom(v), mlst(matom("i32.const"), matom("0"))),
+		mlst(matom("block"), matom(end), mlst(loopKids...)),
+	), nil
+}
+
+// hoistLocals splits a function body into its (local …) declarations (in order) and the
+// remaining instructions (declarations removed), recursively — so a local declared inside
+// a (for)/(block)/(loop) is lifted to the function top while its local.get/set references
+// (function-scoped in WAT) keep working. WAT requires all locals before any instruction.
+func hoistLocals(nodes []mnode) (locals, rest []mnode) {
+	for _, n := range nodes {
+		ls, kept, keep := pullLocals(n)
+		locals = append(locals, ls...)
+		if keep {
+			rest = append(rest, kept)
+		}
+	}
+	return
+}
+
+func pullLocals(n mnode) (locals []mnode, kept mnode, keep bool) {
+	if n.isAtom() {
+		return nil, n, true
+	}
+	if n.head() == "local" { // a (local $x TYPE) declaration — hoist it, drop from here
+		return []mnode{n}, mnode{}, false
+	}
+	kids := make([]mnode, 0, len(n.kids))
+	for _, k := range n.kids {
+		ls, kk, kp := pullLocals(k)
+		locals = append(locals, ls...)
+		if kp {
+			kids = append(kids, kk)
+		}
+	}
+	return locals, mnode{kids: kids, list: true}, true
 }
 
 // --- s-expression parser (tolerant of ;; line and (; ;) block comments) ---
