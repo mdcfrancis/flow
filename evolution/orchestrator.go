@@ -217,6 +217,12 @@ type Orchestrator struct {
 	// main (appgen.ModelTypeForCell) to avoid an evolution→appgen import cycle. When
 	// nil the sieve uses the code type. Optional; nil-safe.
 	SieveModelType func(urn string) inference.ModelType
+	// LeafElementLayout, when set, returns the ELEMENT layout for a combinator LEAF (its
+	// per-element fields arg-pointer-relative, shared globals absolute) or nil for a
+	// non-leaf. A leaf handed this authors macro-WAT over its own element instead of the
+	// (semantically wrong) global array layout. Injected from main (appgen) to avoid the
+	// evolution→appgen cycle. Optional; nil-safe.
+	LeafElementLayout func(urn string) flux.Layout
 	// structural marks cells whose LOCAL optimization has plateaued while they are
 	// still expensive: their next synthesis is offered the data-structure toolkit
 	// (StructureToolkit) so the model may refactor to dispatch to a shared primitive

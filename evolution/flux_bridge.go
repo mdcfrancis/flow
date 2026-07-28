@@ -175,6 +175,15 @@ func (o *Orchestrator) fluxLayoutFor(urn string) flux.Layout {
 	if !o.FluxEnabled {
 		return nil
 	}
+	// A combinator LEAF gets an ELEMENT layout (per-element fields arg-pointer-relative),
+	// not the global contract layout — otherwise (get x) reads the whole global array
+	// instead of this element, and synthesis bails to raw WAT (a physics leaf that wrote
+	// render records). Its element layout already includes the shared globals it reads.
+	if o.LeafElementLayout != nil {
+		if el := o.LeafElementLayout(urn); el != nil {
+			return el
+		}
+	}
 	l := LayoutFromContract(LoadContract(o.ledger, AppNamespaceOf(urn)))
 	if l == nil {
 		return nil // no addressable app state → Flux path off for this cell

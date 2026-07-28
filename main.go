@@ -24,6 +24,7 @@ import (
 	"github.com/mdcfrancis/flow/compiler"
 	"github.com/mdcfrancis/flow/evolution"
 	"github.com/mdcfrancis/flow/execution"
+	"github.com/mdcfrancis/flow/flux"
 	"github.com/mdcfrancis/flow/gc"
 	"github.com/mdcfrancis/flow/inference"
 	"github.com/mdcfrancis/flow/integration"
@@ -1822,7 +1823,7 @@ func newFrameSkip(hyp *execution.RuntimeManager, ledger *storage.LedgerEngine) *
 		hyp: hyp, ledger: ledger,
 		inputHash: map[string]uint64{}, pheno: map[string]string{}, ranges: map[string][][2]uint32{},
 		exclusive: map[string]bool{}, ranOnce: map[string]bool{},
-		am:        map[string]*evolution.AppMap{}, ct: map[string]*evolution.AppContract{}, amAt: map[string]int{},
+		am: map[string]*evolution.AppMap{}, ct: map[string]*evolution.AppContract{}, amAt: map[string]int{},
 	}
 }
 
@@ -2317,6 +2318,11 @@ func main() {
 	// compute/leaf → code). Injected to avoid an evolution→appgen import cycle.
 	orchestrator.SieveModelType = func(urn string) inference.ModelType {
 		return appgen.ModelTypeForCell(ledger, urn)
+	}
+	// A combinator leaf authors macro-WAT over ITS element (arg-pointer-relative), not the
+	// global array layout — see appgen.LeafElementLayout.
+	orchestrator.LeafElementLayout = func(urn string) flux.Layout {
+		return appgen.LeafElementLayout(ledger, urn)
 	}
 	tapeStore := evolution.NewTapeStore(ledger)
 	orchestrator.Tapes = tapeStore
