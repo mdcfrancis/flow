@@ -77,17 +77,30 @@ func authorWithCorrection(ctx context.Context, model ToolReasoner, cs *compiler.
 const macroPreamble = `You write a cell in WAT (WebAssembly text) using these MACROS — do not hand-write the module, the memory import, or field offsets:
 
   (cell run-tick BODY…)                  a COMPUTE cell. BODY ends with (i32.const 0).
-  (cell render-frame (scene PRIM…))      a UI cell. PRIM = (circle X Y R COLOR) |
-                                         (rect X Y W H COLOR) | (line X1 Y1 X2 Y2 COLOR).
-                                         COLOR is (i32.const 0xRRGGBBAA). scene returns the length.
+  (cell render-frame BODY…)              a UI cell. BODY draws with (draw …)/(scene …);
+                                         the cell returns the drawn byte length for you.
   (get NAME)        read shared field NAME  (f32 if the field is f32, else i32)
   (set NAME EXPR)   write EXPR to field NAME (store type matches the field)
   (geti NAME)       field NAME as an i32 — TRUNCATES an f32 field, for pixel coords
-  (atidx NAME IDX)  / (setidx NAME IDX EXPR)   array element read / write
+  (atidx NAME IDX)  / (setidx NAME IDX EXPR)   array element read / write (IDX may be a $loop var)
   (field NAME)      the raw i32 base offset of NAME
 
+DRAWING (render-frame cells):
+  (draw PRIM)       append ONE primitive to the frame. PRIM = (circle X Y R COLOR) |
+                    (rect X Y W H COLOR) | (line X1 Y1 X2 Y2 COLOR); COLOR = (i32.const 0xRRGGBBAA).
+  (scene PRIM…)     shorthand for several (draw …) in a row (a fixed set of shapes).
+  To draw a VARIABLE number of things (one per element of an ARRAY field), LOOP and draw:
+      (for $i (get count) (draw (circle (atidx px $i) (atidx py $i) (i32.const 3) COLOR)))
+  A field typed i32[N] is an ARRAY — read element i with (atidx name $i). Draw a scalar
+  (single) thing with one (draw …); draw an array of them with (for … (draw …)).
+
+ITERATION:
+  (for $i COUNT BODY…)   run BODY for $i = 0,1,…,COUNT-1. Use it to update every element of
+                         an array ((setidx …)) or draw one primitive per element. Nest for a grid.
+
 Everything else is ordinary WAT: i32.add/sub/mul/div, f32.add/sub/mul/div, f32.const 1.5,
-i32.trunc_f32_s, (local $t f32), (local.set $t …)/(local.get $t), etc. Declare locals FIRST.
+i32.trunc_f32_s, (local $t f32), (local.set $t …)/(local.get $t), etc. Locals may be declared
+anywhere — they are hoisted for you.
 
 USE FLOATS for continuous physics: if a field is f32, (get it) loads f32 and you do f32.*
 math — so 500000.0 / dist does NOT floor to zero the way integer division does. Convert
