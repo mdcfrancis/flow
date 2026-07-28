@@ -548,7 +548,13 @@ async function build(){
     await refreshCells(); draw();
   }catch(e){m.textContent='build failed: '+e;}
 }
-sel.onchange=draw;
+// Selecting a cell FOCUSES it: the server ticks that cell's app live (so its
+// simulation actually runs) and the canvas renders it. "(active)" leaves focus alone.
+async function focusSel(){
+  if(sel.value){try{await fetch('/focus?urn='+encodeURIComponent(sel.value),{cache:'no-store'});}catch(e){}}
+  draw();
+}
+sel.onchange=focusSel;
 // Live activity: phase (what/why), cell-state chips, and an event feed.
 const PHASE={idle:'#3b4252',booting:'#3b4252',ticking:'#2b6cb0',evolving:'#7c3aed',
   synthesizing:'#7c3aed',grading:'#0891b2',committing:'#059669',fusing:'#d97706',
@@ -720,6 +726,17 @@ func Serve(ctx context.Context, addr string, s Services) *http.Server {
 	if s.Canvas != nil {
 		mux.HandleFunc("/canvas", s.Canvas.Page)
 		mux.HandleFunc("/canvas/frame", s.Canvas.Frame)
+		// /focus?urn= sets the FOCUSED cell — which app the live frame loop ticks (and
+		// which cell the canvas renders). This is what actually drives a grown app's
+		// simulation live: an unfocused app's cells are never ticked, so its state stays
+		// frozen at the seed even after it converges. Empty urn is ignored.
+		mux.HandleFunc("/focus", func(w http.ResponseWriter, r *http.Request) {
+			if urn := strings.TrimSpace(r.URL.Query().Get("urn")); urn != "" {
+				s.Canvas.SetActive(urn)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"focused":"`+s.Canvas.Active()+`"}`)
+		})
 	}
 	if s.Build != nil {
 		s.Build.baseCtx = ctx // background staged growth outlives the request

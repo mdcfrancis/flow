@@ -1154,7 +1154,7 @@ func visualCritic(ctx context.Context, grower *appgen.Grower, repo *manifest.Rep
 		return 0 // no app focused, or throttled
 	}
 	desc, err := repo.Load(active)
-	if err != nil || !appgen.IsUISubsystem(desc.Semantics.FunctionalIntent) {
+	if err != nil || !isRenderCell(repo, desc) {
 		return 0 // only critique a renderer
 	}
 	// Fold operator GUIDANCE into the judgement so the critic adversarially enforces the
@@ -1341,7 +1341,7 @@ func syncAppCells(registry *evolution.CellRegistry, repo *manifest.Repository, h
 			continue
 		}
 		desc, err := repo.Load(u)
-		if err != nil || appgen.IsUISubsystem(desc.Semantics.FunctionalIntent) {
+		if err != nil || isRenderCell(repo, desc) {
 			continue
 		}
 		bc, err := repo.Phenotype(desc)
@@ -2088,7 +2088,12 @@ func runFrameLoop(ctx context.Context, hyp *execution.RuntimeManager, repo *mani
 				if err != nil {
 					continue
 				}
-				if appgen.IsUISubsystem(desc.Semantics.FunctionalIntent) {
+				// Skip the RENDER cell here (it draws on the canvas poll, not in the sim
+				// tick). Use the GENOME-authoritative isRenderCell — NOT the intent keyword
+				// heuristic, which mis-flags a compute cell whose intent merely mentions
+				// "screen"/"display" (e.g. a physics cell that reflects off the SCREEN
+				// walls) as a renderer and never ticks it, freezing the simulation.
+				if isRenderCell(repo, desc) {
 					continue // renderer draws on canvas poll, not here
 				}
 				bc, err := repo.Phenotype(desc)
@@ -2145,8 +2150,8 @@ func runAsyncLoop(ctx context.Context, hyp *execution.RuntimeManager, repo *mani
 				if err != nil {
 					continue
 				}
-				if appgen.IsUISubsystem(desc.Semantics.FunctionalIntent) {
-					continue
+				if isRenderCell(repo, desc) {
+					continue // renderer draws on canvas poll, not in the async tick
 				}
 				bc, err := repo.Phenotype(desc)
 				if err != nil {
