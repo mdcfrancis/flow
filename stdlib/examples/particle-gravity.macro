@@ -1,0 +1,24 @@
+;; kind: compute
+;; entry: run-tick
+;; semantics: gravitational particle physics for a whole COLLECTION — loop over every particle, pull its velocity toward the attractor, apply light damping, and integrate velocity into position IN PLACE. A plain for-loop over the collection columns (particle_x/particle_vx/...), NOT a map combinator.
+;; reads: attractor_x, attractor_y, particle_count, particle_x, particle_y, particle_vx, particle_vy
+;; writes: particle_vx, particle_vy, particle_x, particle_y
+;; tags: particle-physics, gravity, nbody, collection-loop, for, integrate, attractor
+(cell run-tick
+  (local $dx f32)
+  (local $dy f32)
+  (for $i (get particle_count)
+    ;; vector from this particle toward the attractor
+    (local.set $dx (f32.sub (get attractor_x) (atidx particle_x $i)))
+    (local.set $dy (f32.sub (get attractor_y) (atidx particle_y $i)))
+    ;; accelerate the velocity toward the attractor (a gentle constant pull), then damp it
+    (setidx particle_vx $i
+      (f32.mul (f32.add (atidx particle_vx $i) (f32.mul (local.get $dx) (f32.const 0.01)))
+               (f32.const 0.99)))
+    (setidx particle_vy $i
+      (f32.mul (f32.add (atidx particle_vy $i) (f32.mul (local.get $dy) (f32.const 0.01)))
+               (f32.const 0.99)))
+    ;; integrate position by the updated velocity, writing back into the same record
+    (setidx particle_x $i (f32.add (atidx particle_x $i) (atidx particle_vx $i)))
+    (setidx particle_y $i (f32.add (atidx particle_y $i) (atidx particle_vy $i))))
+  (i32.const 0))

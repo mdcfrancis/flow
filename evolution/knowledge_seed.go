@@ -24,6 +24,15 @@ var seedMacroLayout = flux.Layout{
 	"px":    {Type: flux.TBuffer, Offset: 0xB1000, Len: 256},
 	"py":    {Type: flux.TBuffer, Offset: 0xB2000, Len: 256},
 	"count": {Type: flux.TInt, Offset: 0xB0018},
+	// f32 collection columns + a scalar attractor, so the COLLECTION-LOOP physics example
+	// (gravity + in-place integration over a particle system) validates at seed time.
+	"particle_count": {Type: flux.TInt, Offset: 0xB001C},
+	"attractor_x":    {Type: flux.TFloat, Offset: 0xB0020},
+	"attractor_y":    {Type: flux.TFloat, Offset: 0xB0024},
+	"particle_x":     {Type: flux.TBuffer, EType: flux.TFloat, Offset: 0xB3000, Len: 200},
+	"particle_y":     {Type: flux.TBuffer, EType: flux.TFloat, Offset: 0xB4000, Len: 200},
+	"particle_vx":    {Type: flux.TBuffer, EType: flux.TFloat, Offset: 0xB5000, Len: 200},
+	"particle_vy":    {Type: flux.TBuffer, EType: flux.TFloat, Offset: 0xB6000, Len: 200},
 }
 
 // seedDocs is the starter DOCUMENT set — the ABI/pattern knowledge that today lives only
