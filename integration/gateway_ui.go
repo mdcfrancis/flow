@@ -518,14 +518,13 @@ async function inspect(u){
 // extended or trimmed and resubmitted as a whole.
 const objEl=document.getElementById('obj');
 objEl.value=localStorage.getItem('hdm_obj')||'';
-// Seed the box with the active app's objective (what the system is building
-// toward) when it is empty — so the prompt we are working toward is always
-// present. A non-empty box (the operator's running prompt) is left untouched.
-if(!objEl.value.trim()){
-  fetch('/objective',{cache:'no-store'}).then(r=>r.json()).then(j=>{
-    if(j.objective&&!objEl.value.trim()){objEl.value=j.objective;localStorage.setItem('hdm_obj',j.objective);}
-  }).catch(()=>{});
-}
+// The box must show the objective ACTUALLY BEING RUN — the source of truth for what the
+// system is building. Always reconcile with /objective on load: if the running objective
+// differs from the box (a stale localStorage prompt from a previous app/session, or an
+// empty box), the RUNNING one wins, so the text field never misrepresents what is executing.
+fetch('/objective',{cache:'no-store'}).then(r=>r.json()).then(j=>{
+  if(j.objective&&j.objective!==objEl.value){objEl.value=j.objective;localStorage.setItem('hdm_obj',j.objective);}
+}).catch(()=>{});
 objEl.addEventListener('input',()=>localStorage.setItem('hdm_obj',objEl.value));
 // Cmd/Ctrl+Enter submits, like a chat composer; plain Enter inserts a newline.
 objEl.addEventListener('keydown',e=>{if(e.key==='Enter'&&(e.metaKey||e.ctrlKey)){e.preventDefault();build();}});
