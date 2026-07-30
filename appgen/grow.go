@@ -516,6 +516,14 @@ func (g *Grower) GrowConcurrent(ctx context.Context, objective string, enroll fu
 	if err != nil {
 		return nil, nil, "", err
 	}
+	// Define the CANONICAL MODEL before the contract — the contract is a PROJECTION of it
+	// (viewport fields, canonical column names, world-space types). Without this the
+	// EnsureContract below would author a LEGACY contract first (inventing screen_width,
+	// omitting world_w/screen_w), and growAll's projection would then be a no-op — so the
+	// model's viewport + world-space design would never reach the shared state.
+	if merr := g.AuthorModel(ctx, env.ApplicationNamespace); merr != nil {
+		g.event("hold", env.ApplicationNamespace, "model authoring deferred: "+merr.Error())
+	}
 	// Author the shared-state contract up front so the subsystems co-evolve
 	// against an agreed memory layout (how they will coordinate).
 	if _, cerr := g.EnsureContract(ctx, env.ApplicationNamespace); cerr != nil {
