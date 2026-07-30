@@ -29,6 +29,16 @@ screen). For each entity give:
 Then give the DYNAMICS: the ordered per-tick transformations, in terms of the entities and
 their fields.
 
+Design a VIEWPORT — the logical→physical mapping. The simulation lives in WORLD space: its
+own natural coordinate system, in whatever units suit the physics. The viewport projects a
+world extent onto the physical screen (device pixels). Give worldW/worldH (the world extent
+the simulation uses) and screenW/screenH (the device, typically 320×240). Then ALL spatial
+state — positions, velocities, forces — and the initial conditions are in WORLD units; the
+renderer alone maps world→pixels with (to_screen_x …)/(to_screen_y …), which are provided.
+Do NOT make positions "pixels": pick a natural world extent (e.g. 1000×1000, or match the
+screen if you like) and think in it. Do NOT add a separate screen entity — the viewport
+carries the screen dimensions.
+
 Finally, design the INITIAL CONDITIONS — the state the app BOOTS from, before any tick runs.
 This is DESIGN, not a per-tick rule: without it a collection's arrays boot at zero and every
 instance is stacked on one point (a particle system needs its instances SPREAD OUT). For each
@@ -49,13 +59,14 @@ Rules:
 - If ARCHITECTURAL GUIDANCE is given, honor it.
 
 Output ONLY JSON, no prose or fences:
-{"entities":[{"name":"particle","cardinality":100,"purpose":"<one line>",
+{"viewport":{"worldW":1000,"worldH":1000,"screenW":320,"screenH":240},
+ "entities":[{"name":"particle","cardinality":100,"purpose":"<one line>",
   "fields":[{"name":"x","type":"f32","desc":"<one line>"}]}],
  "dynamics":["<ordered per-tick transformation naming entities and fields>"],
- "init":[{"entity":"particle","field":"x","dist":"uniform","min":0,"max":320},
-         {"entity":"particle","field":"y","dist":"uniform","min":0,"max":240},
-         {"entity":"particle","field":"vx","dist":"uniform","min":-1,"max":1},
-         {"entity":"attractor","field":"x","dist":"const","value":160}]}`
+ "init":[{"entity":"particle","field":"x","dist":"uniform","min":0,"max":1000},
+         {"entity":"particle","field":"y","dist":"uniform","min":0,"max":1000},
+         {"entity":"particle","field":"vx","dist":"uniform","min":-5,"max":5},
+         {"entity":"attractor","field":"x","dist":"const","value":500}]}`
 
 // AuthorModel writes the application's canonical system model up front, from the objective
 // and the declared components' roles, and persists it at <ns>:model. It is the ROOT
@@ -104,9 +115,35 @@ func (g *Grower) AuthorModel(ctx context.Context, namespace string) error {
 	if err := evolution.SaveModel(g.ledger, namespace, &m); err != nil {
 		return err
 	}
+	// Install the world→screen viewport macros into the app prologue, so any renderer maps
+	// a world coordinate to a pixel with (to_screen_x …)/(to_screen_y …) — the single
+	// logical→physical translation point.
+	g.installViewportMacros(namespace, &m)
 	g.event("create", namespace, fmt.Sprintf("canonical model: %d entities, %d contract fields, %d initial conditions",
 		len(m.Entities), len(m.ProjectFields()), len(m.Init)))
 	return nil
+}
+
+// installViewportMacros merges the model's world→screen macros into the app prologue
+// (by name, without clobbering an existing entry), so a renderer can call them like
+// primitives. Best-effort.
+func (g *Grower) installViewportMacros(ns string, m *evolution.SystemModel) {
+	app := evolution.LoadPrologue(g.ledger, ns)
+	have := map[string]bool{}
+	for _, p := range app {
+		have[p.Name] = true
+	}
+	changed := false
+	for _, p := range m.ViewportMacros() {
+		if !have[p.Name] {
+			app = append(app, p)
+			have[p.Name] = true
+			changed = true
+		}
+	}
+	if changed {
+		_ = evolution.SavePrologue(g.ledger, ns, app)
+	}
 }
 
 // ensureCollectionInit is the SAFETY NET for designed initial conditions: if a collection

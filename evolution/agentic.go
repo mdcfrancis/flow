@@ -108,7 +108,9 @@ COLLECTIONS (particle systems, agents): a set of N entities is a group of array 
     (for $i (get particle_count)
       (setidx particle_vx $i (f32.add (atidx particle_vx $i) (f32.div (f32.sub (get attractor_x) (atidx particle_x $i)) (f32.const 100.0))))
       (setidx particle_x  $i (f32.add (atidx particle_x $i) (atidx particle_vx $i))))
-  Draw it with a render loop over the same columns using (atidxi …) for pixel coords.
+  Draw it with a render loop over the same columns. Positions are WORLD-space (the sim's own
+  units, not pixels): map each to a pixel with (to_screen_x WX)/(to_screen_y WY) — the viewport
+  transform — e.g. (draw (circle (to_screen_x (atidx particle_x $i)) (to_screen_y (atidx particle_y $i)) (i32.const 3) COLOR)).
 
 Everything else is ordinary WAT: i32.add/sub/mul/div, f32.add/sub/mul/div, f32.const 1.5,
 i32.trunc_f32_s, (local $t f32), (local.set $t …)/(local.get $t), etc. Locals may be declared

@@ -63,15 +63,65 @@ type FieldInit struct {
 	Value  float64 `json:"value,omitempty"`
 }
 
+// Viewport is the designed LOGICAL→PHYSICAL mapping: the simulation lives in WORLD space
+// (its own natural units — positions, velocities, forces, and initial conditions are all
+// world-space), and the viewport projects a world extent onto the physical screen (device
+// pixels). It is the ONE place that knows pixels exist: a renderer maps a world coordinate
+// to a pixel with (to_screen_x …)/(to_screen_y …), and nothing else conflates the two. This
+// is what stops every cell from re-guessing a pixel scale (and lets "world uniform [0,W]"
+// initial conditions land as a real spread instead of a fixed-point corner).
+type Viewport struct {
+	WorldW float64 `json:"worldW"` // logical world extent
+	WorldH float64 `json:"worldH"`
+	ScreenW int    `json:"screenW"` // physical device pixels
+	ScreenH int    `json:"screenH"`
+}
+
 // SystemModel is the canonical model of an application: its entities, the per-tick dynamics
-// that transform their state, and the INITIAL CONDITIONS it boots from. The contract and
-// ports are derived from it; the initial conditions seed live memory at boot.
+// that transform their state, the INITIAL CONDITIONS it boots from, and the VIEWPORT that
+// maps its world space to the physical screen. The contract and ports are derived from it.
 type SystemModel struct {
 	Namespace string      `json:"namespace"`
 	Objective string      `json:"objective"`
 	Entities  []Entity    `json:"entities"`
 	Dynamics  []string    `json:"dynamics,omitempty"` // per-tick transformations, in the model's vocabulary
 	Init      []FieldInit `json:"init,omitempty"`     // designed initial conditions (the boot state)
+	Viewport  *Viewport   `json:"viewport,omitempty"` // world→screen mapping (logical→physical)
+}
+
+// resolvedViewport returns the model's viewport with sane defaults filled (a 320×240 screen
+// and a world extent equal to the screen when unset, i.e. scale 1), so the projected fields
+// and the to-screen macros are never degenerate (no divide-by-zero).
+func (m *SystemModel) resolvedViewport() Viewport {
+	v := Viewport{}
+	if m != nil && m.Viewport != nil {
+		v = *m.Viewport
+	}
+	if v.ScreenW <= 0 {
+		v.ScreenW = 320
+	}
+	if v.ScreenH <= 0 {
+		v.ScreenH = 240
+	}
+	if v.WorldW <= 0 {
+		v.WorldW = float64(v.ScreenW)
+	}
+	if v.WorldH <= 0 {
+		v.WorldH = float64(v.ScreenH)
+	}
+	return v
+}
+
+// ViewportMacros are the generated logical→physical helpers the renderer calls: they map a
+// WORLD coordinate to a screen pixel through the viewport's shared fields, so the transform
+// is defined once (from the model) and every view uses the same mapping.
+func (m *SystemModel) ViewportMacros() []PrologueMacro {
+	return []PrologueMacro{
+		{Name: "to_screen_x", Params: []string{"wx"}, Doc: "map a WORLD x-coordinate to a screen pixel (world→viewport)",
+			Src: "(defmacro (to_screen_x wx) (i32.trunc_f32_s (f32.mul wx (f32.div (get screen_w) (get world_w)))))"},
+		{Name: "to_screen_y", Params: []string{"wy"}, Doc: "map a WORLD y-coordinate to a screen pixel (world→viewport)",
+			Src: "(defmacro (to_screen_y wy) (i32.trunc_f32_s (f32.mul wy (f32.div (get screen_h) (get world_h)))))"},
+	}
 }
 
 func modelRefURN(namespace string) string { return namespace + ":model" }
@@ -132,6 +182,16 @@ func (m *SystemModel) ProjectFields() []ContractField {
 	const regionBase, regionEnd = 0xB0000, 0xC0000
 	off := regionBase
 	var out []ContractField
+	// The VIEWPORT parameters come first — shared f32 scalars the to-screen macros read to
+	// project world→screen. world_w/h are the logical extent, screen_w/h the physical device.
+	v := m.resolvedViewport()
+	for _, vf := range []struct {
+		name string
+		init int
+	}{{"world_w", int(v.WorldW)}, {"world_h", int(v.WorldH)}, {"screen_w", v.ScreenW}, {"screen_h", v.ScreenH}} {
+		out = append(out, ContractField{Name: vf.name, Type: "f32", Offset: off, Init: vf.init, Desc: "viewport: " + vf.name})
+		off += 4
+	}
 	for _, e := range m.Entities {
 		name := strings.TrimSpace(e.Name)
 		if name == "" {
@@ -398,6 +458,11 @@ func (m *SystemModel) Render() string {
 		for i, d := range m.Dynamics {
 			fmt.Fprintf(&b, "  %d. %s\n", i+1, d)
 		}
+	}
+	if m.Viewport != nil {
+		v := m.resolvedViewport()
+		fmt.Fprintf(&b, "Viewport (world→screen): world %g×%g → screen %d×%d (positions are WORLD-space; a renderer maps them with (to_screen_x …)/(to_screen_y …))\n",
+			v.WorldW, v.WorldH, v.ScreenW, v.ScreenH)
 	}
 	if len(m.Init) > 0 {
 		b.WriteString("Initial conditions (the boot state):\n")

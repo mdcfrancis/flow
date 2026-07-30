@@ -4,10 +4,56 @@ import (
 	"fmt"
 	"math"
 	"path/filepath"
+	"strings"
 	"testing"
 
+	"github.com/mdcfrancis/flow/compiler"
+	"github.com/mdcfrancis/flow/flux"
 	"github.com/mdcfrancis/flow/storage"
 )
+
+// The viewport projects its four shared fields (world/screen extent, with inits), and the
+// generated to-screen macros + a WORLD-SPACE renderer that maps positions to pixels through
+// them must expand and assemble — the whole logical→physical mapping, end to end.
+func TestViewportProjectionAndMacros(t *testing.T) {
+	m := &SystemModel{
+		Viewport: &Viewport{WorldW: 1000, WorldH: 1000, ScreenW: 320, ScreenH: 240},
+		Entities: []Entity{{Name: "particle", Cardinality: 50, Fields: []EntityField{
+			{Name: "x", Type: "f32"}, {Name: "y", Type: "f32"}}}},
+	}
+	c := &AppContract{Fields: m.ProjectFields()}
+	byName := map[string]ContractField{}
+	for _, f := range c.Fields {
+		byName[f.Name] = f
+	}
+	for _, n := range []string{"world_w", "world_h", "screen_w", "screen_h"} {
+		if _, ok := byName[n]; !ok {
+			t.Fatalf("viewport field %s not projected", n)
+		}
+	}
+	if byName["world_w"].Init != 1000 || byName["screen_w"].Init != 320 {
+		t.Errorf("viewport inits wrong: world_w=%d screen_w=%d", byName["world_w"].Init, byName["screen_w"].Init)
+	}
+	var prologue strings.Builder
+	for _, pm := range m.ViewportMacros() {
+		prologue.WriteString(pm.Src)
+		prologue.WriteByte('\n')
+	}
+	src := prologue.String() + `(cell render-frame
+  (for $i (get particle_count)
+    (draw (circle (to_screen_x (atidx particle_x $i)) (to_screen_y (atidx particle_y $i))
+                  (i32.const 3) (i32.const 0xFFFFFFFF)))))`
+	wat, err := flux.Expand(src, LayoutFromContract(c))
+	if err != nil {
+		t.Fatalf("world-space renderer with to-screen did not expand: %v", err)
+	}
+	if !strings.Contains(wat, "i32.trunc_f32_s") {
+		t.Errorf("to-screen should truncate a world f32 to an i32 pixel:\n%s", wat)
+	}
+	if art, cerr := compiler.NewCompilerService().CompileGenotype(wat); cerr != nil || art == nil || !art.SyntaxPassed {
+		t.Fatalf("world-space renderer must assemble: %v", cerr)
+	}
+}
 
 func TestSystemModelRoundTrip(t *testing.T) {
 	le, err := storage.NewLedgerEngine(filepath.Join(t.TempDir(), "hdm.db"))
