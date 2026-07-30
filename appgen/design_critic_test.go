@@ -165,8 +165,16 @@ func TestModelConformanceCriticRetypesAndReprojects(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(reps) != 1 || reps[0].Category != "model" {
-		t.Fatalf("expected one model repair, got %v", reps)
+	// The retype repair must be present (the critic also backfills the collection's missing
+	// initial conditions, so there may be more than one repair).
+	sawRetype := false
+	for _, r := range reps {
+		if r.Category == "model" && r.Target == "particle.vx" && r.After == "f32" {
+			sawRetype = true
+		}
+	}
+	if !sawRetype {
+		t.Fatalf("expected the particle.vx retype repair, got %v", reps)
 	}
 	m := evolution.LoadModel(g.ledger, nebulaNS)
 	if fieldType(m, "particle", "vx") != "f32" {

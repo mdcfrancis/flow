@@ -20,6 +20,7 @@ package evolution
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"strings"
 
 	"github.com/mdcfrancis/flow/storage"
@@ -43,13 +44,34 @@ type Entity struct {
 	Purpose     string        `json:"purpose,omitempty"`
 }
 
-// SystemModel is the canonical model of an application: its entities and the per-tick
-// dynamics that transform their state. The contract and ports are derived from it.
+// FieldInit is the DESIGNED starting state of one entity field — the initial condition the
+// system boots from, not a per-tick rule. It is what a particle system needs and the old
+// pipeline lacked: a way to say "scatter these 200 positions across the screen" rather than
+// leaving the array at zero (all particles stacked on one point). The distribution is
+// expanded deterministically per element at boot:
+//   - "uniform": each element a pseudo-random value in [Min,Max] (a 2D scatter when x and y
+//     are both uniform — they use independent per-field salts, not the same sequence);
+//   - "spread":  each element evenly stepped Min→Max by index (a ramp/line);
+//   - "const":   every element = Value;
+//   - "zero"/"": every element 0.
+type FieldInit struct {
+	Entity string  `json:"entity"`
+	Field  string  `json:"field"`
+	Dist   string  `json:"dist"`
+	Min    float64 `json:"min,omitempty"`
+	Max    float64 `json:"max,omitempty"`
+	Value  float64 `json:"value,omitempty"`
+}
+
+// SystemModel is the canonical model of an application: its entities, the per-tick dynamics
+// that transform their state, and the INITIAL CONDITIONS it boots from. The contract and
+// ports are derived from it; the initial conditions seed live memory at boot.
 type SystemModel struct {
-	Namespace string   `json:"namespace"`
-	Objective string   `json:"objective"`
-	Entities  []Entity `json:"entities"`
-	Dynamics  []string `json:"dynamics,omitempty"` // per-tick transformations, in the model's vocabulary
+	Namespace string      `json:"namespace"`
+	Objective string      `json:"objective"`
+	Entities  []Entity    `json:"entities"`
+	Dynamics  []string    `json:"dynamics,omitempty"` // per-tick transformations, in the model's vocabulary
+	Init      []FieldInit `json:"init,omitempty"`     // designed initial conditions (the boot state)
 }
 
 func modelRefURN(namespace string) string { return namespace + ":model" }
@@ -173,6 +195,87 @@ func (e *Entity) RecordStrideWords() int {
 	return n
 }
 
+// InitialSeeds expands the model's designed initial conditions into the boot SeedWrites —
+// one per initialized field, with an array field's every element filled from its
+// distribution. Offsets/types come from the projected contract, so the seeds land exactly
+// where the field lives (i32 fields as integers, f32 fields as float bit patterns). This is
+// the DESIGNED cold start a particle system needs, replacing the old "arrays boot at zero".
+func (m *SystemModel) InitialSeeds(c *AppContract) []SeedWrite {
+	if m == nil || c == nil {
+		return nil
+	}
+	byName := map[string]ContractField{}
+	for _, f := range c.Fields {
+		byName[strings.ToLower(f.Name)] = f
+	}
+	var out []SeedWrite
+	for _, ic := range m.Init {
+		name := strings.ToLower(strings.TrimSpace(ic.Entity) + "_" + strings.TrimSpace(ic.Field))
+		f, ok := byName[name]
+		if !ok {
+			continue
+		}
+		if f.Stride > 0 {
+			continue // interleaved columns aren't consecutive words — dense collections only (v1)
+		}
+		count := typeWords(f.Type)
+		if count < 1 {
+			count = 1
+		}
+		isF32 := strings.HasPrefix(strings.TrimSpace(f.Type), "f32")
+		salt := fieldSalt(name)
+		words := make([]uint32, count)
+		for i := 0; i < count; i++ {
+			v := ic.valueAt(i, count, salt)
+			if isF32 {
+				words[i] = math.Float32bits(float32(v))
+			} else {
+				words[i] = uint32(int32(v))
+			}
+		}
+		out = append(out, SeedWrite{At: fmt.Sprintf("0x%X", f.Offset), U32: words})
+	}
+	return out
+}
+
+// valueAt computes element i (of count) of a FieldInit's distribution.
+func (ic FieldInit) valueAt(i, count int, salt uint32) float64 {
+	switch strings.ToLower(strings.TrimSpace(ic.Dist)) {
+	case "const":
+		return ic.Value
+	case "uniform":
+		return ic.Min + (ic.Max-ic.Min)*hashUnit(uint32(i)+salt)
+	case "spread":
+		if count > 1 {
+			return ic.Min + (ic.Max-ic.Min)*float64(i)/float64(count-1)
+		}
+		return ic.Min
+	default: // "zero" / ""
+		return 0
+	}
+}
+
+// hashUnit maps an index to a deterministic pseudo-random value in [0,1) (a splitmix32
+// finalizer), so a "uniform" scatter is reproducible across boots and independent of any
+// runtime RNG.
+func hashUnit(x uint32) float64 {
+	x += 0x9E3779B9
+	x = (x ^ (x >> 16)) * 0x21F0AAAD
+	x = (x ^ (x >> 15)) * 0x735A2D97
+	x = x ^ (x >> 15)
+	return float64(x) / float64(1<<32)
+}
+
+// fieldSalt derives a per-field offset for the index hash (FNV-1a of the name), so two
+// uniform fields (x and y) scatter independently rather than along a diagonal.
+func fieldSalt(name string) uint32 {
+	var h uint32 = 2166136261
+	for i := 0; i < len(name); i++ {
+		h = (h ^ uint32(name[i])) * 16777619
+	}
+	return h
+}
+
 // FieldNames returns the set of canonical projected field names, for resolving ports.
 func (m *SystemModel) FieldNames() map[string]bool {
 	names := map[string]bool{}
@@ -294,6 +397,20 @@ func (m *SystemModel) Render() string {
 		b.WriteString("Dynamics (each tick, in order):\n")
 		for i, d := range m.Dynamics {
 			fmt.Fprintf(&b, "  %d. %s\n", i+1, d)
+		}
+	}
+	if len(m.Init) > 0 {
+		b.WriteString("Initial conditions (the boot state):\n")
+		for _, ic := range m.Init {
+			d := strings.ToLower(strings.TrimSpace(ic.Dist))
+			switch d {
+			case "const":
+				fmt.Fprintf(&b, "  - %s.%s = %g\n", ic.Entity, ic.Field, ic.Value)
+			case "uniform", "spread":
+				fmt.Fprintf(&b, "  - %s.%s %s over [%g, %g]\n", ic.Entity, ic.Field, d, ic.Min, ic.Max)
+			default:
+				fmt.Fprintf(&b, "  - %s.%s = 0\n", ic.Entity, ic.Field)
+			}
 		}
 	}
 	return b.String()

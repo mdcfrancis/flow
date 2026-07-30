@@ -1,6 +1,8 @@
 package evolution
 
 import (
+	"fmt"
+	"math"
 	"path/filepath"
 	"testing"
 
@@ -113,6 +115,62 @@ func TestModelProjectsCollectionColumns(t *testing.T) {
 	}
 	if _, ok := fields["particle_mapout"]; ok {
 		t.Error("dense projection must not emit a scratch map-out")
+	}
+}
+
+// Designed initial conditions expand to per-element boot seeds: a uniform scatter fills a
+// collection's array with DISTINCT values in range (not all zero), x and y scatter
+// independently (not a diagonal), a const singleton is a single value, and an f32 field is
+// seeded as float bits.
+func TestInitialSeedsScatter(t *testing.T) {
+	m := &SystemModel{
+		Entities: []Entity{
+			{Name: "particle", Cardinality: 100, Fields: []EntityField{
+				{Name: "x", Type: "f32"}, {Name: "y", Type: "f32"}}},
+			{Name: "attractor", Cardinality: 1, Fields: []EntityField{{Name: "x", Type: "f32"}}},
+		},
+		Init: []FieldInit{
+			{Entity: "particle", Field: "x", Dist: "uniform", Min: 0, Max: 320},
+			{Entity: "particle", Field: "y", Dist: "uniform", Min: 0, Max: 240},
+			{Entity: "attractor", Field: "x", Dist: "const", Value: 160},
+		},
+	}
+	c := &AppContract{Fields: m.ProjectFields()}
+	seeds := map[string][]uint32{}
+	for _, s := range m.InitialSeeds(c) {
+		seeds[s.At] = s.U32
+	}
+	at := func(name string) []uint32 {
+		for _, f := range c.Fields {
+			if f.Name == name {
+				return seeds[fmt.Sprintf("0x%X", f.Offset)]
+			}
+		}
+		return nil
+	}
+	px, py := at("particle_x"), at("particle_y")
+	if len(px) != 100 || len(py) != 100 {
+		t.Fatalf("expected 100-element scatter, got px=%d py=%d", len(px), len(py))
+	}
+	distinct := map[uint32]bool{}
+	sameAsY := 0
+	for i := 0; i < 100; i++ {
+		distinct[px[i]] = true
+		if v := math.Float32frombits(px[i]); v < 0 || v > 320 {
+			t.Fatalf("scatter value %g out of [0,320]", v)
+		}
+		if px[i] == py[i] {
+			sameAsY++
+		}
+	}
+	if len(distinct) < 90 {
+		t.Errorf("scatter should be mostly distinct, got %d distinct of 100", len(distinct))
+	}
+	if sameAsY > 5 {
+		t.Errorf("x and y should scatter independently, but %d elements matched (diagonal)", sameAsY)
+	}
+	if ax := at("attractor_x"); len(ax) != 1 || math.Float32frombits(ax[0]) != 160 {
+		t.Errorf("attractor_x const init should be 160.0, got %v", ax)
 	}
 }
 

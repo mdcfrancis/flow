@@ -1851,8 +1851,33 @@ func seedLiveState(hyp *execution.RuntimeManager, ledger *storage.LedgerEngine, 
 			}
 		}
 	}
-	if best == nil {
+	// The DESIGNED initial conditions from the canonical model are authoritative for the
+	// fields they cover — a particle system's SCATTERED positions and velocities — so they
+	// override whatever a test scenario happened to seed. A model-driven app therefore boots
+	// from a designed cold start even when no scenario snapshot exists.
+	var designed map[uint32]uint32
+	if m := evolution.LoadModel(ledger, ns); m != nil {
+		if c := evolution.LoadContract(ledger, ns); c != nil {
+			designed = map[uint32]uint32{}
+			for _, sd := range m.InitialSeeds(c) {
+				off, err := strconv.ParseInt(strings.TrimSpace(sd.At), 0, 64)
+				if err != nil {
+					continue
+				}
+				for i, w := range sd.U32 {
+					o := off + int64(4*i)
+					if o >= 0xB0000 && o < 0xC0000 {
+						designed[uint32(o)] = w
+					}
+				}
+			}
+		}
+	}
+	if best == nil && len(designed) == 0 {
 		return 0
+	}
+	if best == nil {
+		best = map[uint32]uint32{}
 	}
 	// Fill any contract field the chosen snapshot didn't set (typically static
 	// config like window dimensions, which every scenario agrees on) from other
@@ -1876,6 +1901,11 @@ func seedLiveState(hyp *execution.RuntimeManager, ledger *storage.LedgerEngine, 
 				}
 			}
 		}
+	}
+	// Overlay the designed initial conditions LAST, so a collection's scattered positions
+	// (and any other designed start) win over the scavenged scenario snapshot.
+	for off, w := range designed {
+		best[off] = w
 	}
 	n := 0
 	for off, v := range best {

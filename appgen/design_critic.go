@@ -171,6 +171,14 @@ func (g *Grower) critiqueModel(ctx context.Context, namespace string) ([]DesignR
 			}
 		}
 	}
+	// Enforce that every collection has designed initial conditions — a collection without
+	// them boots stacked at zero. The designer's own init is kept; only an omission is filled.
+	if filled := ensureCollectionInit(m); len(filled) > 0 {
+		for _, e := range filled {
+			reps = append(reps, DesignRepair{Category: "model", Target: e, Reason: "added scatter initial conditions (a collection must boot spread out, not stacked at zero)"})
+		}
+		changed = true
+	}
 	if !changed {
 		return nil, nil
 	}

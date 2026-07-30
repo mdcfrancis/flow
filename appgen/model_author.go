@@ -29,16 +29,33 @@ screen). For each entity give:
 Then give the DYNAMICS: the ordered per-tick transformations, in terms of the entities and
 their fields.
 
+Finally, design the INITIAL CONDITIONS — the state the app BOOTS from, before any tick runs.
+This is DESIGN, not a per-tick rule: without it a collection's arrays boot at zero and every
+instance is stacked on one point (a particle system needs its instances SPREAD OUT). For each
+field that needs a non-zero or non-degenerate start, give a distribution:
+  - "uniform" over [min,max] — each instance a different value in the range (use this to
+    SCATTER a collection's positions across the screen: x uniform [0, screen width], y uniform
+    [0, screen height]; and for a lively start, a small random velocity, e.g. [-1, 1]);
+  - "spread" over [min,max] — evenly stepped by index (a ramp);
+  - "const" value — every instance the same (e.g. an attractor at the screen center).
+Scatter EVERY collection's positions — that is the difference between a visible field and a
+single dot.
+
 Rules:
 - Name fields WITHOUT the entity prefix: write "x", "vx" — NOT "particle_x". The projection
   adds "<entity>_" for you. One name per quantity; do not introduce two names for one thing.
 - Model exactly what the OBJECTIVE needs — no speculative entities or fields.
+- Use the screen dimensions you defined for the scatter ranges (e.g. a 320×240 screen).
 - If ARCHITECTURAL GUIDANCE is given, honor it.
 
 Output ONLY JSON, no prose or fences:
 {"entities":[{"name":"particle","cardinality":100,"purpose":"<one line>",
   "fields":[{"name":"x","type":"f32","desc":"<one line>"}]}],
- "dynamics":["<ordered per-tick transformation naming entities and fields>"]}`
+ "dynamics":["<ordered per-tick transformation naming entities and fields>"],
+ "init":[{"entity":"particle","field":"x","dist":"uniform","min":0,"max":320},
+         {"entity":"particle","field":"y","dist":"uniform","min":0,"max":240},
+         {"entity":"particle","field":"vx","dist":"uniform","min":-1,"max":1},
+         {"entity":"attractor","field":"x","dist":"const","value":160}]}`
 
 // AuthorModel writes the application's canonical system model up front, from the objective
 // and the declared components' roles, and persists it at <ns>:model. It is the ROOT
@@ -81,12 +98,50 @@ func (g *Grower) AuthorModel(ctx context.Context, namespace string) error {
 	}
 	m.Namespace = namespace
 	m.Objective = env.Objective
+	if filled := ensureCollectionInit(&m); len(filled) > 0 {
+		g.event("create", namespace, "backfilled scatter initial conditions for "+strings.Join(filled, ", "))
+	}
 	if err := evolution.SaveModel(g.ledger, namespace, &m); err != nil {
 		return err
 	}
-	g.event("create", namespace, fmt.Sprintf("canonical model: %d entities, %d contract fields",
-		len(m.Entities), len(m.ProjectFields())))
+	g.event("create", namespace, fmt.Sprintf("canonical model: %d entities, %d contract fields, %d initial conditions",
+		len(m.Entities), len(m.ProjectFields()), len(m.Init)))
 	return nil
+}
+
+// ensureCollectionInit is the SAFETY NET for designed initial conditions: if a collection
+// entity has NO initial condition at all, the designer omitted to scatter it and it would
+// boot with every instance stacked at zero (a single dot, not a field). Add a sensible
+// scatter — positions uniform across the screen, velocities a small uniform nudge — so a
+// particle system always boots as a spread. The designer's OWN init (any entry for that
+// entity) is left untouched; this fires only on omission. Returns the entities it backfilled.
+func ensureCollectionInit(m *evolution.SystemModel) []string {
+	const sw, sh = 320.0, 240.0
+	has := map[string]bool{}
+	for _, ic := range m.Init {
+		has[strings.ToLower(ic.Entity)] = true
+	}
+	var filled []string
+	for _, e := range m.Entities {
+		if e.Cardinality <= 1 || has[strings.ToLower(e.Name)] {
+			continue
+		}
+		for _, f := range e.Fields {
+			n := strings.ToLower(f.Name)
+			ic := evolution.FieldInit{Entity: e.Name, Field: f.Name, Dist: "zero"}
+			switch {
+			case isVelocityName(n):
+				ic.Dist, ic.Min, ic.Max = "uniform", -1, 1
+			case isYName(n):
+				ic.Dist, ic.Min, ic.Max = "uniform", 0, sh
+			case isXName(n):
+				ic.Dist, ic.Min, ic.Max = "uniform", 0, sw
+			}
+			m.Init = append(m.Init, ic)
+		}
+		filled = append(filled, e.Name)
+	}
+	return filled
 }
 
 // projectContract derives (or re-derives) the shared-state contract from the model by the
