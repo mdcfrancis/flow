@@ -1856,10 +1856,10 @@ func seedLiveState(hyp *execution.RuntimeManager, ledger *storage.LedgerEngine, 
 	// override whatever a test scenario happened to seed. A model-driven app therefore boots
 	// from a designed cold start even when no scenario snapshot exists.
 	var designed map[uint32]uint32
-	if m := evolution.LoadModel(ledger, ns); m != nil {
-		if c := evolution.LoadContract(ledger, ns); c != nil {
-			designed = map[uint32]uint32{}
-			for _, sd := range m.InitialSeeds(c) {
+	if c := evolution.LoadContract(ledger, ns); c != nil {
+		designed = map[uint32]uint32{}
+		apply := func(seeds []evolution.SeedWrite) {
+			for _, sd := range seeds {
 				off, err := strconv.ParseInt(strings.TrimSpace(sd.At), 0, 64)
 				if err != nil {
 					continue
@@ -1871,6 +1871,14 @@ func seedLiveState(hyp *execution.RuntimeManager, ledger *storage.LedgerEngine, 
 					}
 				}
 			}
+		}
+		// Designed SCALAR state — the collection COUNT (= cardinality), config, and any
+		// scalar init. Without this the loop bound (particle_count) is scavenged from a test
+		// scenario (e.g. 2), so a 300-particle field renders two dots.
+		apply(c.InitSeeds())
+		// Designed DISTRIBUTIONS — the scattered arrays — win over the scalars (no overlap).
+		if m := evolution.LoadModel(ledger, ns); m != nil {
+			apply(m.InitialSeeds(c))
 		}
 	}
 	if best == nil && len(designed) == 0 {
