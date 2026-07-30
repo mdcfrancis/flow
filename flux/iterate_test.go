@@ -94,6 +94,47 @@ func TestSceneStillAccumulates(t *testing.T) {
 	}
 }
 
+// An f32[N] array is addressed as native floats: (setidx) stores f32, (atidx) loads f32
+// for continuous physics, and (atidxi) truncates an element to an i32 pixel coord for a
+// draw. This is the whole point of f32 arrays — a particle field integrates on real floats
+// (no i32 flooring) yet still renders at integer coordinates.
+func TestFloatArrayOps(t *testing.T) {
+	layout := Layout{
+		"n":  {Type: TInt, Offset: 0xB0000},
+		"px": {Type: TBuffer, EType: TFloat, Offset: 0xB0100, Len: 64},
+		"vx": {Type: TBuffer, EType: TFloat, Offset: 0xB0300, Len: 64},
+	}
+	// physics: integrate velocity into position on floats, in place.
+	phys := `(cell run-tick
+  (for $i (get n)
+    (setidx px $i (f32.add (atidx px $i) (atidx vx $i))))
+  (i32.const 0))`
+	wat, err := Expand(phys, layout)
+	if err != nil {
+		t.Fatalf("expand physics: %v", err)
+	}
+	if !strings.Contains(wat, "f32.load") || !strings.Contains(wat, "f32.store") {
+		t.Fatalf("f32 array must lower to f32.load/f32.store:\n%s", wat)
+	}
+	if _, cerr := compiler.NewCompilerService().CompileGenotype(wat); cerr != nil {
+		t.Fatalf("float-array physics must assemble: %v\n%s", cerr, wat)
+	}
+	// render: draw each particle at its truncated float coordinate.
+	view := `(cell render-frame
+  (for $i (get n)
+    (draw (circle (atidxi px $i) (atidxi px $i) (i32.const 2) (i32.const 0xFFCC33FF)))))`
+	rwat, rerr := Expand(view, layout)
+	if rerr != nil {
+		t.Fatalf("expand render: %v", rerr)
+	}
+	if !strings.Contains(rwat, "i32.trunc_f32_s") {
+		t.Fatalf("(atidxi) on an f32 array must truncate to i32:\n%s", rwat)
+	}
+	if _, cerr := compiler.NewCompilerService().CompileGenotype(rwat); cerr != nil {
+		t.Fatalf("float-array render must assemble: %v\n%s", cerr, rwat)
+	}
+}
+
 // A combinator LEAF authors physics over ITS ELEMENT: (get/set NAME) on an Elem field
 // read/write argPtr+offset (this particle), not the global array. Gravity toward a
 // GLOBAL attractor + in-place integrate, in macro-WAT — the thing a leaf could not do

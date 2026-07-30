@@ -1298,6 +1298,97 @@ func codeCritic(ctx context.Context, grower *appgen.Grower, orch *evolution.Orch
 	return reopened
 }
 
+// designCriticInterval throttles the design critics (a whole-design LLM pass) — like the
+// code critic, costlier and less time-sensitive than a per-frame check, so less frequent.
+var designCriticInterval = 180 * time.Second
+
+// designCritic runs the categorical DESIGN critics (type + architecture) over the focused
+// app and APPLIES their repairs to the design artifacts (contract types, plan structure),
+// then re-opens the cells that DEPEND on a changed field or component so they re-synthesize
+// against the corrected design. Throttled and de-duplicated on the design fingerprint
+// (contract + plan): it only re-runs when the design changed — which includes its own
+// repairs, so it converges (repair → fingerprint changes → re-check → coherent → settle).
+// Returns the number of cells re-opened.
+func designCritic(ctx context.Context, grower *appgen.Grower, canvasSrv *integration.CanvasServer, root string, persist func(string, evolution.FrictionState), activity *status.Broker, ledger *storage.LedgerEngine, lastKey *string, lastAt *time.Time) int {
+	ns := appNamespace(canvasSrv.Active())
+	if ns == "" || time.Since(*lastAt) < designCriticInterval {
+		return 0
+	}
+	contract := evolution.LoadContract(ledger, ns)
+	plan := evolution.LoadPlan(ledger, ns)
+	model := evolution.LoadModel(ledger, ns)
+	if contract == nil && plan == nil && model == nil {
+		return 0 // nothing designed yet — AuthorModel/AuthorPlan/EnsureContract run first
+	}
+	key := designFingerprint(model, contract, plan)
+	if *lastKey == key {
+		return 0 // same design as last judged
+	}
+	reps, err := grower.CritiqueDesign(ctx, ns)
+	if err != nil {
+		log.Printf("[DESIGN-CRITIC] %s failed (will retry): %v", ns, err)
+		return 0
+	}
+	*lastAt = time.Now()
+	if len(reps) == 0 {
+		*lastKey = key
+		log.Printf("[DESIGN-CRITIC] %s: design is type- and architecture-coherent", ns)
+		return 0
+	}
+	// Repairs changed the design — fingerprint the CORRECTED design so the next pass
+	// re-checks it and settles once coherent.
+	*lastKey = designFingerprint(evolution.LoadModel(ledger, ns), evolution.LoadContract(ledger, ns), evolution.LoadPlan(ledger, ns))
+
+	// Re-open the cells that depend on what changed: any cell whose ports touch a retyped
+	// field, an architecture repair's component, and — for a MODEL repair (which re-projects
+	// the whole contract) — every cell of the app, since the shared layout changed under all
+	// of them.
+	retyped := map[string]bool{}
+	reopen := map[string]bool{}
+	modelChanged := false
+	for _, r := range reps {
+		log.Printf("[DESIGN-CRITIC] %s %s", ns, r.String())
+		switch r.Category {
+		case "type":
+			retyped[r.Target] = true
+		case "architecture":
+			reopen[r.Target] = true
+		case "model":
+			modelChanged = true
+		}
+	}
+	if env := appgen.LoadEnvelope(ledger, ns); env != nil {
+		for _, s := range env.SubsystemRequirements {
+			if modelChanged {
+				reopen[s.Identity] = true
+				continue
+			}
+			for _, f := range append(append([]string{}, s.Reads...), s.Writes...) {
+				if retyped[f] {
+					reopen[s.Identity] = true
+				}
+			}
+		}
+	}
+	n := 0
+	for urn := range reopen {
+		persist(urn, evolution.FrictionState{Root: root})
+		activity.Event("mutate", urn, "design repaired upstream — rebuild against the corrected design")
+		n++
+	}
+	return n
+}
+
+// designFingerprint is a stable key over the design artifacts (model + contract + plan),
+// so the design critic only re-runs when the design actually changed — including its own
+// model repairs, so it converges.
+func designFingerprint(m *evolution.SystemModel, c *evolution.AppContract, p *evolution.AppPlan) string {
+	mb, _ := json.Marshal(m)
+	cb, _ := json.Marshal(c)
+	pb, _ := json.Marshal(p)
+	return string(mb) + "|" + string(cb) + "|" + string(pb)
+}
+
 // visionSatisfied parses a {"satisfied":bool} verdict from the model's answer;
 // ok=false when no JSON verdict is found (treated as "don't act").
 func visionSatisfied(ans string) (satisfied, ok bool) {
@@ -2571,6 +2662,26 @@ func main() {
 			}
 			return ""
 		},
+		Contract: func() string {
+			ns := appNamespace(canvasSrv.Active())
+			if ns == "" {
+				return ""
+			}
+			if c := evolution.LoadContract(ledger, ns); c != nil {
+				return c.Render()
+			}
+			return ""
+		},
+		Model: func() string {
+			ns := appNamespace(canvasSrv.Active())
+			if ns == "" {
+				return ""
+			}
+			if m := evolution.LoadModel(ledger, ns); m != nil {
+				return m.Render()
+			}
+			return ""
+		},
 		Walk: func() string {
 			ns := appNamespace(canvasSrv.Active())
 			if ns == "" {
@@ -2934,9 +3045,16 @@ func main() {
 	var lastVisualCritique time.Time
 	codeCritiqued := ""
 	var lastCodeCritique time.Time
+	designCritiqued := ""
+	var lastDesignCritique time.Time
 	if v := os.Getenv("HDM_VISION_INTERVAL"); v != "" {
 		if d, err := time.ParseDuration(v); err == nil && d > 0 {
 			visionCritiqueInterval = d
+		}
+	}
+	if v := os.Getenv("HDM_DESIGN_INTERVAL"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d > 0 {
+			designCriticInterval = d
 		}
 	}
 	// capturedCells remembers app cells already promoted to knowledge-base examples,
@@ -3036,6 +3154,16 @@ func main() {
 			// The general (non-visual) adversarial arm: judge the focused app's code
 			// against the operator's criteria and re-open any cell that violates one.
 			if reopened := codeCritic(ctx, grower, orchestrator, repo, canvasSrv, orchestrator.ManifestRoot(), persistFriction, activity, ledger, &codeCritiqued, &lastCodeCritique); reopened > 0 {
+				idleWait, idleBackoff = 0, 1
+				hypervisor.SetReasoningGate(false)
+			}
+			// The DESIGN critics: categorical adversarial review of the focused app's
+			// design ARTIFACTS (the contract's types, the plan's architecture) that
+			// REPAIRS them in place, then re-opens the cells whose corrected contract/
+			// plan they depend on — so a design flaw (a continuous quantity typed i32, a
+			// map leaf planned as a renderer) is fixed once, upstream, instead of a cell
+			// churning against it for hours.
+			if reopened := designCritic(ctx, grower, canvasSrv, orchestrator.ManifestRoot(), persistFriction, activity, ledger, &designCritiqued, &lastDesignCritique); reopened > 0 {
 				idleWait, idleBackoff = 0, 1
 				hypervisor.SetReasoningGate(false)
 			}

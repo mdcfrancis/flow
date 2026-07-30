@@ -13,7 +13,7 @@ const (
 	TBool         // i32 0/1
 	TColor        // i32 RGBA
 	TUnit         // a terminal (no value)
-	TBuffer       // a bounded i32 array in shared memory: a base offset + length
+	TBuffer       // a bounded array in shared memory: a base offset + length (element type in EType)
 )
 
 func (t Type) String() string {
@@ -45,6 +45,11 @@ type Field struct {
 	Offset   uint32
 	ReadOnly bool   // a host-written capability field (e.g. the HMI input registers)
 	Len      uint32 // element count for a TBuffer field; zero for scalars
+	// EType is a TBuffer's ELEMENT type — TFloat for an f32[] array, otherwise i32
+	// (the zero value TInvalid is read as i32). It lets atidx/setidx pick f32.load/
+	// f32.store for a float array, so a particle system's positions can live in a
+	// contract array as native floats, not just i32. Unused for scalar fields.
+	EType Type
 	// Elem marks an ELEMENT field of a combinator LEAF: its Offset is relative to the
 	// leaf's ARG POINTER (param 0 = a pointer to one element the combinator handed it),
 	// not an absolute shared-memory offset. So (get x)/(set x) on a leaf read/write this

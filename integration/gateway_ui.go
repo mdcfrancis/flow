@@ -659,6 +659,12 @@ type Services struct {
 	// Plan renders the active application's evolving DESIGN PLAN (the system
 	// overview, choreography, and each component's algorithm). Optional.
 	Plan func() string
+	// Contract renders the active application's shared-state CONTRACT — the named
+	// fields, their TYPES (what the design critic type-checks), and offsets. Optional.
+	Contract func() string
+	// Model renders the active application's canonical SYSTEM MODEL — the entities,
+	// their typed state, and dynamics that the contract and ports derive from. Optional.
+	Model func() string
 	// Walk renders the active application's GOAL TREE — the recursive, depth-first
 	// walk the scheduler follows (a fractured goal's children before its siblings).
 	// Optional.
@@ -802,6 +808,18 @@ func Serve(ctx context.Context, addr string, s Services) *http.Server {
 		mux.HandleFunc("/plan", func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 			_, _ = io.WriteString(w, s.Plan())
+		})
+	}
+	if s.Contract != nil {
+		mux.HandleFunc("/contract", func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+			_, _ = io.WriteString(w, s.Contract())
+		})
+	}
+	if s.Model != nil {
+		mux.HandleFunc("/model", func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+			_, _ = io.WriteString(w, s.Model())
 		})
 	}
 	if s.Walk != nil {

@@ -530,13 +530,23 @@ func (g *Grower) ScaffoldAll(ctx context.Context, env *AppEnvelope, enroll func(
 // enrolling each as it comes online. Returns the created URNs and the first UI
 // subsystem's URN.
 func (g *Grower) growAll(ctx context.Context, env *AppEnvelope, enroll func(urn string)) (created []string, uiURN string, err error) {
+	// Define the CANONICAL MODEL first — the single source of truth the contract and
+	// ports derive from — so the shared state has one coherent vocabulary rather than
+	// three independently-authored ones. Best-effort: no model just falls back to
+	// authoring the contract directly.
+	if merr := g.AuthorModel(ctx, env.ApplicationNamespace); merr != nil {
+		g.event("hold", env.ApplicationNamespace, "model authoring deferred: "+merr.Error())
+	}
 	// Ensure the shared-state contract exists BEFORE scaffolding, so a compute
 	// cell is authored with contract-aware coordination scenarios rather than
-	// contrived scalar tests (see scaffold). Idempotent — a no-op if already
-	// authored (e.g. by GrowConcurrent).
+	// contrived scalar tests (see scaffold). Projected from the model when one exists.
+	// Idempotent — a no-op if already authored (e.g. by GrowConcurrent).
 	if _, cerr := g.EnsureContract(ctx, env.ApplicationNamespace); cerr != nil {
 		g.event("hold", env.ApplicationNamespace, "contract authoring deferred: "+cerr.Error())
 	}
+	// Resolve every component port to a canonical model field (no phantom fields, no
+	// name drift) now that the contract exists.
+	g.resolvePortsToModel(env.ApplicationNamespace)
 	// Seed the map with the PLANNED architecture before anything is built, so even
 	// the first cell is synthesized knowing what the application is and which
 	// siblings are coming.

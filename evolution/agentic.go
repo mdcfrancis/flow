@@ -82,7 +82,9 @@ const macroPreamble = `You write a cell in WAT (WebAssembly text) using these MA
   (get NAME)        read shared field NAME  (f32 if the field is f32, else i32)
   (set NAME EXPR)   write EXPR to field NAME (store type matches the field)
   (geti NAME)       field NAME as an i32 — TRUNCATES an f32 field, for pixel coords
-  (atidx NAME IDX)  / (setidx NAME IDX EXPR)   array element read / write (IDX may be a $loop var)
+  (atidx NAME IDX)  / (setidx NAME IDX EXPR)   array element read / write in its natural type
+                    (f32 for an f32[N] array, else i32; IDX may be a $loop var)
+  (atidxi NAME IDX) array element as an i32 — TRUNCATES an f32[N] element, for pixel coords
   (field NAME)      the raw i32 base offset of NAME
 
 DRAWING (render-frame cells):
@@ -90,9 +92,11 @@ DRAWING (render-frame cells):
                     (rect X Y W H COLOR) | (line X1 Y1 X2 Y2 COLOR); COLOR = (i32.const 0xRRGGBBAA).
   (scene PRIM…)     shorthand for several (draw …) in a row (a fixed set of shapes).
   To draw a VARIABLE number of things (one per element of an ARRAY field), LOOP and draw:
-      (for $i (get count) (draw (circle (atidx px $i) (atidx py $i) (i32.const 3) COLOR)))
-  A field typed i32[N] is an ARRAY — read element i with (atidx name $i). Draw a scalar
-  (single) thing with one (draw …); draw an array of them with (for … (draw …)).
+      (for $i (get count) (draw (circle (atidxi px $i) (atidxi py $i) (i32.const 3) COLOR)))
+  A field typed i32[N] or f32[N] is an ARRAY — read element i with (atidx name $i), or
+  (atidxi name $i) for an i32 pixel coord from an f32[N] array. Draw a scalar (single) thing
+  with one (draw …); draw an array of them with (for … (draw …)). Use f32[N] for particle
+  positions/velocities so the physics integrates on real floats, not flooring i32.
 
 ITERATION:
   (for $i COUNT BODY…)   run BODY for $i = 0,1,…,COUNT-1. Use it to update every element of

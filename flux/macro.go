@@ -20,8 +20,10 @@
 //	(get NAME)               → load field NAME (f32.load if it's an f32 field, else i32).
 //	(set NAME EXPR)          → store EXPR to field NAME (f32.store / i32.store by type).
 //	(geti NAME)              → field NAME as an i32 (an f32 field is truncated).
-//	(atidx NAME IDX)         → load element IDX of array field NAME (i32.load, ×4, +base).
-//	(setidx NAME IDX EXPR)   → store EXPR to element IDX of array field NAME.
+//	(atidx NAME IDX)         → load element IDX of array field NAME in its natural type
+//	                            (f32.load for an f32[] array, else i32.load; ×4, +base).
+//	(atidxi NAME IDX)        → element IDX as an i32 (an f32[] element is truncated).
+//	(setidx NAME IDX EXPR)   → store EXPR to element IDX (f32.store / i32.store by element type).
 //	(field NAME)             → (i32.const OFFSET), the raw base offset of NAME.
 //	(scene PRIM…)            → a render body: one 24-byte draw record per prim.
 package flux
@@ -129,7 +131,7 @@ func ExtractDefmacros(src string) ([]Defmacro, error) {
 var reservedMacroWord = map[string]bool{
 	// built-in macro heads
 	"cell": true, "get": true, "set": true, "geti": true, "atidx": true,
-	"setidx": true, "field": true, "scene": true, "defmacro": true,
+	"atidxi": true, "setidx": true, "field": true, "scene": true, "defmacro": true,
 	// bare WAT structural / control keywords
 	"module": true, "func": true, "export": true, "import": true, "memory": true,
 	"param": true, "result": true, "local": true, "if": true, "then": true,
@@ -448,7 +450,8 @@ func rewrite(n mnode, fields Layout, macros map[string]macroDef, depth int, sym 
 		return addr(f), nil
 
 	case "atidx":
-		// (atidx NAME IDX) → (i32.load (i32.add base (i32.mul IDX (i32.const 4))))
+		// (atidx NAME IDX) → load element IDX of array field NAME in its NATURAL type
+		// (f32.load for an f32[] array, else i32.load), mirroring (get) on a scalar.
 		if len(n.kids) != 3 || !n.kids[1].isAtom() {
 			return mnode{}, fmt.Errorf("(atidx NAME IDX) takes a field name and an index")
 		}
@@ -457,9 +460,31 @@ func rewrite(n mnode, fields Layout, macros map[string]macroDef, depth int, sym 
 			return mnode{}, err
 		}
 		a := mlst(matom("i32.add"), addr(f), mlst(matom("i32.mul"), idxVal(n.kids[2]), mlst(matom("i32.const"), matom("4"))))
+		ld := "i32.load"
+		if f.EType == TFloat {
+			ld = "f32.load"
+		}
+		return mlst(matom(ld), a), nil
+
+	case "atidxi":
+		// (atidxi NAME IDX) → element IDX as an i32: an f32[] element is TRUNCATED (for
+		// pixel coords), an i32[] element loaded directly — the array analog of (geti).
+		if len(n.kids) != 3 || !n.kids[1].isAtom() {
+			return mnode{}, fmt.Errorf("(atidxi NAME IDX) takes a field name and an index")
+		}
+		f, err := fieldOff(n.kids[1].atom)
+		if err != nil {
+			return mnode{}, err
+		}
+		a := mlst(matom("i32.add"), addr(f), mlst(matom("i32.mul"), idxVal(n.kids[2]), mlst(matom("i32.const"), matom("4"))))
+		if f.EType == TFloat {
+			return mlst(matom("i32.trunc_f32_s"), mlst(matom("f32.load"), a)), nil
+		}
 		return mlst(matom("i32.load"), a), nil
 
 	case "setidx":
+		// (setidx NAME IDX EXPR) stores EXPR to element IDX in the array's NATURAL type
+		// (f32.store for an f32[] array, else i32.store), mirroring (set) on a scalar.
 		if len(n.kids) != 4 || !n.kids[1].isAtom() {
 			return mnode{}, fmt.Errorf("(setidx NAME IDX EXPR) takes a field name, index, value")
 		}
@@ -468,7 +493,11 @@ func rewrite(n mnode, fields Layout, macros map[string]macroDef, depth int, sym 
 			return mnode{}, err
 		}
 		a := mlst(matom("i32.add"), addr(f), mlst(matom("i32.mul"), idxVal(n.kids[2]), mlst(matom("i32.const"), matom("4"))))
-		return mlst(matom("i32.store"), a, n.kids[3]), nil
+		st := "i32.store"
+		if f.EType == TFloat {
+			st = "f32.store"
+		}
+		return mlst(matom(st), a, n.kids[3]), nil
 
 	case "cell":
 		// (cell ENTRY BODY…) → module + memory import + exported function.

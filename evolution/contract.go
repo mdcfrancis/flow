@@ -10,6 +10,7 @@ package evolution
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"strings"
 
 	"github.com/mdcfrancis/flow/storage"
@@ -42,7 +43,14 @@ func (c *AppContract) InitSeeds() []SeedWrite {
 		if typeWords(f.Type) != 1 { // scalars only
 			continue
 		}
-		out = append(out, SeedWrite{At: fmt.Sprintf("0x%X", f.Offset), U32: []uint32{uint32(int32(f.Init))}})
+		// An f32 field's Init is a decimal count (e.g. an attractor at x=160): seed the
+		// FLOAT bit pattern, not the raw integer, so a cell reading it with f32.load sees
+		// 160.0 rather than a denormal. i32 fields seed the integer directly.
+		bits := uint32(int32(f.Init))
+		if strings.TrimSpace(f.Type) == "f32" {
+			bits = math.Float32bits(float32(f.Init))
+		}
+		out = append(out, SeedWrite{At: fmt.Sprintf("0x%X", f.Offset), U32: []uint32{bits}})
 	}
 	return out
 }

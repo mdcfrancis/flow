@@ -156,10 +156,19 @@ func LayoutFromContract(c *AppContract) flux.Layout {
 			// bounds-clamped) — so an array-writing cell (a particle system, a grid
 			// renderer) is Flux-addressable instead of falling back to raw WAT.
 			if n := typeWords(ft); n > 1 {
-				l[f.Name] = flux.Field{Type: flux.TBuffer, Offset: uint32(f.Offset), Len: uint32(n)}
+				l[f.Name] = flux.Field{Type: flux.TBuffer, Offset: uint32(f.Offset), Len: uint32(n), EType: flux.TInt}
+			}
+		case strings.HasPrefix(ft, "f32[") && strings.HasSuffix(ft, "]"):
+			// An f32 array — the natural home for continuous per-element state (a
+			// particle field's positions/velocities). Its elements are addressed as
+			// native floats: (atidx) loads f32, (setidx) stores f32, (atidxi) truncates
+			// to an i32 pixel coordinate. This is what lets a type critic move particle
+			// state off i32 (where gravity/division floor to zero) onto real floats.
+			if n := typeWords(ft); n > 1 {
+				l[f.Name] = flux.Field{Type: flux.TBuffer, Offset: uint32(f.Offset), Len: uint32(n), EType: flux.TFloat}
 			}
 		default:
-			continue // f32 arrays / unknown: not addressable by Flux yet
+			continue // unknown: not addressable by Flux yet
 		}
 	}
 	if len(l) == 0 {
@@ -273,13 +282,14 @@ func macroSeedBlock(contract *EntryContract, layout flux.Layout) string {
 		b.WriteString("                                      (rect X Y W H COLOR) | (line X1 Y1 X2 Y2 COLOR); COLOR=(i32.const 0xRRGGBBAA).\n")
 		b.WriteString("  (scene PRIM…)                       shorthand for several (draw …) in a row (a FIXED set of shapes).\n")
 		b.WriteString("  For a VARIABLE number of shapes (one per ARRAY element), LOOP and draw:\n")
-		b.WriteString("    (for $i (get count) (draw (circle (atidx px $i) (atidx py $i) (i32.const 3) COLOR)))\n")
+		b.WriteString("    (for $i (get count) (draw (circle (atidxi px $i) (atidxi py $i) (i32.const 3) COLOR)))\n")
 	} else {
 		b.WriteString("  (cell run-tick BODY…)               BODY ends with (i32.const 0).\n")
 	}
 	b.WriteString("  (get NAME) / (set NAME EXPR)        read / write a shared field (f32 if the field is f32, else i32)\n")
 	b.WriteString("  (geti NAME)                         field NAME as an i32 (TRUNCATES an f32 field, for pixel coords)\n")
-	b.WriteString("  (atidx NAME IDX) / (setidx NAME IDX EXPR)   ARRAY (i32[N]) element read / write; IDX may be a $loop var\n")
+	b.WriteString("  (atidx NAME IDX) / (setidx NAME IDX EXPR)   ARRAY element read / write in its natural type (f32 for an f32[N] array); IDX may be a $loop var\n")
+	b.WriteString("  (atidxi NAME IDX)                   ARRAY element as an i32 (TRUNCATES an f32[N] element — use for pixel coords)\n")
 	b.WriteString("  (for $i COUNT BODY…)                run BODY for $i=0..COUNT-1 — update every array element, or draw one shape per element\n")
 	b.WriteString("Everything else is ordinary WAT: i32.*/f32.* math, (local $t f32), etc. Locals are hoisted for you.\n")
 	b.WriteString("USE FLOATS for continuous physics (a field typed f32): f32.div does not floor to zero.\n\n")

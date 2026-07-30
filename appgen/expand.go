@@ -702,6 +702,16 @@ func (g *Grower) EnsureContract(ctx context.Context, namespace string) (bool, er
 	if evolution.LoadContract(g.ledger, namespace) != nil {
 		return false, nil
 	}
+	// GENERATOR PATH: when a canonical model exists, the contract is a deterministic
+	// PROJECTION of it — names and types are derived by one rule, so no field can drift
+	// from the model and no phantom port-field can be minted. The LLM contract authoring
+	// below is the fallback for apps grown before the model layer.
+	if ok, err := g.projectContract(namespace); ok || err != nil {
+		if err == nil {
+			g.event("create", namespace, "shared-state contract: projected from the canonical model")
+		}
+		return ok, err
+	}
 	env := LoadEnvelope(g.ledger, namespace)
 	if env == nil {
 		return false, nil
