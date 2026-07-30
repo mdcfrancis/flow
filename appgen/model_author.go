@@ -99,7 +99,10 @@ func (g *Grower) projectContract(namespace string) (bool, error) {
 	if m == nil {
 		return false, nil
 	}
-	fields := packOffsets(m.ProjectFields())
+	// ProjectFields already assigns absolute offsets AND the interleaved stride for a
+	// collection, so do NOT re-pack (packOffsets would re-lay everything out densely and
+	// destroy the array-of-structs interleaving). Just fill init backstops.
+	fields := m.ProjectFields()
 	if len(fields) == 0 {
 		return false, nil
 	}

@@ -459,7 +459,7 @@ func rewrite(n mnode, fields Layout, macros map[string]macroDef, depth int, sym 
 		if err != nil {
 			return mnode{}, err
 		}
-		a := mlst(matom("i32.add"), addr(f), mlst(matom("i32.mul"), idxVal(n.kids[2]), mlst(matom("i32.const"), matom("4"))))
+		a := elemAddr(f, addr(f), idxVal(n.kids[2]))
 		ld := "i32.load"
 		if f.EType == TFloat {
 			ld = "f32.load"
@@ -476,7 +476,7 @@ func rewrite(n mnode, fields Layout, macros map[string]macroDef, depth int, sym 
 		if err != nil {
 			return mnode{}, err
 		}
-		a := mlst(matom("i32.add"), addr(f), mlst(matom("i32.mul"), idxVal(n.kids[2]), mlst(matom("i32.const"), matom("4"))))
+		a := elemAddr(f, addr(f), idxVal(n.kids[2]))
 		if f.EType == TFloat {
 			return mlst(matom("i32.trunc_f32_s"), mlst(matom("f32.load"), a)), nil
 		}
@@ -492,7 +492,7 @@ func rewrite(n mnode, fields Layout, macros map[string]macroDef, depth int, sym 
 		if err != nil {
 			return mnode{}, err
 		}
-		a := mlst(matom("i32.add"), addr(f), mlst(matom("i32.mul"), idxVal(n.kids[2]), mlst(matom("i32.const"), matom("4"))))
+		a := elemAddr(f, addr(f), idxVal(n.kids[2]))
 		st := "i32.store"
 		if f.EType == TFloat {
 			st = "f32.store"
@@ -558,6 +558,19 @@ func idxVal(n mnode) mnode {
 		return mlst(matom("local.get"), n)
 	}
 	return n
+}
+
+// elemAddr computes the byte address of element idx of array field f:
+// base + idx*stride. Stride is 4 for a dense array, or the field's record stride for a
+// STRIDED VIEW into an interleaved buffer (particle_x/particle_y sharing one "particle"
+// array-of-structs). base already carries the field's offset within the record, so this is
+// the whole of the AoS support: one multiplier.
+func elemAddr(f Field, base, idx mnode) mnode {
+	stride := uint32(4)
+	if f.Stride != 0 {
+		stride = f.Stride
+	}
+	return mlst(matom("i32.add"), base, mlst(matom("i32.mul"), idx, mlst(matom("i32.const"), matom(fmt.Sprintf("%d", stride)))))
 }
 
 // drawRecord emits the instructions that write ONE 24-byte draw record for prim p at the

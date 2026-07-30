@@ -156,16 +156,17 @@ func LayoutFromContract(c *AppContract) flux.Layout {
 			// bounds-clamped) — so an array-writing cell (a particle system, a grid
 			// renderer) is Flux-addressable instead of falling back to raw WAT.
 			if n := typeWords(ft); n > 1 {
-				l[f.Name] = flux.Field{Type: flux.TBuffer, Offset: uint32(f.Offset), Len: uint32(n), EType: flux.TInt}
+				l[f.Name] = flux.Field{Type: flux.TBuffer, Offset: uint32(f.Offset), Len: uint32(n), EType: flux.TInt, Stride: uint32(f.Stride)}
 			}
 		case strings.HasPrefix(ft, "f32[") && strings.HasSuffix(ft, "]"):
 			// An f32 array — the natural home for continuous per-element state (a
 			// particle field's positions/velocities). Its elements are addressed as
 			// native floats: (atidx) loads f32, (setidx) stores f32, (atidxi) truncates
 			// to an i32 pixel coordinate. This is what lets a type critic move particle
-			// state off i32 (where gravity/division floor to zero) onto real floats.
+			// state off i32 (where gravity/division floor to zero) onto real floats. A
+			// non-zero Stride makes it one column of an interleaved collection buffer.
 			if n := typeWords(ft); n > 1 {
-				l[f.Name] = flux.Field{Type: flux.TBuffer, Offset: uint32(f.Offset), Len: uint32(n), EType: flux.TFloat}
+				l[f.Name] = flux.Field{Type: flux.TBuffer, Offset: uint32(f.Offset), Len: uint32(n), EType: flux.TFloat, Stride: uint32(f.Stride)}
 			}
 		default:
 			continue // unknown: not addressable by Flux yet
@@ -291,6 +292,12 @@ func macroSeedBlock(contract *EntryContract, layout flux.Layout) string {
 	b.WriteString("  (atidx NAME IDX) / (setidx NAME IDX EXPR)   ARRAY element read / write in its natural type (f32 for an f32[N] array); IDX may be a $loop var\n")
 	b.WriteString("  (atidxi NAME IDX)                   ARRAY element as an i32 (TRUNCATES an f32[N] element — use for pixel coords)\n")
 	b.WriteString("  (for $i COUNT BODY…)                run BODY for $i=0..COUNT-1 — update every array element, or draw one shape per element\n")
+	b.WriteString("COLLECTIONS: a set of N entities is a group of array columns <entity>_<field> (e.g.\n")
+	b.WriteString("  particle_x, particle_vx) plus a count <entity>_count. Update the collection IN PLACE\n")
+	b.WriteString("  with ONE run-tick loop — read/write record i's field with (atidx/setidx <entity>_<field> $i):\n")
+	b.WriteString("    (for $i (get particle_count) (setidx particle_vx $i (f32.add (atidx particle_vx $i) …)) (setidx particle_x $i (f32.add (atidx particle_x $i) (atidx particle_vx $i))))\n")
+	b.WriteString("  Draw it with a render loop: (for $i (get particle_count) (draw (circle (atidxi particle_x $i) (atidxi particle_y $i) …))).\n")
+	b.WriteString("  This IS how to handle a particle system / agents — a plain loop, NOT a map combinator.\n")
 	b.WriteString("Everything else is ordinary WAT: i32.*/f32.* math, (local $t f32), etc. Locals are hoisted for you.\n")
 	b.WriteString("USE FLOATS for continuous physics (a field typed f32): f32.div does not floor to zero.\n\n")
 	fmt.Fprintf(&b, "SHARED STATE fields (read and write, within your enforced boundary above):\n  %s\n", strings.Join(stateFields, ", "))

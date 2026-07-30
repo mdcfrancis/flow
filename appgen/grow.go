@@ -114,19 +114,28 @@ Decompose for INCREMENTAL construction, keeping the first version tiny:
   write it (one reads HMI input and writes the player position; others update
   bullet/enemy state).
 
-COMPOSITION (data-parallel kernels): when a subsystem computes a value FOR EACH cell
-of a grid/array (e.g. a fractal's escape-time per pixel, a heatmap, a per-entity
-update), do NOT hand-write the whole nested-loop kernel. Instead emit TWO subsystems:
-  1. a small LEAF compute subsystem — its run-tick reads ONE element's inputs at the
-     arg pointer and returns one i32 (e.g. "read (cr,ci) as two f32 at the arg
-     pointer; iterate z=z*z+c up to 64; return the escape iteration count"), and
-  2. a COMPOSITION subsystem that maps the leaf across the array, with:
+PER-ELEMENT WORK — two shapes, pick by whether the element carries STATE across ticks:
+
+A) A COLLECTION of entities UPDATED IN PLACE each tick — particles, agents, bodies:
+   their per-instance state (x, y, vx, vy) is read AND written every tick and evolves
+   over time. Author ONE ordinary cell that LOOPS over the collection — do NOT split
+   it into a map+leaf (the map's per-element function ABI is for stateless transforms
+   and cannot carry a mutable record cleanly). A collection entity's fields are array
+   columns "<entity>_x", "<entity>_vx" with a count "<entity>_count"; the cell loops
+   (for $i (get <entity>_count) …) and reads/writes record i with
+   (atidx <entity>_vx $i) / (setidx <entity>_vx $i EXPR). The physics cell is a
+   run-tick loop; the renderer is a render-frame loop over the same columns. Declare
+   the collection's columns in reads/writes.
+
+B) A PURE per-element TRANSFORM — out[i] = f(in[i]), NO cross-tick state (a fractal's
+   escape-time per pixel, a heatmap): do NOT hand-write the nested loop. Emit TWO
+   subsystems — a LEAF (run-tick reads ONE element at the arg pointer, returns one i32)
+   and a COMPOSITION that maps it:
      "composition": { "combinator": "map", "leaf": "<leaf identity>",
                       "in": "<input array field>", "out": "<output array field>",
                       "elemWords": <words per input element> }
-HDM GENERATES the map driver; you implement only the leaf. Declare the input/output
-as ARRAY contract fields ("i32[N]"). Prefer this for any per-element grid computation
-— it is far more reliable than a monolithic kernel.
+   HDM generates the map driver; you implement only the leaf. Use this ONLY for a
+   stateless transform, never for an in-place collection update (shape A).
 
 WORKED EXAMPLE (a Mandelbrot viewer) — note the "composition" object is REQUIRED for
 the map subsystem; do not hand-write the grid loop:

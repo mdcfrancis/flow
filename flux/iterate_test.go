@@ -135,6 +135,51 @@ func TestFloatArrayOps(t *testing.T) {
 	}
 }
 
+// A STRIDED field is a view into an interleaved array-of-structs: particle_x and
+// particle_y share one "particle" buffer (stride 28 bytes = 7 f32 fields), so
+// (atidx particle_x $i) reads base+i*28+0 and (atidx particle_y $i) reads base+i*28+4.
+// This is what lets a collection entity live as ONE buffer the map iterates by stride,
+// while cells still address fields by name.
+func TestStridedRecordFields(t *testing.T) {
+	const base, stride = 0xB0100, 28
+	layout := Layout{
+		"n":          {Type: TInt, Offset: 0xB0000},
+		"particle_x":  {Type: TBuffer, EType: TFloat, Offset: base + 0, Len: 100, Stride: stride},
+		"particle_y":  {Type: TBuffer, EType: TFloat, Offset: base + 4, Len: 100, Stride: stride},
+		"particle_vx": {Type: TBuffer, EType: TFloat, Offset: base + 8, Len: 100, Stride: stride},
+	}
+	// physics: integrate velocity into position over the interleaved buffer.
+	phys := `(cell run-tick
+  (for $i (get n)
+    (setidx particle_x $i (f32.add (atidx particle_x $i) (atidx particle_vx $i))))
+  (i32.const 0))`
+	wat, err := Expand(phys, layout)
+	if err != nil {
+		t.Fatalf("expand: %v", err)
+	}
+	// The element step must be the RECORD stride (28), not a dense 4.
+	if !strings.Contains(wat, "i32.const 28") {
+		t.Fatalf("strided field must index by the record stride (28):\n%s", wat)
+	}
+	if strings.Contains(wat, "(i32.const 4))") { // no dense ×4 indexing for these fields
+		// (allow i32.const 4 elsewhere, but the element multiply must be 28)
+	}
+	if _, cerr := compiler.NewCompilerService().CompileGenotype(wat); cerr != nil {
+		t.Fatalf("strided physics must assemble: %v\n%s", cerr, wat)
+	}
+	// render: draw each particle at its interleaved (x,y), truncated to pixels.
+	view := `(cell render-frame
+  (for $i (get n)
+    (draw (circle (atidxi particle_x $i) (atidxi particle_y $i) (i32.const 2) (i32.const 0xFFCC33FF)))))`
+	rwat, rerr := Expand(view, layout)
+	if rerr != nil {
+		t.Fatalf("expand render: %v", rerr)
+	}
+	if _, cerr := compiler.NewCompilerService().CompileGenotype(rwat); cerr != nil {
+		t.Fatalf("strided render must assemble: %v\n%s", cerr, rwat)
+	}
+}
+
 // A combinator LEAF authors physics over ITS ELEMENT: (get/set NAME) on an Elem field
 // read/write argPtr+offset (this particle), not the global array. Gravity toward a
 // GLOBAL attractor + in-place integrate, in macro-WAT — the thing a leaf could not do

@@ -102,6 +102,14 @@ ITERATION:
   (for $i COUNT BODY…)   run BODY for $i = 0,1,…,COUNT-1. Use it to update every element of
                          an array ((setidx …)) or draw one primitive per element. Nest for a grid.
 
+COLLECTIONS (particle systems, agents): a set of N entities is a group of array columns
+  <entity>_<field> (particle_x, particle_vx, …) plus a count <entity>_count. Update it IN
+  PLACE with ONE run-tick loop — a plain loop, NOT a map combinator:
+    (for $i (get particle_count)
+      (setidx particle_vx $i (f32.add (atidx particle_vx $i) (f32.div (f32.sub (get attractor_x) (atidx particle_x $i)) (f32.const 100.0))))
+      (setidx particle_x  $i (f32.add (atidx particle_x $i) (atidx particle_vx $i))))
+  Draw it with a render loop over the same columns using (atidxi …) for pixel coords.
+
 Everything else is ordinary WAT: i32.add/sub/mul/div, f32.add/sub/mul/div, f32.const 1.5,
 i32.trunc_f32_s, (local $t f32), (local.set $t …)/(local.get $t), etc. Locals may be declared
 anywhere — they are hoisted for you.

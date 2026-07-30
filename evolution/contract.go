@@ -22,6 +22,13 @@ type ContractField struct {
 	Offset int    `json:"offset"` // absolute shared-memory offset (sandbox region)
 	Type   string `json:"type"`   // e.g. "i32", "i32[40]"
 	Desc   string `json:"desc"`
+	// Stride is the byte gap between consecutive elements of an array field, in BYTES.
+	// Zero means a dense array (stride = element width, 4). A non-zero stride marks this
+	// field as one column of an INTERLEAVED collection buffer: particle_x, particle_y, …
+	// occupy one array-of-structs block, each starting at its own Offset and stepping by
+	// Stride (bytes-per-record). This is how a model's collection entity projects to one
+	// buffer the map iterates by stride while cells still address fields by name.
+	Stride int `json:"stride,omitempty"`
 	// Init is the field's initial value — the MOCK/boot state authored during the
 	// specification phase. It is what every cell is tested against (a scenario
 	// baseline) and what the live app boots from, so a cell that reads a config
@@ -69,7 +76,14 @@ func (c *AppContract) FieldRange(name string) (offset, byteLen int, ok bool) {
 	}
 	for _, f := range c.Fields {
 		if strings.EqualFold(f.Name, name) {
-			return f.Offset, typeWords(f.Type) * 4, true
+			// A strided (interleaved) field's elements span the whole record block, so its
+			// change-detection range is elementCount*stride bytes — conservative (it covers
+			// the block), never wrongly skipping a cell whose element changed.
+			step := 4
+			if f.Stride > 0 {
+				step = f.Stride
+			}
+			return f.Offset, typeWords(f.Type) * step, true
 		}
 	}
 	return 0, 0, false

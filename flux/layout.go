@@ -50,6 +50,14 @@ type Field struct {
 	// f32.store for a float array, so a particle system's positions can live in a
 	// contract array as native floats, not just i32. Unused for scalar fields.
 	EType Type
+	// Stride is the byte gap between consecutive elements of a TBuffer field. Zero means
+	// a DENSE array (stride 4). A non-zero stride makes the field a STRIDED VIEW into an
+	// interleaved record buffer: particle_x, particle_y, … all point into one "particle"
+	// buffer with Stride = bytes-per-record and Offset = base + this field's byte offset,
+	// so (atidx particle_x $i) reads base + i*Stride + xOffset. This is how a collection
+	// entity's fields address one array-of-structs — the layout matches what the map hands
+	// the leaf (a pointer to one record), with no new macro and no renderer change.
+	Stride uint32
 	// Elem marks an ELEMENT field of a combinator LEAF: its Offset is relative to the
 	// leaf's ARG POINTER (param 0 = a pointer to one element the combinator handed it),
 	// not an absolute shared-memory offset. So (get x)/(set x) on a leaf read/write this

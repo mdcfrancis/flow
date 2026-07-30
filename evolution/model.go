@@ -93,16 +93,22 @@ func projElemType(t string) string {
 	return "i32"
 }
 
-// ProjectFields derives the shared-state contract fields from the model by ONE rule:
-// each entity field becomes "<entity>_<field>", typed as the field's element type for a
-// singleton or "<type>[<cardinality>]" for a multi-instance entity, and each
-// multi-instance entity also gets an "<entity>_count" i32 seeded to its cardinality.
-// Offsets are left 0 — the caller packs them. Because names and types come from here and
-// nowhere else, a field's identity is canonical: no drift, no phantom fields.
+// ProjectFields derives the shared-state contract fields from the model by ONE rule and
+// assigns their absolute offsets in the sandbox region:
+//   - a SINGLETON entity's fields become dense scalars "<entity>_<field>";
+//   - a COLLECTION entity (cardinality N>1) becomes an "<entity>_count" scalar plus one
+//     INTERLEAVED buffer: its fields "<entity>_<field>" share one array-of-structs block,
+//     each starting at base+fieldIndex*4 and stepping by Stride = fieldCount*4 bytes.
+// Interleaving is what lets the map iterate the collection by a single stride and hand the
+// leaf a pointer to ONE whole record (its packed element), while cells still address the
+// columns by name. Because names, types, and offsets all come from here and nowhere else,
+// a field's identity is canonical: no drift, no phantom fields.
 func (m *SystemModel) ProjectFields() []ContractField {
 	if m == nil {
 		return nil
 	}
+	const regionBase, regionEnd = 0xB0000, 0xC0000
+	off := regionBase
 	var out []ContractField
 	for _, e := range m.Entities {
 		name := strings.TrimSpace(e.Name)
@@ -113,23 +119,58 @@ func (m *SystemModel) ProjectFields() []ContractField {
 		if card < 1 {
 			card = 1
 		}
-		if card > 1 {
-			out = append(out, ContractField{Name: name + "_count", Type: "i32", Desc: "number of active " + name + " instances", Init: card})
-		}
+		// Valid (named) fields only, so the record stride is accurate.
+		var fields []EntityField
 		for _, f := range e.Fields {
-			fn := strings.TrimSpace(f.Name)
-			if fn == "" {
-				continue
+			if strings.TrimSpace(f.Name) != "" {
+				fields = append(fields, f)
 			}
-			et := projElemType(f.Type)
-			t := et
-			if card > 1 {
-				t = fmt.Sprintf("%s[%d]", et, card)
+		}
+		if card > 1 {
+			if off+4 > regionEnd {
+				break
 			}
-			out = append(out, ContractField{Name: name + "_" + fn, Type: t, Desc: f.Desc})
+			out = append(out, ContractField{Name: name + "_count", Type: "i32", Offset: off, Desc: "number of active " + name + " instances", Init: card})
+			off += 4
+			// A collection projects to one dense array COLUMN per field. Cells update the
+			// collection IN PLACE with a plain loop — (for $i (get <entity>_count)
+			// (setidx <entity>_vx $i …)) — so the layout is simple struct-of-arrays; there
+			// is no map combinator to demand a contiguous per-record element.
+			for _, f := range fields {
+				if off+card*4 > regionEnd {
+					break
+				}
+				out = append(out, ContractField{
+					Name:   name + "_" + strings.TrimSpace(f.Name),
+					Type:   fmt.Sprintf("%s[%d]", projElemType(f.Type), card),
+					Offset: off,
+					Desc:   f.Desc,
+				})
+				off += card * 4
+			}
+			continue
+		}
+		for _, f := range fields {
+			if off+4 > regionEnd {
+				break
+			}
+			out = append(out, ContractField{Name: name + "_" + strings.TrimSpace(f.Name), Type: projElemType(f.Type), Offset: off, Desc: f.Desc})
+			off += 4
 		}
 	}
 	return out
+}
+
+// RecordStrideWords returns the number of words per instance of a collection entity — the
+// map's ElemWords when iterating that entity's interleaved buffer.
+func (e *Entity) RecordStrideWords() int {
+	n := 0
+	for _, f := range e.Fields {
+		if strings.TrimSpace(f.Name) != "" {
+			n++
+		}
+	}
+	return n
 }
 
 // FieldNames returns the set of canonical projected field names, for resolving ports.

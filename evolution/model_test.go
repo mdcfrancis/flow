@@ -76,6 +76,46 @@ func TestModelProjectsToContract(t *testing.T) {
 	}
 }
 
+// A collection entity projects to one DENSE array column per field, laid out contiguously
+// after its count — the layout a plain looping cell updates in place (no map combinator,
+// so no need to interleave records).
+func TestModelProjectsCollectionColumns(t *testing.T) {
+	m := &SystemModel{Entities: []Entity{
+		{Name: "particle", Cardinality: 100, Fields: []EntityField{
+			{Name: "x", Type: "f32"}, {Name: "y", Type: "f32"}, {Name: "vx", Type: "f32"}, {Name: "vy", Type: "f32"}}},
+		{Name: "attractor", Cardinality: 1, Fields: []EntityField{{Name: "x", Type: "f32"}}},
+	}}
+	fields := map[string]ContractField{}
+	for _, f := range m.ProjectFields() {
+		fields[f.Name] = f
+	}
+	// Each column is a dense f32[100] (400 bytes), contiguous.
+	base := fields["particle_x"].Offset
+	for j, name := range []string{"particle_x", "particle_y", "particle_vx", "particle_vy"} {
+		f := fields[name]
+		if f.Offset != base+j*400 {
+			t.Errorf("%s offset: got 0x%X want 0x%X (dense columns)", name, f.Offset, base+j*400)
+		}
+		if f.Stride != 0 {
+			t.Errorf("%s must be a dense array (stride 0), got %d", name, f.Stride)
+		}
+		if f.Type != "f32[100]" {
+			t.Errorf("%s type: got %q want f32[100]", name, f.Type)
+		}
+	}
+	// attractor starts after the four particle columns.
+	if fields["attractor_x"].Offset != base+4*400 {
+		t.Errorf("attractor_x offset: got 0x%X want 0x%X", fields["attractor_x"].Offset, base+4*400)
+	}
+	// No interleaved-buffer handle or scratch map-out — collections are looped, not mapped.
+	if _, ok := fields["particle"]; ok {
+		t.Error("dense projection must not emit an interleaved buffer handle")
+	}
+	if _, ok := fields["particle_mapout"]; ok {
+		t.Error("dense projection must not emit a scratch map-out")
+	}
+}
+
 // A non-i32/f32 element type is clamped (the substrate only addresses those two).
 func TestModelProjectionClampsType(t *testing.T) {
 	m := &SystemModel{Entities: []Entity{
