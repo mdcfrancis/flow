@@ -11,6 +11,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
+	"sort"
 	"strings"
 
 	"github.com/mdcfrancis/flow/compiler"
@@ -71,6 +73,20 @@ type AppEnvelope struct {
 	// Objective is the original natural-language ask, persisted so the
 	// architecture-completeness critic can judge the app against it.
 	Objective string `json:"objective,omitempty"`
+	// ArenaBase is the base address of this application's private contract arena —
+	// the 64 KiB window its shared-state fields are packed into. Zero means the app
+	// predates arenas and keeps the legacy base, so its already-synthesized cells
+	// still resolve their fields. See the arena geometry in evolution/contract.go.
+	ArenaBase int `json:"arena_base,omitempty"`
+}
+
+// Arena returns the base address of the application's contract arena, falling
+// back to the legacy base for an envelope grown before arenas existed.
+func (e *AppEnvelope) Arena() int {
+	if e == nil || e.ArenaBase == 0 {
+		return evolution.LegacyArenaBase
+	}
+	return e.ArenaBase
 }
 
 const envelopePrompt = `You decompose a natural-language application objective into a strict JSON
@@ -282,7 +298,14 @@ type Grower struct {
 	// Activity, when set, receives growth progress so the console can show the
 	// app being scaffolded subsystem by subsystem. Optional; nil-safe.
 	Activity evolution.ActivitySink
+	// registry, when set, is unregistered alongside the ledger on RetireApp, so a
+	// deleted app leaves no candidates behind for the evolution loop. Optional.
+	registry *evolution.CellRegistry
 }
+
+// SetRegistry wires the evolution registry so RetireApp can unregister a deleted
+// application's cells, not just drop their ledger refs.
+func (g *Grower) SetRegistry(r *evolution.CellRegistry) { g.registry = r }
 
 // NewGrower constructs a Grower.
 // modelFor selects the client bound to a logical model type when the model is a
@@ -322,6 +345,18 @@ func (g *Grower) event(kind, cell, detail string) {
 // CompileEnvelope compiles an NL objective into an App Envelope and persists it
 // under "<namespace>:envelope".
 func (g *Grower) CompileEnvelope(ctx context.Context, objective string) (*AppEnvelope, error) {
+	return g.compileEnvelope(ctx, objective, false)
+}
+
+// CompileEnvelopeNew is CompileEnvelope for an explicit "new application" request:
+// if the namespace the model picks is already taken, it is suffixed to a free one
+// rather than silently refining the existing app. This is what makes a deliberate
+// "new app" distinct from a re-prompt of the same idea.
+func (g *Grower) CompileEnvelopeNew(ctx context.Context, objective string) (*AppEnvelope, error) {
+	return g.compileEnvelope(ctx, objective, true)
+}
+
+func (g *Grower) compileEnvelope(ctx context.Context, objective string, forceNew bool) (*AppEnvelope, error) {
 	resp, err := g.model.InvokeReasoning(ctx, g.prompt("envelope", envelopePrompt), objective)
 	if err != nil {
 		return nil, fmt.Errorf("envelope reasoning failed: %w", err)
@@ -343,6 +378,12 @@ func (g *Grower) CompileEnvelope(ctx context.Context, objective string) (*AppEnv
 	// grows — the model otherwise drifts between separators ("space-invaders" vs
 	// "space_invaders"), which spawns duplicate apps when a prompt is re-built.
 	env.ApplicationNamespace = canonicalNamespace(env.ApplicationNamespace)
+	// An explicit "new app" must not collide with one already grown: the model tends
+	// to reach for the same short name for the same kind of idea, and without this a
+	// deliberate second app would be swallowed by the refine branch below.
+	if forceNew {
+		env.ApplicationNamespace = freeNamespace(g.ledger, env.ApplicationNamespace)
+	}
 	for i := range env.SubsystemRequirements {
 		env.SubsystemRequirements[i].Identity = rebaseIdentity(env.SubsystemRequirements[i].Identity, env.ApplicationNamespace)
 	}
@@ -361,8 +402,12 @@ func (g *Grower) CompileEnvelope(ctx context.Context, objective string) (*AppEnv
 		return existing, nil
 	}
 	env.Objective = objective // anchor for the architecture-completeness critic
-	normalizeKinds(&env)      // declared kinds validated against ports (ports win); logs overrides
+	// Claim a private contract arena BEFORE the contract is authored, so this app's
+	// shared state cannot land on top of another live app's fields.
+	env.ArenaBase = allocateArena(g.ledger, env.ApplicationNamespace)
+	normalizeKinds(&env) // declared kinds validated against ports (ports win); logs overrides
 	saveEnvelope(g.ledger, &env)
+	log.Printf("[GROW] %s claimed contract arena 0x%X..0x%X", env.ApplicationNamespace, env.Arena(), evolution.ArenaEnd(env.Arena()))
 	return &env, nil
 }
 
@@ -435,10 +480,25 @@ func (g *Grower) Refine(ctx context.Context, namespace, objective string) (*AppE
 // acceptance, friction, …) from the ledger so it no longer rehydrates — used to
 // delete a stray/duplicate app. Returns how many refs were dropped. Content
 // blocks are reclaimed by the GC sweep once unreachable.
+//
+// It also unregisters the app's cells from the evolution registry when one is
+// wired (SetRegistry). Dropping the refs alone would leave the registry holding
+// URNs whose descriptors no longer load — the evolution loop would keep selecting
+// them as candidates forever. The app's contract arena is freed implicitly: the
+// envelope is gone, so allocateArena stops seeing the claim and hands the window
+// to the next app grown.
 func (g *Grower) RetireApp(namespace string) (int, error) {
 	refs, err := g.ledger.Refs()
 	if err != nil {
 		return 0, err
+	}
+	// Collect the cell identities BEFORE the envelope is deleted — afterwards there
+	// is no record of which subsystems belonged to this app.
+	var cells []string
+	if env := LoadEnvelope(g.ledger, namespace); env != nil {
+		for _, s := range env.SubsystemRequirements {
+			cells = append(cells, s.Identity)
+		}
 	}
 	var drop []string
 	for urn := range refs {
@@ -449,10 +509,75 @@ func (g *Grower) RetireApp(namespace string) (int, error) {
 	if len(drop) == 0 {
 		return 0, nil
 	}
-	return len(drop), g.ledger.DeleteRefs(drop...)
+	if err := g.ledger.DeleteRefs(drop...); err != nil {
+		return 0, err
+	}
+	if g.registry != nil {
+		// Every dropped ref that is a cell URN, plus the envelope's roster — fracture
+		// children are refs but not always listed as subsystems, so take both.
+		g.registry.Remove(append(cells, drop...)...)
+	}
+	return len(drop), nil
 }
 
 func envelopeRefURN(namespace string) string { return namespace + ":envelope" }
+
+// freeNamespace returns ns if no application holds it, else the first free
+// "<ns>_2", "<ns>_3", … so a deliberate new app gets its own identity instead of
+// colliding with one already grown.
+func freeNamespace(ledger *storage.LedgerEngine, ns string) string {
+	if LoadEnvelope(ledger, ns) == nil {
+		return ns
+	}
+	for n := 2; n < 1000; n++ {
+		cand := fmt.Sprintf("%s_%d", ns, n)
+		if LoadEnvelope(ledger, cand) == nil {
+			return cand
+		}
+	}
+	return ns
+}
+
+// ListApps returns every application namespace that has a persisted envelope,
+// sorted so callers see a deterministic order across restarts.
+func ListApps(ledger *storage.LedgerEngine) []string {
+	refs, err := ledger.Refs()
+	if err != nil {
+		return nil
+	}
+	var out []string
+	for key := range refs {
+		if ns := strings.TrimSuffix(key, ":envelope"); ns != key {
+			out = append(out, ns)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// allocateArena picks the lowest private arena not already claimed by another
+// application, so a retired app's window is reused rather than leaked. Returns 0
+// when every arena is taken — the caller then falls back to the legacy base,
+// which is correct-but-shared, matching the pre-arena behavior instead of
+// refusing to grow the app.
+func allocateArena(ledger *storage.LedgerEngine, selfNamespace string) int {
+	taken := map[int]bool{}
+	for _, ns := range ListApps(ledger) {
+		if ns == selfNamespace {
+			continue
+		}
+		if env := LoadEnvelope(ledger, ns); env != nil && env.ArenaBase != 0 {
+			taken[env.ArenaBase] = true
+		}
+	}
+	for i := 0; i < evolution.MaxArenas; i++ {
+		if base := evolution.ArenaBaseAt(i); !taken[base] {
+			return base
+		}
+	}
+	log.Printf("[GROW] all %d contract arenas in use — %s falls back to the shared legacy arena", evolution.MaxArenas, selfNamespace)
+	return 0
+}
 
 // saveEnvelope persists an envelope under "<namespace>:envelope".
 func saveEnvelope(ledger *storage.LedgerEngine, env *AppEnvelope) {

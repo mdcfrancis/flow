@@ -16,6 +16,43 @@ import (
 	"github.com/mdcfrancis/flow/storage"
 )
 
+// Contract ARENAS. Contract offsets are absolute addresses into the one shared
+// linear memory, so every application needs its own window or two live apps
+// overwrite each other field-for-field. The geometry is:
+//
+//	0xB0000..0xC0000  host-return scratch (the hypervisor's bump allocator) AND
+//	                  the legacy arena — apps grown before arenas existed have
+//	                  their offsets baked in here and keep them.
+//	0xC0000..0x400000 52 per-app arenas of 64 KiB each.
+//
+// LegacyArenaBase is deliberately the old hardcoded base: an envelope with no
+// assigned arena resolves to it, so an app already in the ledger keeps working at
+// the offsets its cells were synthesized against. Only newly grown apps get a
+// private arena.
+//
+// The upper bound must stay in step with the hypervisor's scratch ceiling
+// (execution/hypervisor.go: scratchEnd) and its page window (windowBase); the two
+// packages do not import each other, so the constants are cross-referenced by
+// comment rather than shared.
+const (
+	ArenaSize       = 0x10000  // 64 KiB per application
+	LegacyArenaBase = 0xB0000  // pre-arena apps (and the host-return scratch zone)
+	FirstArenaBase  = 0xC0000  // first private arena, immediately above scratch
+	ArenaLimit      = 0x400000 // == windowBase; arenas must stay below the page window
+)
+
+// MaxArenas is how many applications can hold a private contract arena at once.
+const MaxArenas = (ArenaLimit - FirstArenaBase) / ArenaSize
+
+// ArenaBaseAt returns the base address of the index'th private arena.
+func ArenaBaseAt(index int) int { return FirstArenaBase + index*ArenaSize }
+
+// ArenaEnd returns the exclusive upper bound of the arena starting at base.
+func ArenaEnd(base int) int { return base + ArenaSize }
+
+// InArena reports whether an absolute offset falls inside the arena at base.
+func InArena(base, offset int) bool { return offset >= base && offset < ArenaEnd(base) }
+
 // ContractField is one named shared-memory slot.
 type ContractField struct {
 	Name   string `json:"name"`

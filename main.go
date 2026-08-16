@@ -72,10 +72,12 @@ const evolutionCadence = 4
 const janitorCadence = 12
 
 // defaultModel / defaultModelURL are the cognitive engine's model id and
-// endpoint when HDM_LLM_MODEL / HDM_LLM_URL are unset. gemma-4-26b-a4b has been
-// the strongest local model here for both growth and optimization.
+// endpoint when HDM_LLM_MODEL / HDM_LLM_URL are unset. Qwen3.8-27B-oQ4 has been
+// the strongest local model here for both growth and optimization; it is a
+// thinking variant, so it depends on disableThinking (see inference/client.go)
+// to keep the reasoning trace out of the token budget.
 const (
-	defaultModel    = "gemma-4-26b-a4b-it-oQ4"
+	defaultModel    = "Qwen3.8-27B-oQ4"
 	defaultModelURL = "http://localhost:8000"
 	// defaultGeminiModel is used when the Gemini backend is selected and
 	// HDM_LLM_MODEL is unset. gemini-3.5-flash reliably emits the exact HDM WAT
@@ -2198,69 +2200,95 @@ func runFrameLoop(ctx context.Context, hyp *execution.RuntimeManager, repo *mani
 			if frame%300 == 0 && skip.skips > 0 {
 				log.Printf("[FRAME] memoization skipped %d cell-ticks (inputs unchanged)", skip.skips)
 			}
-			ns := appNamespace(canvasSrv.Active())
-			if ns == "" {
-				continue // no app focused — nothing to animate
-			}
-			// Boot the app's live state once, from its own accepted scenario seeds,
-			// so the simulation starts from a valid (moving) condition.
-			if !seeded[ns] {
-				if n := seedLiveState(hyp, ledger, registry, ns); n > 0 {
-					seeded[ns] = true
-					log.Printf("[FRAME] %s: seeded %d live shared-state field(s) from accepted scenarios", ns, n)
+			// EVERY live application ticks, not just the focused one. Focus decides
+			// what you LOOK at (which renderer draws on the canvas poll); it no longer
+			// decides which simulations are allowed to run. Each app owns a private
+			// contract arena, so their shared state cannot collide.
+			cells := registry.List()
+			for _, ns := range liveAppNamespaces(cells) {
+				// Boot the app's live state once, from its own accepted scenario seeds,
+				// so the simulation starts from a valid (moving) condition.
+				if !seeded[ns] {
+					if n := seedLiveState(hyp, ledger, registry, ns); n > 0 {
+						seeded[ns] = true
+						log.Printf("[FRAME] %s: seeded %d live shared-state field(s) from accepted scenarios", ns, n)
+					}
 				}
-			}
-			for _, u := range registry.List() {
-				if appNamespace(u) != ns {
-					continue
-				}
-				desc, err := repo.Load(u)
-				if err != nil {
-					continue
-				}
-				// Skip the RENDER cell here (it draws on the canvas poll, not in the sim
-				// tick). Use the GENOME-authoritative isRenderCell — NOT the intent keyword
-				// heuristic, which mis-flags a compute cell whose intent merely mentions
-				// "screen"/"display" (e.g. a physics cell that reflects off the SCREEN
-				// walls) as a renderer and never ticks it, freezing the simulation.
-				if isRenderCell(repo, desc) {
-					continue // renderer draws on canvas poll, not here
-				}
-				bc, err := repo.Phenotype(desc)
-				if err != nil {
-					continue
-				}
-				if hyp.IsAsyncCell(desc.PhenotypeHash, bc) {
-					continue // async (cognitive-engine) cell — the async worker ticks it
-				}
-				// MEMOIZATION: skip a deterministic cell whose declared inputs are
-				// unchanged since it last ran — its outputs already sit in shared memory.
-				if memoOn && !skip.shouldRun(ns, u, desc.PhenotypeHash, bc, frame) {
-					continue
-				}
-				// Advance live state; ignore per-frame errors (a trapping cell mid-build
-				// shouldn't kill the loop) — it will be fixed by evolution. Measure the
-				// per-frame cost so an over-budget cell can be optimized to fit. The cell's
-				// enforced mask (if any) is applied inside execTrampoline automatically.
-				t0 := time.Now()
-				// Micro-tick enrollment: a cell enrolled for N ticks/frame advances N
-				// internal steps in one burst (a parser draining a buffer, an integrator
-				// sub-stepping) instead of being capped at one step per display frame.
-				_, _, _, _ = hyp.TickAppCellN("urn:hdm:sys:frame", u, desc.PhenotypeHash, bc, hyp.MicroTicksFor(u))
-				budget.record(u, float64(time.Since(t0).Nanoseconds()))
+				tickAppFrame(hyp, repo, budget, skip, memoOn, cells, ns, frame)
 			}
 		}
 	}
 }
 
-// runAsyncLoop ticks the focused app's ASYNC cells — those importing the cognitive
+// liveAppNamespaces returns the distinct application namespaces present in a cell
+// list, in a stable order so the per-frame tick sequence never varies run to run.
+func liveAppNamespaces(cells []string) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, u := range cells {
+		ns := appNamespace(u)
+		if ns == "" || seen[ns] {
+			continue
+		}
+		seen[ns] = true
+		out = append(out, ns)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// tickAppFrame advances one application's non-render cells by a single display
+// frame. Split out of the frame loop so every app gets the identical treatment.
+func tickAppFrame(hyp *execution.RuntimeManager, repo *manifest.Repository, budget *frameBudget, skip *frameSkip, memoOn bool, cells []string, ns string, frame int) {
+	for _, u := range cells {
+		if appNamespace(u) != ns {
+			continue
+		}
+		desc, err := repo.Load(u)
+		if err != nil {
+			continue
+		}
+		// Skip the RENDER cell here (it draws on the canvas poll, not in the sim
+		// tick). Use the GENOME-authoritative isRenderCell — NOT the intent keyword
+		// heuristic, which mis-flags a compute cell whose intent merely mentions
+		// "screen"/"display" (e.g. a physics cell that reflects off the SCREEN
+		// walls) as a renderer and never ticks it, freezing the simulation.
+		if isRenderCell(repo, desc) {
+			continue // renderer draws on canvas poll, not here
+		}
+		bc, err := repo.Phenotype(desc)
+		if err != nil {
+			continue
+		}
+		if hyp.IsAsyncCell(desc.PhenotypeHash, bc) {
+			continue // async (cognitive-engine) cell — the async worker ticks it
+		}
+		// MEMOIZATION: skip a deterministic cell whose declared inputs are
+		// unchanged since it last ran — its outputs already sit in shared memory.
+		if memoOn && !skip.shouldRun(ns, u, desc.PhenotypeHash, bc, frame) {
+			continue
+		}
+		// Advance live state; ignore per-frame errors (a trapping cell mid-build
+		// shouldn't kill the loop) — it will be fixed by evolution. Measure the
+		// per-frame cost so an over-budget cell can be optimized to fit. The cell's
+		// enforced mask (if any) is applied inside execTrampoline automatically.
+		t0 := time.Now()
+		// Micro-tick enrollment: a cell enrolled for N ticks/frame advances N
+		// internal steps in one burst (a parser draining a buffer, an integrator
+		// sub-stepping) instead of being capped at one step per display frame.
+		_, _, _, _ = hyp.TickAppCellN("urn:hdm:sys:frame", u, desc.PhenotypeHash, bc, hyp.MicroTicksFor(u))
+		budget.record(u, float64(time.Since(t0).Nanoseconds()))
+	}
+}
+
+// runAsyncLoop ticks every live app's ASYNC cells — those importing the cognitive
 // engine, whose run-tick can take seconds. It runs OFF the frame thread: a tick
 // holds the runtime lock only for the cell's brief guest compute and yields it
 // during the model round-trip (invokeReasoningUnlocked), so the 30 FPS frame loop
 // never stalls. Async cells write live shared state directly; keeping their writes
 // to their declared Writes ports (which sync cells don't write) avoids clobber.
 // One worker ⇒ async cells are ticked one at a time, naturally paced by the model.
-func runAsyncLoop(ctx context.Context, hyp *execution.RuntimeManager, repo *manifest.Repository, registry *evolution.CellRegistry, canvasSrv *integration.CanvasServer) {
+func runAsyncLoop(ctx context.Context, hyp *execution.RuntimeManager, repo *manifest.Repository, registry *evolution.CellRegistry) {
 	ticker := time.NewTicker(50 * time.Millisecond)
 	defer ticker.Stop()
 	for {
@@ -2268,13 +2296,11 @@ func runAsyncLoop(ctx context.Context, hyp *execution.RuntimeManager, repo *mani
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			ns := appNamespace(canvasSrv.Active())
-			if ns == "" {
-				continue
-			}
+			// Like the frame loop, every live app's async cells run — focus selects
+			// what is displayed, not what is allowed to think.
 			for _, u := range registry.List() {
-				if appNamespace(u) != ns {
-					continue
+				if appNamespace(u) == "" {
+					continue // not an application cell
 				}
 				desc, err := repo.Load(u)
 				if err != nil {
@@ -2489,6 +2515,9 @@ func main() {
 	grower := appgen.NewGrower(ledger, router)
 	grower.Activity = activity
 	grower.FluxEnabled = !fluxDisabled() // seed scaffolds as no-op macro-WAT, not raw WAT (default)
+	// So retiring an app unregisters its cells too, not just drops their refs —
+	// otherwise the evolution loop keeps selecting candidates that no longer load.
+	grower.SetRegistry(registry)
 
 	// Drop cells that were RETIRED from the system but whose committed ledger state
 	// persists from an earlier session (e.g. the self-hosted Flux parser cells) — so
@@ -2736,7 +2765,77 @@ func main() {
 			}
 			return ""
 		},
-		Log: func() []string { return logBuf.Lines() },
+		Log:      func() []string { return logBuf.Lines() },
+		LogReset: func() int { return logBuf.Reset() },
+		Apps: func() any {
+			active := appNamespace(canvasSrv.Active())
+			live := map[string]int{}
+			for _, u := range registry.List() {
+				if ns := appNamespace(u); ns != "" {
+					live[ns]++
+				}
+			}
+			out := []any{}
+			for _, ns := range appgen.ListApps(ledger) {
+				env := appgen.LoadEnvelope(ledger, ns)
+				if env == nil {
+					continue
+				}
+				// Prefer the GENOME-authoritative renderer over the envelope's declared
+				// kind: fracture children are real cells that never appear in the
+				// envelope's roster, so an app whose renderer was split would otherwise
+				// report no viewable cell at all.
+				ui := ""
+				for _, u := range registry.List() {
+					if appNamespace(u) != ns {
+						continue
+					}
+					if desc, lErr := repo.Load(u); lErr == nil && isRenderCell(repo, desc) {
+						ui = u
+						break
+					}
+				}
+				if ui == "" {
+					for _, s := range env.SubsystemRequirements {
+						if s.IsRender() {
+							ui = s.Identity
+							break
+						}
+					}
+				}
+				out = append(out, map[string]any{
+					"namespace": ns,
+					"objective": env.Objective,
+					"arena":     fmt.Sprintf("0x%X", env.Arena()),
+					"cells":     live[ns],
+					"ui":        ui,
+					"focused":   ns == active,
+				})
+			}
+			return out
+		},
+		AppRetire: func(ns string) (int, error) {
+			n, err := grower.RetireApp(ns)
+			if err != nil {
+				return 0, err
+			}
+			// If the retired app was on the canvas, focus is now dangling — move it to
+			// another app's renderer so the console does not point at a deleted cell.
+			if appNamespace(canvasSrv.Active()) == ns {
+				canvasSrv.SetActive("")
+				for _, u := range registry.List() {
+					if appNamespace(u) == "" {
+						continue
+					}
+					if desc, lErr := repo.Load(u); lErr == nil && isRenderCell(repo, desc) {
+						canvasSrv.SetActive(u)
+						break
+					}
+				}
+			}
+			log.Printf("[APP] retired %s — %d ledger ref(s) dropped", ns, n)
+			return n, nil
+		},
 		State: func() any {
 			ns := appNamespace(canvasSrv.Active())
 			if ns == "" {
@@ -3059,7 +3158,7 @@ func main() {
 		log.Printf("[VERIFY] visual grader tightened to MinColors=%d MinBrightSpread=%d (meta-acceptance gated)", thr.MinColors, thr.MinBrightSpread)
 	}
 	go runFrameLoop(ctx, hypervisor, repo, registry, canvasSrv, ledger, budget, fps)
-	go runAsyncLoop(ctx, hypervisor, repo, registry, canvasSrv)
+	go runAsyncLoop(ctx, hypervisor, repo, registry)
 	ticker := time.NewTicker(heartbeat)
 	defer ticker.Stop()
 

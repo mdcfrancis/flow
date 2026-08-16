@@ -20,12 +20,32 @@ go run .         # boot the runtime + console on 127.0.0.1:8420
   (`inference.LocalModelClient`). Put the API key in `.hdm_api_key` (mode 600,
   gitignored); point at a server with `HDM_LLM_URL` / `HDM_LLM_MODEL` /
   `HDM_LLM_PROVIDER`.
+- **The local default is `Qwen3.8-27B-oQ4`** (`defaultModel` in `main.go`). Note
+  that a `.gemini_api_key` on disk silently wins the backend auto-selection, so
+  run `HDM_LLM_PROVIDER=local go run .` to actually get the local model. Check the
+  `[COGNITION] provider=… model=…` boot line — it tells you which one you got.
+- Local 27B synthesis is SLOW: a full macro-WAT prompt can run minutes, so the
+  per-request timeout defaults to 600s (`HDM_LLM_TIMEOUT`). Lower it for a fast
+  hosted backend. A cut-short response now reports as `truncated response body`
+  (a retriable transport error), not as a malformed completion.
 - Grow an app at boot: `HDM_APP="a bouncing ball viz…" go run .`
 - Useful env: `HDM_DB` (ledger path), `HDM_HEARTBEAT` (evolution tick, e.g. `3s`),
   `HDM_FPS` (frame loop), `HDM_SYS_ONLY`, `HDM_TUI`.
 - Watch a running instance over HTTP (`127.0.0.1:8420`) — the fastest way to see what
   it's doing: `/status` · `/cells` · `/cell?urn=…` · `/walk` (goal tree) · `/map` ·
-  `/plan` · `/canvas` · `/vision` · `/log` · `/perf`.
+  `/plan` · `/canvas` · `/vision` · `/log` · `/perf` · `/apps`. `POST /log/reset`
+  clears the console's log buffer (the durable sinks are untouched);
+  `POST /app/retire?ns=…` permanently deletes an application.
+- **Multiple applications coexist.** Each gets a private 64 KiB contract arena
+  (geometry in `evolution/contract.go`), and the frame loop ticks *every* live app —
+  canvas focus only chooses which renderer draws. An app grown before arenas existed
+  keeps `LegacyArenaBase` so its already-synthesized cells still resolve their fields;
+  there is no migration. `POST /build?mode=new` grows a separate app (suffixing the
+  namespace on collision), `?mode=refine` updates the focused one.
+- `menubar/build.sh` builds a macOS menu-bar helper that watches a running console
+  (live cell/phase/token readout, click-through to the viewer). It is read-only —
+  it polls `/status` and `/perf` and never calls a mutating route. Point it at a
+  non-default console with `FLOW_CONSOLE`.
 
 ## Rules of the road
 

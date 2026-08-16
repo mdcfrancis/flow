@@ -45,7 +45,12 @@ const (
 	CanvasBase  = 0x00051000 // 0x51000..0xAFFFF Canvas UI draw-output buffer
 	CanvasEnd   = 0x000B0000
 	scratchBase = 0x000B0000 // 0xB0000..scratchEnd dynamic sandbox / host-return scratch
-	scratchEnd  = windowBase
+	// The scratch bump allocator used to run all the way to windowBase, which put it
+	// on top of every application's contract arena — a host function returning a large
+	// value would silently overwrite live app state. It is now confined to its own
+	// 64 KiB below the first arena. Must equal evolution.FirstArenaBase (the packages
+	// do not import each other; see the arena geometry in evolution/contract.go).
+	scratchEnd = 0x000C0000
 	// Software-paging regions (see pages.go). The window is the guest-visible flat block a
 	// cell's private page is mapped into; the page zone is host-only physical page storage
 	// that guests never address directly.

@@ -47,3 +47,14 @@ func (r *logRing) Lines() []string {
 	copy(out, r.lines)
 	return out
 }
+
+// Reset drops every buffered line. It clears only this in-memory inspection
+// buffer — the real log sink (stderr / the TUI) and the ledger are untouched, so
+// nothing durable is lost. Returns how many lines were discarded.
+func (r *logRing) Reset() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	n := len(r.lines)
+	r.lines = nil
+	return n
+}

@@ -677,9 +677,10 @@ FIRST model the DATA STRUCTURE the objective implies, then pick fields:
 Rules:
 - Include every array/grid the objective needs; do not collapse a collection to a
   scalar or omit it. Otherwise include only genuinely shared state.
-- Region: offset >= 0x000B0000 and < 0x000C0000, 4-byte aligned. An "i32[N]" field
-  occupies N consecutive i32 slots (N*4 bytes); the next field must start after it.
-  (Offsets are re-packed for safety, but size arrays correctly.)
+- Region: every offset MUST fall inside the "offset_range" given in the request —
+  that is this application's private arena — and be 4-byte aligned. An "i32[N]"
+  field occupies N consecutive i32 slots (N*4 bytes); the next field must start
+  after it. (Offsets are re-packed for safety, but size arrays correctly.)
 - INIT: give every scalar field an "init" — its initial value at boot, forming a
   single COHERENT, LIVE starting world: config fields set (e.g. a screen width
   ~320, height ~240), positions placed INSIDE the window (not 0,0), and at least
@@ -687,12 +688,13 @@ Rules:
   each cell is tested against, so a cell that reads a config or sibling field sees
   a real value, never zero. Omit "init" for arrays.
 
-Output ONLY JSON, no prose or fences:
+Output ONLY JSON, no prose or fences (offsets here are illustrative — use the ones
+your offset_range allows, starting at its low bound):
 {"fields":[
-  {"name":"ball_x","offset":720896,"type":"i32","desc":"ball x 0..319","init":160},
-  {"name":"ball_vx","offset":720900,"type":"i32","desc":"ball x velocity","init":3},
-  {"name":"screen_width","offset":720904,"type":"i32","desc":"canvas width","init":320},
-  {"name":"escape_times","offset":720912,"type":"i32[3072]","desc":"per-cell escape iterations, row-major"}
+  {"name":"ball_x","offset":786432,"type":"i32","desc":"ball x 0..319","init":160},
+  {"name":"ball_vx","offset":786436,"type":"i32","desc":"ball x velocity","init":3},
+  {"name":"screen_width","offset":786440,"type":"i32","desc":"canvas width","init":320},
+  {"name":"escape_times","offset":786448,"type":"i32[3072]","desc":"per-cell escape iterations, row-major"}
 ]}`
 
 // EnsureContract authors and persists an application's shared-state contract if
@@ -723,7 +725,13 @@ func (g *Grower) EnsureContract(ctx context.Context, namespace string) (bool, er
 			"reads": s.Reads, "writes": s.Writes,
 		})
 	}
-	user, _ := json.Marshal(map[string]any{"objective": env.Objective, "subsystems": subs})
+	arena := env.Arena()
+	user, _ := json.Marshal(map[string]any{
+		"objective": env.Objective, "subsystems": subs,
+		// The arena is per-app, so the model must be told THIS app's window rather
+		// than the one baked into the prompt's worked example.
+		"offset_range": fmt.Sprintf("0x%X..0x%X", arena, evolution.ArenaEnd(arena)),
+	})
 	resp, err := g.model.InvokeReasoning(ctx, g.prompt("contract", contractPrompt), string(user))
 	if err != nil {
 		return false, err
@@ -738,18 +746,18 @@ func (g *Grower) EnsureContract(ctx context.Context, namespace string) (bool, er
 		evolution.AddPromptGrievance(g.ledger, "contract", "output was not valid JSON matching the {fields:[{name,offset,type,desc}]} schema")
 		return false, nil
 	}
-	// Keep only fields validly placed in the sandbox region.
+	// Keep only fields validly placed in THIS application's arena.
 	var ok []evolution.ContractField
 	dropped := 0
 	for _, f := range c.Fields {
-		if f.Name != "" && f.Offset >= 0xB0000 && f.Offset < 0xC0000 {
+		if f.Name != "" && evolution.InArena(arena, f.Offset) {
 			ok = append(ok, f)
 		} else {
 			dropped++
 		}
 	}
 	if dropped > 0 {
-		evolution.AddPromptGrievance(g.ledger, "contract", "placed fields outside the required sandbox region 0xB0000..0xC0000 (they were dropped); all offsets must be within that range")
+		evolution.AddPromptGrievance(g.ledger, "contract", fmt.Sprintf("placed fields outside the required arena %s (they were dropped); all offsets must be within the offset_range given in the request", fmt.Sprintf("0x%X..0x%X", arena, evolution.ArenaEnd(arena))))
 	}
 	// Reconcile: the contract MUST cover every field a component declares it
 	// reads/writes, so the ports are always resolvable. Add any declared field the
@@ -763,9 +771,9 @@ func (g *Grower) EnsureContract(ctx context.Context, namespace string) (bool, er
 	// the model chose. Safe: fields are referenced by name (grounded to these
 	// offsets) and cells are synthesized after this.
 	before := len(ok)
-	ok = packOffsets(ok)
+	ok = packOffsets(ok, arena)
 	if len(ok) < before {
-		log.Printf("[GROW] contract %s: %d field(s) dropped — exceeded the contract region", namespace, before-len(ok))
+		log.Printf("[GROW] contract %s: %d field(s) dropped — exceeded the %d KiB arena at 0x%X", namespace, before-len(ok), evolution.ArenaSize/1024, arena)
 	}
 	c.Fields = ok
 	fillInit(&c) // deterministic backstop so the mock world is never broken (bounds set, motion nonzero)
@@ -835,16 +843,16 @@ func isYName(n string) bool {
 	return strings.HasSuffix(n, "_y") || n == "y" || strings.Contains(n, "pos_y") || strings.Contains(n, "posy")
 }
 
-// packOffsets re-addresses contract fields sequentially from the sandbox base so
-// each field (including an "i32[N]" array, which spans N consecutive i32 slots)
-// reserves its full width and none overlap. A field whose span would spill past the
-// contract region is dropped.
-func packOffsets(fields []evolution.ContractField) []evolution.ContractField {
+// packOffsets re-addresses contract fields sequentially from the application's
+// arena base so each field (including an "i32[N]" array, which spans N consecutive
+// i32 slots) reserves its full width and none overlap. A field whose span would
+// spill past the end of the arena is dropped.
+func packOffsets(fields []evolution.ContractField, arenaBase int) []evolution.ContractField {
 	out := make([]evolution.ContractField, 0, len(fields))
-	off := 0xB0000
+	off := arenaBase
 	for _, f := range fields {
 		end := off + 4*max(1, typeWords(f.Type))
-		if end > 0xC0000 {
+		if end > evolution.ArenaEnd(arenaBase) {
 			continue
 		}
 		f.Offset = off
@@ -860,7 +868,7 @@ func packOffsets(fields []evolution.ContractField) []evolution.ContractField {
 // next free 4-byte slot, so a declared port never fails to resolve to an offset.
 func reconcileDeclaredFields(fields []evolution.ContractField, env *AppEnvelope) []evolution.ContractField {
 	have := map[string]bool{}
-	next := 0xB0000
+	next := env.Arena()
 	for _, f := range fields {
 		have[strings.ToLower(f.Name)] = true
 		if end := f.Offset + 4*max(1, typeWords(f.Type)); end > next {

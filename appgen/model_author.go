@@ -191,10 +191,11 @@ func (g *Grower) projectContract(namespace string) (bool, error) {
 	if m == nil {
 		return false, nil
 	}
-	// ProjectFields already assigns absolute offsets AND the interleaved stride for a
+	// ProjectFieldsIn already assigns absolute offsets AND the interleaved stride for a
 	// collection, so do NOT re-pack (packOffsets would re-lay everything out densely and
-	// destroy the array-of-structs interleaving). Just fill init backstops.
-	fields := m.ProjectFields()
+	// destroy the array-of-structs interleaving). Just fill init backstops. The fields
+	// land in THIS app's arena so they cannot collide with another live app's state.
+	fields := m.ProjectFieldsIn(LoadEnvelope(g.ledger, namespace).Arena())
 	if len(fields) == 0 {
 		return false, nil
 	}

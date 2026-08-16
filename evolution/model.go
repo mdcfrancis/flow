@@ -175,11 +175,20 @@ func projElemType(t string) string {
 // leaf a pointer to ONE whole record (its packed element), while cells still address the
 // columns by name. Because names, types, and offsets all come from here and nowhere else,
 // a field's identity is canonical: no drift, no phantom fields.
+// ProjectFields projects into the legacy shared arena. Prefer ProjectFieldsIn,
+// which places the fields in the application's own arena; this form remains for
+// callers with no application context (introspection, tests).
 func (m *SystemModel) ProjectFields() []ContractField {
+	return m.ProjectFieldsIn(LegacyArenaBase)
+}
+
+// ProjectFieldsIn is ProjectFields placed in a specific application's contract
+// arena, so two live applications' projected fields cannot overlap.
+func (m *SystemModel) ProjectFieldsIn(arenaBase int) []ContractField {
 	if m == nil {
 		return nil
 	}
-	const regionBase, regionEnd = 0xB0000, 0xC0000
+	regionBase, regionEnd := arenaBase, ArenaEnd(arenaBase)
 	off := regionBase
 	var out []ContractField
 	// The VIEWPORT parameters come first — shared f32 scalars the to-screen macros read to
