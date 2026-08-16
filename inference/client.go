@@ -130,12 +130,18 @@ func NewLocalModelClient(baseURL, model string) *LocalModelClient {
 	}
 	// Per-request HTTP timeout. Non-streaming completions return headers only when
 	// the whole generation is done, so the WHOLE generation must fit inside this
-	// window — a slow reasoning model on a large prompt otherwise has its response
-	// cut mid-body. Measured: the default Qwen3.8-27B-oQ4 takes >5min on a full
-	// macro-WAT synthesis prompt (a 27B model on local hardware), where the old
-	// 120s default truncated every one of them. Lower it with HDM_LLM_TIMEOUT when
-	// pointing at a fast hosted backend.
-	timeout := 600 * time.Second
+	// window — a slow model on a large prompt otherwise has its response cut
+	// mid-body, which used to surface as a bogus "malformed completion" (see
+	// parseOpenAI's caller).
+	//
+	// Sized from a measured run of the default model: a full agentic macro-WAT
+	// synthesis on gemma-4-26b-a4b-it-oQ4 completes its whole correction loop in
+	// ~4.5min, i.e. ~33s per round, so this leaves roughly 9x headroom on a single
+	// call. It is deliberately not larger: runEvolutionFrame calls synthesis
+	// SYNCHRONOUSLY, so this bounds how long one wedged request can stall the
+	// evolution loop. Raise it with HDM_LLM_TIMEOUT for a slower local model
+	// (Qwen3.8-27B-oQ4 wanted 600s+), lower it for a fast hosted backend.
+	timeout := 300 * time.Second
 	if v := os.Getenv("HDM_LLM_TIMEOUT"); v != "" {
 		if d, err := time.ParseDuration(v); err == nil && d > 0 {
 			timeout = d

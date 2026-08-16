@@ -20,14 +20,18 @@ go run .         # boot the runtime + console on 127.0.0.1:8420
   (`inference.LocalModelClient`). Put the API key in `.hdm_api_key` (mode 600,
   gitignored); point at a server with `HDM_LLM_URL` / `HDM_LLM_MODEL` /
   `HDM_LLM_PROVIDER`.
-- **The local default is `Qwen3.8-27B-oQ4`** (`defaultModel` in `main.go`). Note
-  that a `.gemini_api_key` on disk silently wins the backend auto-selection, so
-  run `HDM_LLM_PROVIDER=local go run .` to actually get the local model. Check the
-  `[COGNITION] provider=… model=…` boot line — it tells you which one you got.
-- Local 27B synthesis is SLOW: a full macro-WAT prompt can run minutes, so the
-  per-request timeout defaults to 600s (`HDM_LLM_TIMEOUT`). Lower it for a fast
-  hosted backend. A cut-short response now reports as `truncated response body`
-  (a retriable transport error), not as a malformed completion.
+- **The local default is `gemma-4-26b-a4b-it-oQ4`** (`defaultModel` in `main.go`).
+  Note that a `.gemini_api_key` on disk silently wins the backend auto-selection,
+  so run `HDM_LLM_PROVIDER=local go run .` to actually get the local model. Check
+  the `[COGNITION] provider=… model=…` boot line — it tells you which one you got.
+  `Qwen3.8-27B-oQ4` was tried as the default and reverted: a full macro-WAT
+  synthesis was never seen finishing inside 24 minutes, against ~4.5 for gemma.
+- Local synthesis is slow in absolute terms — a full agentic macro-WAT prompt runs
+  its correction loop for minutes — so the per-request timeout defaults to 300s
+  (`HDM_LLM_TIMEOUT`). Raise it for a slower local model, lower it for a fast
+  hosted backend; it bounds how long one wedged call can stall the (synchronous)
+  evolution loop. A cut-short response reports as `truncated response body` — a
+  retriable transport error — not as a malformed completion.
 - Grow an app at boot: `HDM_APP="a bouncing ball viz…" go run .`
 - Useful env: `HDM_DB` (ledger path), `HDM_HEARTBEAT` (evolution tick, e.g. `3s`),
   `HDM_FPS` (frame loop), `HDM_SYS_ONLY`, `HDM_TUI`.

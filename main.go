@@ -72,12 +72,16 @@ const evolutionCadence = 4
 const janitorCadence = 12
 
 // defaultModel / defaultModelURL are the cognitive engine's model id and
-// endpoint when HDM_LLM_MODEL / HDM_LLM_URL are unset. Qwen3.8-27B-oQ4 has been
-// the strongest local model here for both growth and optimization; it is a
-// thinking variant, so it depends on disableThinking (see inference/client.go)
-// to keep the reasoning trace out of the token budget.
+// endpoint when HDM_LLM_MODEL / HDM_LLM_URL are unset. gemma-4-26b-a4b has been
+// the strongest local model here for both growth and optimization.
+//
+// Qwen3.8-27B-oQ4 was tried as the default and reverted: it is far slower on the
+// path that matters. On a comparable prompt it took 65s to gemma's 24s, and on a
+// full macro-WAT synthesis prompt it was never observed finishing inside 24
+// minutes — long enough to stall the evolution loop, which runs a frame
+// synchronously. Set HDM_LLM_MODEL to try it again.
 const (
-	defaultModel    = "Qwen3.8-27B-oQ4"
+	defaultModel    = "gemma-4-26b-a4b-it-oQ4"
 	defaultModelURL = "http://localhost:8000"
 	// defaultGeminiModel is used when the Gemini backend is selected and
 	// HDM_LLM_MODEL is unset. gemini-3.5-flash reliably emits the exact HDM WAT
