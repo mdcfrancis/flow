@@ -129,10 +129,13 @@ func (c *LocalModelClient) toolRound(ctx context.Context, messages, tools []any)
 			return "", true, fmt.Errorf("%w: %v", ErrServerUnreachable, e)
 		}
 		defer resp.Body.Close()
-		b, _ := io.ReadAll(resp.Body)
+		b, rerr := io.ReadAll(resp.Body)
 		if resp.StatusCode != http.StatusOK {
 			retry := resp.StatusCode >= 500 || resp.StatusCode == http.StatusTooManyRequests
 			return "", retry, fmt.Errorf("tools request status %d: %s", resp.StatusCode, string(b))
+		}
+		if rerr != nil {
+			return "", true, fmt.Errorf("%w: truncated tools response after %d bytes: %v", ErrServerUnreachable, len(b), rerr)
 		}
 		var tr toolsResponse
 		if e := json.Unmarshal(b, &tr); e != nil || len(tr.Choices) == 0 {
