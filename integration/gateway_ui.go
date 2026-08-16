@@ -20,6 +20,7 @@ import (
 	"github.com/mdcfrancis/flow/appgen"
 	"github.com/mdcfrancis/flow/evolution"
 	"github.com/mdcfrancis/flow/execution"
+	"github.com/mdcfrancis/flow/flux"
 	"github.com/mdcfrancis/flow/status"
 )
 
@@ -216,23 +217,41 @@ func (bs *BuildServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Chat-like refinement: if the console is focused on an existing app, a new
-	// prompt REFINES that app (updates its objective; the loop adapts) rather than
-	// spawning a duplicate. Only with no active app does Build grow a fresh one.
-	// Otherwise compile the plan now (fast), respond immediately, and scaffold the
-	// subsystems in the background — the loop co-evolves them all alongside.
+	// Whether this prompt starts a NEW application or refines the current one is an
+	// explicit choice, not a side effect of what the canvas happens to be showing.
+	//   ?mode=new     — always grow a fresh app
+	//   ?mode=refine  — always refine the focused app (error if nothing is focused)
+	//   (unset)       — legacy auto: refine the focused app, else grow a new one
+	// The console always sends an explicit mode; the default preserves the old
+	// behavior for the HDM_APP boot path and any existing caller.
+	mode := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("mode")))
+	focused := ""
+	if bs.canvas != nil {
+		if target := evolution.AppNamespaceOf(bs.canvas.Active()); target != "" && bs.grower.AppExists(target) {
+			focused = target
+		}
+	}
+	if mode == "refine" && focused == "" {
+		w.WriteHeader(http.StatusConflict)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"error": "no application is focused to refine — focus one, or build with mode=new",
+		})
+		return
+	}
+	// Compile the plan now (fast), respond immediately, and scaffold the subsystems
+	// in the background — the loop co-evolves them all alongside.
 	var (
 		env     *appgen.AppEnvelope
 		err     error
 		refined bool
 	)
-	if bs.canvas != nil {
-		if target := evolution.AppNamespaceOf(bs.canvas.Active()); target != "" && bs.grower.AppExists(target) {
-			env, err = bs.grower.Refine(r.Context(), target, objective)
-			refined = true
-		}
-	}
-	if env == nil && err == nil {
+	switch {
+	case focused != "" && mode != "new":
+		env, err = bs.grower.Refine(r.Context(), focused, objective)
+		refined = true
+	case mode == "new":
+		env, err = bs.grower.CompileEnvelopeNew(r.Context(), objective)
+	default:
 		env, err = bs.grower.CompileEnvelope(r.Context(), objective)
 	}
 	if err != nil {
@@ -327,6 +346,26 @@ li{padding:2px 0;font-family:ui-monospace,monospace;font-size:12px}
 #cells li{cursor:pointer}#cells li:hover{color:#fff;text-decoration:underline}
 #mappanel,#planpanel,#walkpanel,#statelivepanel,#logpanel{border:1px solid #2a2f3a;border-radius:8px;padding:12px;margin:12px 0;background:#0f1420}
 #mappanel h2,#planpanel h2,#walkpanel h2,#statelivepanel h2,#logpanel h2{font-size:12px;font-weight:600;letter-spacing:.04em;color:#8fa0bf;margin:0 0 8px}
+#appspanel h2{font-size:12px;font-weight:600;letter-spacing:.04em;color:#8fa0bf;margin:0 0 8px}
+#applist{display:flex;flex-direction:column;gap:6px}
+.approw{display:flex;align-items:center;gap:10px;background:#111826;border:1px solid #22304a;border-radius:5px;padding:8px 12px;font-size:12px}
+.approw.on{border-color:#2b6cb0;background:#132033}
+.appns{font-weight:600;color:#dbe4f2}
+.apparena{color:#6b7280;font-family:ui-monospace,Menlo,monospace;font-size:11px}
+.appobj{color:#8fa0bf;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.approw button{font-size:11px;padding:2px 8px}
+.approw .danger{background:#7f2d20;border-color:#7f2d20}
+.approw .danger:disabled{background:#2d3748;border-color:#2d3748;color:#6b7280;cursor:not-allowed}
+.approw label{display:flex;align-items:center;gap:4px;color:#8fa0bf;cursor:pointer}
+.appfocused{color:#4ade80;font-size:11px}
+#buildcol{display:flex;flex-direction:column;gap:5px;align-items:stretch}
+#newapp{display:flex;align-items:center;gap:5px;font-size:11px;color:#8fa0bf;cursor:pointer;white-space:nowrap}
+#newapp input:disabled+*{opacity:.5}
+#logreset{float:right;font-weight:400;letter-spacing:0;text-transform:none;display:flex;align-items:center;gap:8px}
+#logreset label{display:flex;align-items:center;gap:4px;cursor:pointer;color:#8fa0bf}
+#logreset button{font-size:11px;padding:2px 8px}
+#logreset button:disabled{background:#2d3748;border-color:#2d3748;color:#6b7280;cursor:not-allowed}
+#logmsg{color:#6b7280;font-size:11px;min-width:70px}
 #appmap,#appplan,#appwalk,#appstate,#applog{font-family:ui-monospace,monospace;font-size:11px;line-height:1.45;color:#c8d0e0;white-space:pre-wrap;margin:0;max-height:50vh;overflow:auto}
 #appmap.empty,#appplan.empty,#appwalk.empty,#appstate.empty,#applog.empty{color:#6b7280}
 </style></head>
@@ -335,10 +374,18 @@ li{padding:2px 0;font-family:ui-monospace,monospace;font-size:12px}
 
 <div class="row">
   <textarea id="obj" placeholder="Describe the application… e.g. build a game of life&#10;&#10;This box is a running prompt — each Build submits the whole text and builds on it. Edit or trim it and Build again."></textarea>
-  <button onclick="build()">Build</button>
+  <div id="buildcol">
+    <button onclick="build()" id="buildbtn">Refine app</button>
+    <label id="newapp" title="Grow a SEPARATE application instead of refining the focused one. It gets its own contract arena and evolves alongside."><input type="checkbox" id="newappbox"> new app</label>
+  </div>
 </div>
 <p class="muted" style="font-size:12px;margin:2px 0">The whole box is submitted each time and kept afterwards (saved across reloads). ⌘/Ctrl+Enter to Build.</p>
 <p id="buildmsg" class="muted"></p>
+
+<div id="appspanel" hidden>
+  <h2>APPLICATIONS — every one ticks; focus selects what you see</h2>
+  <div id="applist"></div>
+</div>
 
 <div id="statuspanel">
   <div class="phase"><span id="phasechip">booting</span><span id="reason" class="muted"></span></div>
@@ -360,7 +407,8 @@ li{padding:2px 0;font-family:ui-monospace,monospace;font-size:12px}
 <p class="muted">Click / move / type over the canvas — events route through the HMI input register.</p>
 
 <h1>Cells</h1>
-<p class="muted" style="font-size:12px;margin:2px 0">Click a cell to inspect its tests &amp; constraints.</p>
+<p class="muted" style="font-size:12px;margin:2px 0">Click a cell to inspect its tests &amp; constraints.
+  <label style="margin-left:8px;cursor:pointer"><input type="checkbox" id="hidesys"> hide syslib</label></p>
 <ul id="cells"></ul>
 
 <div id="inspector">
@@ -389,7 +437,13 @@ li{padding:2px 0;font-family:ui-monospace,monospace;font-size:12px}
 </div>
 
 <div id="logpanel">
-  <h2>SYSTEM LOG — recent</h2>
+  <h2>SYSTEM LOG — recent
+    <span id="logreset" hidden>
+      <label title="Arm the reset — clears only this console buffer, not stderr or the ledger"><input type="checkbox" id="logarm"> confirm</label>
+      <button id="logclear" disabled>Reset log</button>
+      <span id="logmsg"></span>
+    </span>
+  </h2>
   <pre id="applog" class="empty">no log yet</pre>
 </div>
 
@@ -431,15 +485,29 @@ cv.addEventListener('mouseup',e=>{const p=cxy(e);post({type:'up',x:p.x,y:p.y,but
 cv.addEventListener('click',e=>{cv.focus();const p=cxy(e);post({type:'click',x:p.x,y:p.y,buttons:1,mods:mods(e)});});
 cv.addEventListener('keydown',e=>{post({type:'keydown',x:0,y:0,key:e.keyCode,mods:mods(e)});if(e.key===' ')e.preventDefault();});
 cv.addEventListener('keyup',e=>{post({type:'keyup',x:0,y:0,key:e.keyCode,mods:mods(e)});});
+// Hide the system standard-library cells (urn:hdm:sys:*) from the cell list + the
+// active-cell dropdown, so the app's own cells aren't buried. Persisted across reloads.
+function isSyslib(u){return u.indexOf('urn:hdm:sys:')===0;}
+let lastCells=[];
+function renderCells(){
+  const hide=document.getElementById('hidesys').checked;
+  const cells=hide?lastCells.filter(u=>!isSyslib(u)):lastCells;
+  document.getElementById('cells').innerHTML=cells.map(u=>'<li onclick="inspect(\''+u+'\')" title="'+u+'">'+shortURN(u)+'</li>').join('');
+  const cur=sel.value;
+  sel.innerHTML='<option value="">(active)</option>'+cells.map(u=>'<option>'+u+'</option>').join('');
+  sel.value=cur;
+}
 async function refreshCells(){
   try{
-    const cells=await (await fetch('/cells',{cache:'no-store'})).json();
-    document.getElementById('cells').innerHTML=cells.map(u=>'<li onclick="inspect(\''+u+'\')" title="'+u+'">'+shortURN(u)+'</li>').join('');
-    const cur=sel.value;
-    sel.innerHTML='<option value="">(active)</option>'+cells.map(u=>'<option>'+u+'</option>').join('');
-    sel.value=cur;
+    lastCells=await (await fetch('/cells',{cache:'no-store'})).json();
+    renderCells();
   }catch(e){}
 }
+(function initHideSys(){
+  const cb=document.getElementById('hidesys');
+  cb.checked=localStorage.getItem('hidesys')!=='0'; // default ON (syslib hidden)
+  cb.addEventListener('change',()=>{localStorage.setItem('hidesys',cb.checked?'1':'0');renderCells();});
+})();
 // Cell inspector: pull a cell's acceptance tests + shared-state constraints.
 let inspectURN='';
 async function inspect(u){
@@ -451,8 +519,14 @@ async function inspect(u){
     let h='<div><b>'+shortURN(u)+'</b> ';
     if(d.total>0){const ok=d.passed>=d.total;h+='<span class="'+(ok?'pass':'fail')+'">'+d.passed+'/'+d.total+' checks</span>';}
     else h+='<span class="empty">no acceptance checks</span>';
-    if(d.state)h+=' <span class="muted">· '+d.state+'</span>';
+    if(d.state){const sc=(d.state==='converged'||d.state==='active')?'pass':(d.state==='stalled'?'fail':'muted');h+=' <span class="'+sc+'">· '+esc(d.state)+'</span>';}
     h+='</div>';
+    // Last recorded error/issue for the cell: adversarial-critic feedback on why the
+    // last version was refuted, if any.
+    if(d.note)h+='<div class="fail" style="margin:3px 0;font-size:11px">⚠ '+esc(d.note)+'</div>';
+    // WHICH checks fail and WHY (expected vs actual, under the enforced boundary).
+    if((d.failures||[]).length){h+='<div class="grp">Failing checks</div><ul style="margin:2px 0 4px 16px;padding:0;font-size:11px" class="fail">';
+      d.failures.forEach(f=>{h+='<li>'+esc(f)+'</li>';});h+='</ul>';}
     // THIS cell's design plan (what it must implement) leads; the checks verify it.
     const P=d.plan;
     if(P){
@@ -471,7 +545,7 @@ async function inspect(u){
     if(T.length){h+='<div class="grp">Scalar tests</div><table>';
       T.forEach(t=>{h+='<tr><td>'+esc(t.name||'')+'</td><td>in '+t.input+'</td><td>→ '+t.expected+'</td></tr>';});h+='</table>';}
     if(S.length){h+='<div class="grp">Scenarios</div><table>';
-      S.forEach(s=>{h+='<tr><td>'+esc(s.name||'')+'</td><td>'+esc(s.entry||'run-tick')+'</td><td>'+esc(s.expect||'')+'</td></tr>';});h+='</table>';}
+      S.forEach(s=>{const m=s.pass?'<span class="pass">✓</span>':'<span class="fail">✗</span>';h+='<tr><td>'+m+' '+esc(s.name||'')+'</td><td>'+esc(s.entry||'run-tick')+'</td><td>'+esc(s.expect||'')+'</td></tr>';});h+='</table>';}
     if(C.length){h+='<div class="grp">Shared-state contract</div><table>';
       C.forEach(f=>{h+='<tr><td class="off">'+f.offset+'</td><td>'+esc(f.name||'')+' <span class="muted">'+esc(f.type||'')+'</span></td><td class="muted">'+esc(f.desc||'')+'</td></tr>';});h+='</table>';}
     if(!T.length&&!S.length&&!C.length&&!P)h+='<span class="empty">no plan, tests, or constraints recorded</span>';
@@ -496,23 +570,36 @@ async function inspect(u){
 // extended or trimmed and resubmitted as a whole.
 const objEl=document.getElementById('obj');
 objEl.value=localStorage.getItem('hdm_obj')||'';
-// Seed the box with the active app's objective (what the system is building
-// toward) when it is empty — so the prompt we are working toward is always
-// present. A non-empty box (the operator's running prompt) is left untouched.
-if(!objEl.value.trim()){
-  fetch('/objective',{cache:'no-store'}).then(r=>r.json()).then(j=>{
-    if(j.objective&&!objEl.value.trim()){objEl.value=j.objective;localStorage.setItem('hdm_obj',j.objective);}
-  }).catch(()=>{});
-}
+// The box must show the objective ACTUALLY BEING RUN — the source of truth for what the
+// system is building. Always reconcile with /objective on load: if the running objective
+// differs from the box (a stale localStorage prompt from a previous app/session, or an
+// empty box), the RUNNING one wins, so the text field never misrepresents what is executing.
+fetch('/objective',{cache:'no-store'}).then(r=>r.json()).then(j=>{
+  if(j.objective&&j.objective!==objEl.value){objEl.value=j.objective;localStorage.setItem('hdm_obj',j.objective);}
+}).catch(()=>{});
 objEl.addEventListener('input',()=>localStorage.setItem('hdm_obj',objEl.value));
 // Cmd/Ctrl+Enter submits, like a chat composer; plain Enter inserts a newline.
 objEl.addEventListener('keydown',e=>{if(e.key==='Enter'&&(e.metaKey||e.ctrlKey)){e.preventDefault();build();}});
+// New-vs-refine is an EXPLICIT choice, never inferred from what the canvas happens
+// to be showing. The button label tracks the checkbox so the action is legible
+// before it is taken, and the box resets after a build so "new app" can never fire
+// twice by accident.
+const newAppBox=document.getElementById('newappbox'),buildBtn=document.getElementById('buildbtn');
+let focusedApp='';
+function syncBuildBtn(){
+  const isNew=newAppBox.checked||!focusedApp;
+  buildBtn.textContent=isNew?'Build new app':'Refine app';
+  newAppBox.disabled=!focusedApp; // nothing focused ⇒ a build is always new
+}
+newAppBox.addEventListener('change',syncBuildBtn);
+
 async function build(){
   const o=objEl.value.trim(); if(!o)return;
   localStorage.setItem('hdm_obj',objEl.value); // keep the whole prompt available
   const m=document.getElementById('buildmsg'); m.textContent='growing… (this calls the model per subsystem; can take a while)';
+  const mode=(newAppBox.checked||!focusedApp)?'new':'refine';
   try{
-    const r=await fetch('/build',{method:'POST',body:o});
+    const r=await fetch('/build?mode='+mode,{method:'POST',body:o});
     const j=await r.json();
     if(j.error){m.textContent='error: '+j.error;return;}
     const n=(j.subsystems||[]).length;
@@ -523,10 +610,17 @@ async function build(){
     // The prompt text stays in the box (not cleared) so the next Build can build
     // on it or edit it. Follow the server's freshly-focused active cell.
     sel.value='';
-    await refreshCells(); draw();
+    newAppBox.checked=false; // a deliberate choice each time, never sticky
+    await refreshCells(); draw(); refreshApps();
   }catch(e){m.textContent='build failed: '+e;}
 }
-sel.onchange=draw;
+// Selecting a cell FOCUSES it: the server ticks that cell's app live (so its
+// simulation actually runs) and the canvas renders it. "(active)" leaves focus alone.
+async function focusSel(){
+  if(sel.value){try{await fetch('/focus?urn='+encodeURIComponent(sel.value),{cache:'no-store'});}catch(e){}}
+  draw();
+}
+sel.onchange=focusSel;
 // Live activity: phase (what/why), cell-state chips, and an event feed.
 const PHASE={idle:'#3b4252',booting:'#3b4252',ticking:'#2b6cb0',evolving:'#7c3aed',
   synthesizing:'#7c3aed',grading:'#0891b2',committing:'#059669',fusing:'#d97706',
@@ -608,7 +702,91 @@ async function refreshLog(){
   }catch(e){}
 }
 setInterval(refreshLog,2000); refreshLog();
-draw(); refreshCells(); refreshStatus();
+
+// The applications panel. Every listed app is ticking; "focus" only chooses which
+// one the canvas draws. Retire is destructive and irreversible, so each row carries
+// its own confirm box that must be ticked before its Retire button enables.
+async function refreshApps(){
+  try{
+    const r=await fetch('/apps',{cache:'no-store'});
+    if(!r.ok)return;                       // /apps not wired — leave the panel hidden
+    const apps=await r.json();
+    document.getElementById('appspanel').hidden=false;
+    focusedApp='';
+    const el=document.getElementById('applist');
+    el.innerHTML='';
+    (apps||[]).forEach(a=>{
+      if(a.focused)focusedApp=a.namespace;
+      const row=document.createElement('div');
+      row.className='approw'+(a.focused?' on':'');
+      const name=(a.namespace||'').replace('urn:hdm:apps:','');
+      row.innerHTML='<span class="appns">'+esc(name)+'</span>'
+        +'<span class="apparena">'+esc(a.arena||'')+' · '+(a.cells||0)+' cells</span>'
+        +'<span class="appobj">'+esc(a.objective||'')+'</span>'
+        +(a.focused?'<span class="appfocused">viewing</span>':'');
+      // Focus: only meaningful when the app actually has a renderer to draw.
+      if(!a.focused&&a.ui){
+        const b=document.createElement('button');
+        b.textContent='View';
+        b.onclick=async()=>{
+          try{await fetch('/focus?urn='+encodeURIComponent(a.ui),{cache:'no-store'});}catch(e){}
+          await refreshApps(); await refreshCells(); draw();
+        };
+        row.appendChild(b);
+      }
+      const lab=document.createElement('label');
+      const box=document.createElement('input'); box.type='checkbox';
+      lab.appendChild(box); lab.appendChild(document.createTextNode('confirm'));
+      lab.title='Retire permanently deletes this application — its cells, design artifacts, and history.';
+      const del=document.createElement('button');
+      del.textContent='Retire'; del.className='danger'; del.disabled=true;
+      box.onchange=()=>{del.disabled=!box.checked;};
+      del.onclick=async()=>{
+        if(!box.checked)return;
+        del.disabled=true;
+        try{
+          const rr=await fetch('/app/retire?ns='+encodeURIComponent(a.namespace),{method:'POST'});
+          const j=await rr.json();
+          if(j.error)throw new Error(j.error);
+        }catch(e){}
+        await refreshApps(); await refreshCells(); draw();
+      };
+      row.appendChild(lab); row.appendChild(del);
+      el.appendChild(row);
+    });
+    syncBuildBtn(); // focus may have changed which action Build performs
+  }catch(e){}
+}
+setInterval(refreshApps,4000);
+
+// Log reset, guarded by a chicken box: the button stays disabled until the
+// confirm checkbox is ticked, and the box re-clears after each reset so a second
+// wipe always needs a fresh, deliberate confirmation.
+const logArm=document.getElementById('logarm'),logClear=document.getElementById('logclear'),logMsg=document.getElementById('logmsg');
+logArm.addEventListener('change',()=>{logClear.disabled=!logArm.checked;logMsg.textContent='';});
+logClear.addEventListener('click',async()=>{
+  if(!logArm.checked)return;
+  logClear.disabled=true;
+  try{
+    const r=await fetch('/log/reset',{method:'POST'});
+    if(!r.ok)throw new Error(r.status);
+    const j=await r.json();
+    const el=document.getElementById('applog');
+    el.textContent='no log yet';el.classList.add('empty');
+    logMsg.textContent='cleared '+j.cleared;
+  }catch(e){logMsg.textContent='failed';}
+  logArm.checked=false;
+  refreshLog();
+});
+// The control only appears when the server actually exposes the route, so a
+// console wired without LogReset shows no dead button. Probed with a GET, which
+// the handler answers 405 (route present) vs 404 (not wired) — a POST probe would
+// clear the log on every page load.
+fetch('/log/reset',{method:'GET',cache:'no-store'}).then(r=>{
+  if(r.status===405)document.getElementById('logreset').hidden=false;
+}).catch(()=>{});
+
+draw(); refreshCells(); refreshStatus(); refreshApps(); syncBuildBtn();
 </script></body></html>`
 
 // Services bundles the optional edge HTTP services to register.
@@ -631,6 +809,12 @@ type Services struct {
 	// Plan renders the active application's evolving DESIGN PLAN (the system
 	// overview, choreography, and each component's algorithm). Optional.
 	Plan func() string
+	// Contract renders the active application's shared-state CONTRACT — the named
+	// fields, their TYPES (what the design critic type-checks), and offsets. Optional.
+	Contract func() string
+	// Model renders the active application's canonical SYSTEM MODEL — the entities,
+	// their typed state, and dynamics that the contract and ports derive from. Optional.
+	Model func() string
 	// Walk renders the active application's GOAL TREE — the recursive, depth-first
 	// walk the scheduler follows (a fractured goal's children before its siblings).
 	// Optional.
@@ -638,6 +822,19 @@ type Services struct {
 	// Log returns the tail of the system log (oldest first) for read-only
 	// inspection. Optional.
 	Log func() []string
+	// LogReset clears the in-memory log inspection buffer and reports how many
+	// lines were discarded. It does NOT touch the durable sinks (stderr, the
+	// ledger) — only the console's scrollback. Optional; when nil the console
+	// hides the reset control entirely.
+	LogReset func() int
+	// Apps lists every grown application — namespace, objective, arena, subsystem
+	// count, and which one the canvas is focused on. Optional.
+	Apps func() any
+	// AppRetire deletes an application: its cells, design artifacts, and registry
+	// entries. Returns how many ledger refs were dropped. Destructive and
+	// irreversible, so the console guards it behind a confirm box. Optional; when
+	// nil the console hides the control.
+	AppRetire func(namespace string) (int, error)
 	// State returns the live values of the active application's shared-state
 	// contract fields (read out of shared memory). Optional.
 	State func() any
@@ -698,6 +895,17 @@ func Serve(ctx context.Context, addr string, s Services) *http.Server {
 	if s.Canvas != nil {
 		mux.HandleFunc("/canvas", s.Canvas.Page)
 		mux.HandleFunc("/canvas/frame", s.Canvas.Frame)
+		// /focus?urn= sets the FOCUSED cell — which app the live frame loop ticks (and
+		// which cell the canvas renders). This is what actually drives a grown app's
+		// simulation live: an unfocused app's cells are never ticked, so its state stays
+		// frozen at the seed even after it converges. Empty urn is ignored.
+		mux.HandleFunc("/focus", func(w http.ResponseWriter, r *http.Request) {
+			if urn := strings.TrimSpace(r.URL.Query().Get("urn")); urn != "" {
+				s.Canvas.SetActive(urn)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"focused":"`+s.Canvas.Active()+`"}`)
+		})
 	}
 	if s.Build != nil {
 		s.Build.baseCtx = ctx // background staged growth outlives the request
@@ -744,7 +952,13 @@ func Serve(ctx context.Context, addr string, s Services) *http.Server {
 				return
 			}
 			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-			_, _ = io.WriteString(w, s.Flux(urn))
+			genome := s.Flux(urn)
+			// Pretty-print the s-expression genome (macro-WAT / WAT) for readability,
+			// preserving any leading draft marker/comment before the first form.
+			if i := strings.IndexByte(genome, '('); i >= 0 {
+				genome = genome[:i] + flux.Format(genome[i:])
+			}
+			_, _ = io.WriteString(w, genome)
 		})
 	}
 	if s.AppMap != nil {
@@ -757,6 +971,18 @@ func Serve(ctx context.Context, addr string, s Services) *http.Server {
 		mux.HandleFunc("/plan", func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 			_, _ = io.WriteString(w, s.Plan())
+		})
+	}
+	if s.Contract != nil {
+		mux.HandleFunc("/contract", func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+			_, _ = io.WriteString(w, s.Contract())
+		})
+	}
+	if s.Model != nil {
+		mux.HandleFunc("/model", func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+			_, _ = io.WriteString(w, s.Model())
 		})
 	}
 	if s.Walk != nil {
@@ -775,6 +1001,52 @@ func Serve(ctx context.Context, addr string, s Services) *http.Server {
 			}
 			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 			_, _ = io.WriteString(w, strings.Join(lines, "\n"))
+		})
+	}
+	if s.Apps != nil {
+		mux.HandleFunc("/apps", func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(s.Apps())
+		})
+	}
+	if s.AppRetire != nil {
+		// POST-only and namespace-explicit: this deletes an application permanently,
+		// so it must never be reachable by a GET and never act on "whatever is
+		// focused" — the caller names exactly what it means to destroy.
+		mux.HandleFunc("/app/retire", func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodPost {
+				w.Header().Set("Allow", http.MethodPost)
+				http.Error(w, "POST required", http.StatusMethodNotAllowed)
+				return
+			}
+			ns := strings.TrimSpace(r.URL.Query().Get("ns"))
+			w.Header().Set("Content-Type", "application/json")
+			if ns == "" {
+				w.WriteHeader(http.StatusBadRequest)
+				_ = json.NewEncoder(w).Encode(map[string]any{"error": "missing ns"})
+				return
+			}
+			n, err := s.AppRetire(ns)
+			if err != nil {
+				w.WriteHeader(http.StatusInternalServerError)
+				_ = json.NewEncoder(w).Encode(map[string]any{"error": err.Error()})
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"retired": ns, "refs": n})
+		})
+	}
+	if s.LogReset != nil {
+		// POST-only: clearing is a mutation, so it must not be reachable by a stray
+		// GET (a prefetch or a refresh would otherwise wipe the operator's scrollback).
+		mux.HandleFunc("/log/reset", func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodPost {
+				w.Header().Set("Allow", http.MethodPost)
+				http.Error(w, "POST required", http.StatusMethodNotAllowed)
+				return
+			}
+			n := s.LogReset()
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{"cleared": n})
 		})
 	}
 	if s.State != nil {

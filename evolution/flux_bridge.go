@@ -1,8 +1,6 @@
 package evolution
 
 import (
-	"context"
-	"encoding/json"
 	"fmt"
 	"sort"
 	"strings"
@@ -12,14 +10,55 @@ import (
 	"github.com/mdcfrancis/flow/storage"
 )
 
-// Flux DRAFT store: the most recent Flux program the model authored for a cell,
+// extractMacroWAT isolates the model's macro-WAT program — the outermost balanced
+// (cell …) or (module …) — tolerating markdown fences, <think> blocks, and surrounding
+// prose. Returns "" if none.
+func extractMacroWAT(resp string) string {
+	s := stripThink(resp)
+	best := ""
+	for _, key := range []string{"(cell", "(module"} {
+		start := strings.Index(s, key)
+		if start < 0 {
+			continue
+		}
+		depth, inStr := 0, false
+		for i := start; i < len(s); i++ {
+			c := s[i]
+			switch {
+			case inStr:
+				if c == '"' {
+					inStr = false
+				}
+			case c == '"':
+				inStr = true
+			case c == '(':
+				depth++
+			case c == ')':
+				depth--
+				if depth == 0 {
+					cand := s[start : i+1]
+					if best == "" || strings.HasPrefix(strings.TrimSpace(cand), "(cell") {
+						best = cand
+					}
+					i = len(s)
+				}
+			}
+		}
+		if strings.HasPrefix(strings.TrimSpace(best), "(cell") {
+			break // prefer a (cell …) macro program
+		}
+	}
+	return best
+}
+
+// Flux DRAFT store: the most recent macro-WAT program the model authored for a cell,
 // whether or not it committed. The committed genome is the source of truth (P0),
-// but a cell shows its WAT stub until a Flux candidate commits — so for the
-// console we also keep the latest draft, to display the Flux the model is
-// actively writing even while a cell is still building.
+// but a cell shows its stub until a candidate commits — so for the console we also
+// keep the latest draft, to display the macro-WAT the model is actively writing even
+// while a cell is still building.
 func fluxDraftRef(urn string) string { return urn + ":flux-draft" }
 
-// SaveFluxDraft records the latest Flux source authored for a cell.
+// SaveFluxDraft records the latest macro-WAT source authored for a cell.
 func SaveFluxDraft(ledger *storage.LedgerEngine, urn, src string) error {
 	if ledger == nil || strings.TrimSpace(src) == "" {
 		return nil
@@ -56,10 +95,10 @@ func ClearFluxDraft(ledger *storage.LedgerEngine, urn string) {
 	}
 }
 
-// lowerFluxToBytecode lowers a Flux program to wasm bytecode (for judging a draft
-// without committing it), or an error if it does not compile.
-func lowerFluxToBytecode(layout flux.Layout, src string) ([]byte, error) {
-	wat, err := flux.Compile("cell", src, layout)
+// lowerMacroToBytecode expands a macro-WAT draft to wasm bytecode (for judging a draft
+// without committing it), or an error if it does not expand/assemble.
+func lowerMacroToBytecode(layout flux.Layout, src string) ([]byte, error) {
+	wat, err := flux.Expand(src, layout)
 	if err != nil {
 		return nil, err
 	}
@@ -70,12 +109,11 @@ func lowerFluxToBytecode(layout flux.Layout, src string) ([]byte, error) {
 	return art.Bytecode, nil
 }
 
-// This file bridges the Flux functional IR (docs/functional-ir.md) into the
-// operational synthesis path. When a layout is available, the sieve accepts a
-// model that authors a Flux (cell …) program: it is parsed, type-checked, and
-// lowered to WAT here, then verified by the identical downstream gates. A model
-// that still emits raw WAT is unaffected — extractFlux returns "" and the WAT
-// path runs exactly as before.
+// This file bridges the macro-WAT surface into the operational synthesis path. When
+// a contract layout is available, the sieve accepts a model that authors a (cell …)
+// macro-WAT program: it is expanded against the layout to raw WAT here (flux.Expand),
+// then verified by the identical downstream gates. A model that emits a bare (module …)
+// is unaffected — flux.Expand leaves non-macro WAT untouched.
 
 // hmiFields are the fixed HARDWARE CAPABILITY fields every cell may read: the HMI
 // Input Event Register (execution.InputBase = 0x50000). They are read-only (the
@@ -107,16 +145,32 @@ func LayoutFromContract(c *AppContract) flux.Layout {
 	}
 	l := flux.Layout{}
 	for _, f := range c.Fields {
-		var t flux.Type
-		switch strings.TrimSpace(f.Type) {
-		case "i32":
-			t = flux.TInt
-		case "f32":
-			t = flux.TFloat
+		ft := strings.TrimSpace(f.Type)
+		switch {
+		case ft == "i32":
+			l[f.Name] = flux.Field{Type: flux.TInt, Offset: uint32(f.Offset)}
+		case ft == "f32":
+			l[f.Name] = flux.Field{Type: flux.TFloat, Offset: uint32(f.Offset)}
+		case strings.HasPrefix(ft, "i32[") && strings.HasSuffix(ft, "]"):
+			// An i32 array becomes a bounded Flux BUFFER (addressed with at/store,
+			// bounds-clamped) — so an array-writing cell (a particle system, a grid
+			// renderer) is Flux-addressable instead of falling back to raw WAT.
+			if n := typeWords(ft); n > 1 {
+				l[f.Name] = flux.Field{Type: flux.TBuffer, Offset: uint32(f.Offset), Len: uint32(n), EType: flux.TInt, Stride: uint32(f.Stride)}
+			}
+		case strings.HasPrefix(ft, "f32[") && strings.HasSuffix(ft, "]"):
+			// An f32 array — the natural home for continuous per-element state (a
+			// particle field's positions/velocities). Its elements are addressed as
+			// native floats: (atidx) loads f32, (setidx) stores f32, (atidxi) truncates
+			// to an i32 pixel coordinate. This is what lets a type critic move particle
+			// state off i32 (where gravity/division floor to zero) onto real floats. A
+			// non-zero Stride makes it one column of an interleaved collection buffer.
+			if n := typeWords(ft); n > 1 {
+				l[f.Name] = flux.Field{Type: flux.TBuffer, Offset: uint32(f.Offset), Len: uint32(n), EType: flux.TFloat, Stride: uint32(f.Stride)}
+			}
 		default:
-			continue // arrays / unknown: not addressable by Flux v1
+			continue // unknown: not addressable by Flux yet
 		}
-		l[f.Name] = flux.Field{Type: t, Offset: uint32(f.Offset)}
 	}
 	if len(l) == 0 {
 		return nil
@@ -130,6 +184,15 @@ func LayoutFromContract(c *AppContract) flux.Layout {
 func (o *Orchestrator) fluxLayoutFor(urn string) flux.Layout {
 	if !o.FluxEnabled {
 		return nil
+	}
+	// A combinator LEAF gets an ELEMENT layout (per-element fields arg-pointer-relative),
+	// not the global contract layout — otherwise (get x) reads the whole global array
+	// instead of this element, and synthesis bails to raw WAT (a physics leaf that wrote
+	// render records). Its element layout already includes the shared globals it reads.
+	if o.LeafElementLayout != nil {
+		if el := o.LeafElementLayout(urn); el != nil {
+			return el
+		}
 	}
 	l := LayoutFromContract(LoadContract(o.ledger, AppNamespaceOf(urn)))
 	if l == nil {
@@ -149,66 +212,54 @@ func (o *Orchestrator) fluxLayoutFor(urn string) flux.Layout {
 // With a layout and a Flux (cell …) form present, it lowers Flux → WAT and marks
 // the source Flux; otherwise it extracts WAT as before. A Flux compile error is
 // returned so the loop can feed the semantic message back for repair.
-func candidateWAT(resp string, layout flux.Layout) (wat, fluxSrc string, err error) {
+func candidateWAT(resp string, layout flux.Layout, prologue string) (wat, fluxSrc string, err error) {
 	if layout != nil {
-		if src := extractFlux(resp); src != "" {
-			w, cerr := flux.Compile("cell", src, layout)
-			if cerr != nil {
-				return "", src, cerr
-			}
-			return w, src, nil
+		// Macro-WAT: the model wrote (cell …) with field macros; expand it against the
+		// contract to raw WAT. The application prologue (default + app-harvested macros)
+		// is prepended so a call to (reflect …)/(clampi …) resolves; the model may also
+		// define its own (defmacro …) inline. A bare (module …) passes straight through
+		// (flux.Expand leaves non-macro WAT untouched). fluxSrc is the model's own program
+		// (without the prologue) — the stored genome — so the prologue never bloats it.
+		src := extractMacroWAT(resp)
+		if src == "" {
+			return extractWAT(resp), "", nil
 		}
+		w, cerr := flux.Expand(prologue+src, layout)
+		if cerr != nil {
+			return "", src, cerr
+		}
+		return w, src, nil
 	}
 	return extractWAT(resp), "", nil
 }
 
-// extractFlux isolates the outermost balanced (cell …) form from a completion,
-// tolerating markdown fences and surrounding prose. Returns "" if none.
-func extractFlux(resp string) string {
-	s := resp
-	if i := strings.Index(s, "```"); i >= 0 {
-		rest := s[i+3:]
-		if nl := strings.IndexByte(rest, '\n'); nl >= 0 {
-			rest = rest[nl+1:]
+// stripThink removes any <think>…</think> reasoning blocks a model may emit. The
+// local server's enable_thinking:false suppresses these on the normal path, but this
+// is a cheap belt-and-braces so a stray block never reaches the compiler.
+func stripThink(s string) string {
+	for {
+		i := indexFold(s, "<think>")
+		if i < 0 {
+			return s
 		}
-		if j := strings.Index(rest, "```"); j >= 0 {
-			s = rest[:j]
+		if j := indexFold(s[i:], "</think>"); j >= 0 {
+			s = s[:i] + s[i+j+len("</think>"):]
 		} else {
-			s = rest
+			return s[:i] // unclosed — drop the tail
 		}
 	}
-	start := strings.Index(s, "(cell")
-	if start < 0 {
-		return ""
-	}
-	depth, inStr := 0, false
-	for i := start; i < len(s); i++ {
-		c := s[i]
-		switch {
-		case inStr:
-			if c == '"' {
-				inStr = false
-			}
-		case c == '"':
-			inStr = true
-		case c == '(':
-			depth++
-		case c == ')':
-			depth--
-			if depth == 0 {
-				return s[start : i+1]
-			}
-		}
-	}
-	return ""
 }
 
-// fluxSeedBlock renders the Flux authoring instructions appended to the build
-// seed when the Flux path is on: it tells the model to output a (cell …) program
-// (not WAT), gives the grammar + the typed field list + a worked example matching
-// the cell's entry, so the model writes only logic and the lowerer owns the
-// encoding.
-func fluxSeedBlock(contract *EntryContract, layout flux.Layout) string {
+func indexFold(s, sub string) int {
+	return strings.Index(strings.ToLower(s), strings.ToLower(sub))
+}
+
+
+// macroSeedBlock renders the macro-WAT authoring instructions appended to the build
+// seed: the macro forms the model uses over raw WAT, plus the cell's typed field
+// list (so it names fields instead of computing offsets). The worked example is
+// retrieved from the knowledge base and lazily inlined by renderKnowledge.
+func macroSeedBlock(contract *EntryContract, layout flux.Layout) string {
 	view := contract != nil && contract.Name == "render-frame"
 	var stateFields, inputFields []string
 	for n, f := range layout {
@@ -223,163 +274,50 @@ func fluxSeedBlock(contract *EntryContract, layout flux.Layout) string {
 	sort.Strings(inputFields)
 
 	var b strings.Builder
-	b.WriteString("\n=== OUTPUT FORMAT: FLUX (author logic, NOT WAT) ===\n")
-	b.WriteString("Write this cell as a Flux functional program — a typed S-expression that is\n")
-	b.WriteString("compiled to WASM for you. Do NOT write WAT, WASM, or (module …). Output ONLY a (cell …) form.\n\n")
-	b.WriteString("A cell is a PURE FUNCTION over shared state; the compiler owns all memory, stack, and types:\n")
+	b.WriteString("\n=== OUTPUT FORMAT: MACRO-WAT (native WAT with field macros) ===\n")
+	b.WriteString("Write the cell in WAT using these MACROS — do not hand-write the module, the memory\n")
+	b.WriteString("import, or field offsets. Output ONLY a (cell …) form.\n\n")
 	if view {
-		b.WriteString("  (cell NAME (reads <fields>) (draw <prims>))\n")
-		b.WriteString("  prims: (circle cx cy r color) (rect x y w h color) (line x1 y1 x2 y2 color); color is #xRRGGBBAA.\n")
+		b.WriteString("  (cell render-frame BODY…)           a UI cell; BODY draws, the cell returns the length.\n")
+		b.WriteString("  (draw PRIM)                         append ONE shape. PRIM = (circle X Y R COLOR) |\n")
+		b.WriteString("                                      (rect X Y W H COLOR) | (line X1 Y1 X2 Y2 COLOR); COLOR=(i32.const 0xRRGGBBAA).\n")
+		b.WriteString("  (scene PRIM…)                       shorthand for several (draw …) in a row (a FIXED set of shapes).\n")
+		b.WriteString("  For a VARIABLE number of shapes (one per ARRAY element), LOOP and draw:\n")
+		b.WriteString("    (for $i (get count) (draw (circle (atidxi px $i) (atidxi py $i) (i32.const 3) COLOR)))\n")
 	} else {
-		b.WriteString("  (cell NAME (reads <fields>) (writes <fields>) BODY)\n")
-		b.WriteString("  BODY = optional (let ([name expr]…) …) ending in (write (field expr) …). Unwritten fields keep their value.\n")
+		b.WriteString("  (cell run-tick BODY…)               BODY ends with (i32.const 0).\n")
 	}
-	b.WriteString("Expressions: Int/Float/Bool/Color literals (42, 3.14, true, #xFF8800FF); field & let names;\n")
-	b.WriteString("(if cond then else); primitives  + - * / mod neg abs min max clamp  < <= > >= = != and or not.\n")
-	b.WriteString("Comparisons yield Bool; there is no implicit numeric coercion.\n\n")
+	b.WriteString("  (get NAME) / (set NAME EXPR)        read / write a shared field (f32 if the field is f32, else i32)\n")
+	b.WriteString("  (geti NAME)                         field NAME as an i32 (TRUNCATES an f32 field, for pixel coords)\n")
+	b.WriteString("  (atidx NAME IDX) / (setidx NAME IDX EXPR)   ARRAY element read / write in its natural type (f32 for an f32[N] array); IDX may be a $loop var\n")
+	b.WriteString("  (atidxi NAME IDX)                   ARRAY element as an i32 (TRUNCATES an f32[N] element — use for pixel coords)\n")
+	b.WriteString("  (for $i COUNT BODY…)                run BODY for $i=0..COUNT-1 — update every array element, or draw one shape per element\n")
+	b.WriteString("COLLECTIONS: a set of N entities is a group of array columns <entity>_<field> (e.g.\n")
+	b.WriteString("  particle_x, particle_vx) plus a count <entity>_count. Update the collection IN PLACE\n")
+	b.WriteString("  with ONE run-tick loop — read/write record i's field with (atidx/setidx <entity>_<field> $i):\n")
+	b.WriteString("    (for $i (get particle_count) (setidx particle_vx $i (f32.add (atidx particle_vx $i) …)) (setidx particle_x $i (f32.add (atidx particle_x $i) (atidx particle_vx $i))))\n")
+	b.WriteString("  Draw it with a render loop: (for $i (get particle_count) (draw (circle (atidxi particle_x $i) (atidxi particle_y $i) …))).\n")
+	b.WriteString("  This IS how to handle a particle system / agents — a plain loop, NOT a map combinator.\n")
+	b.WriteString("WORLD vs SCREEN: entity positions are WORLD-space (the simulation's own units), NOT pixels.\n")
+	b.WriteString("  A renderer maps a world coordinate to a pixel with (to_screen_x WX) / (to_screen_y WY) — the\n")
+	b.WriteString("  viewport transform — so draw at the MAPPED coord, never the raw world value:\n")
+	b.WriteString("    (for $i (get particle_count) (draw (circle (to_screen_x (atidx particle_x $i)) (to_screen_y (atidx particle_y $i)) (i32.const 3) COLOR)))\n")
+	b.WriteString("Everything else is ordinary WAT: i32.*/f32.* math, (local $t f32), etc. Locals are hoisted for you.\n")
+	b.WriteString("USE FLOATS for continuous physics (a field typed f32): f32.div does not floor to zero.\n\n")
 	fmt.Fprintf(&b, "SHARED STATE fields (read and write, within your enforced boundary above):\n  %s\n", strings.Join(stateFields, ", "))
 	if len(inputFields) > 0 {
 		fmt.Fprintf(&b, "INPUT fields (READ-ONLY hardware — the host writes them each tick; NEVER write them):\n  %s\n", strings.Join(inputFields, ", "))
 		b.WriteString("  hmi_event_type: 2 mousedown, 3 mouseup, 4 click, 5 keydown, 6 keyup. Detect a NEW discrete event by comparing hmi_event_seq to the value you saw last tick. hmi_key is the key code; hmi_mouse_x/y is the live cursor; hmi_buttons/hmi_modifiers are bit masks.\n")
 	}
-	b.WriteString("\n")
-	if view {
-		b.WriteString("WORKED EXAMPLE (a view cell that draws AT its read position):\n")
-		b.WriteString("  (cell renderer (reads ball_x ball_y) (draw (circle ball_x ball_y 8 #xFFCC33FF)))\n\n")
-	} else {
-		b.WriteString("WORKED EXAMPLE (a physics cell: integrate, reflect at the walls, clamp):\n")
-		b.WriteString("  (cell physics\n")
-		b.WriteString("    (reads ball_x ball_y vel_x vel_y screen_w screen_h)\n")
-		b.WriteString("    (writes ball_x ball_y vel_x vel_y)\n")
-		b.WriteString("    (let ([nx (+ ball_x vel_x)] [ny (+ ball_y vel_y)]\n")
-		b.WriteString("          [bx (or (< nx 0) (>= nx screen_w))] [by (or (< ny 0) (>= ny screen_h))])\n")
-		b.WriteString("      (write (vel_x (if bx (neg vel_x) vel_x)) (vel_y (if by (neg vel_y) vel_y))\n")
-		b.WriteString("             (ball_x (clamp nx 0 (- screen_w 1))) (ball_y (clamp ny 0 (- screen_h 1))))))\n\n")
-	}
-	b.WriteString("Output only your (cell …) program.\n")
+	b.WriteString("\nOutput only your (cell …) program.\n")
 	return b.String()
 }
 
-// runFluxCell lowers a Flux program and runs it once (or `steps` times) in the
-// real deterministic sandbox with the given inputs, returning a human-readable
-// summary of the resulting writable-field values (compute cells) or drawn
-// primitives (view cells). It is the engine of the flux_run agentic tool: it lets
-// the authoring model TEST its cell empirically — set inputs, see outputs, iterate
-// — instead of guessing. inputsJSON is a JSON object of field name → integer.
-func runFluxCell(layout flux.Layout, src, inputsJSON string, steps int) (string, error) {
-	wat, err := flux.Compile("cell", src, layout)
-	if err != nil {
-		return "", err
-	}
-	art, aerr := compiler.NewCompilerService().CompileGenotype(wat)
-	if aerr != nil || art == nil || !art.SyntaxPassed {
-		return "", fmt.Errorf("lowered WAT did not assemble")
-	}
-
-	// Seed the inputs the model chose.
-	raw := map[string]json.Number{}
-	_ = json.Unmarshal([]byte(inputsJSON), &raw)
-	var seeds []SeedWrite
-	var unknown []string
-	for name, num := range raw {
-		f, ok := layout[name]
-		if !ok {
-			unknown = append(unknown, name)
-			continue
-		}
-		iv, _ := num.Int64()
-		seeds = append(seeds, SeedWrite{At: fmt.Sprintf("0x%X", f.Offset), U32: []uint32{uint32(int32(iv))}})
-	}
-
-	entry := "run-tick"
-	if strings.Contains(wat, "render-frame") {
-		entry = "render-frame"
-	}
-	if steps < 1 {
-		steps = 1
-	}
-
-	// Read back every writable field after the run, in a stable order.
-	type wf struct {
-		name string
-		off  uint32
-	}
-	var writables []wf
-	for name, f := range layout {
-		if !f.ReadOnly {
-			writables = append(writables, wf{name, f.Offset})
-		}
-	}
-	sort.Slice(writables, func(i, j int) bool { return writables[i].name < writables[j].name })
-	// Capture each writable field's value at EVERY tick (the trajectory), not just
-	// the final value — so multi-step behavior is visible: a field that reaches a
-	// wall and STOPS (clamp) reads differently from one that reverses (bounce), and
-	// a frozen cell shows a flat line. This is what lets the model validate the full
-	// goal behavior, not just that one tick moved something.
-	trajExp := make([]TrajectoryExpect, len(writables))
-	for i, w := range writables {
-		trajExp[i] = TrajectoryExpect{At: fmt.Sprintf("0x%X", w.off)}
-	}
-
-	sc := Scenario{Entry: entry, Steps: steps, Seed: seeds, Expect: ScenarioExpect{Trajectory: trajExp}}
-	_, frames, _, _, traj, rerr := execScenario(context.Background(), art.Bytecode, sc, DefaultPayloadOffset, DefaultStateWindow, nil)
-	if rerr != nil {
-		return "", rerr
-	}
-
-	var b strings.Builder
-	if len(unknown) > 0 {
-		fmt.Fprintf(&b, "(ignored unknown input field(s): %s)\n", strings.Join(unknown, ", "))
-	}
-	if entry == "render-frame" {
-		var last []DrawRecord
-		if len(frames) > 0 {
-			last = frames[len(frames)-1]
-		}
-		if len(last) == 0 {
-			b.WriteString("drew nothing")
-			return b.String(), nil
-		}
-		name := map[int32]string{1: "rect", 2: "line", 3: "circle"}
-		for _, r := range last {
-			fmt.Fprintf(&b, "drew %s a=%d b=%d c=%d d=%d rgba=0x%08X\n", name[r.Op], r.A, r.B, r.C, r.D, r.RGBA)
-		}
-		return strings.TrimRight(b.String(), "\n"), nil
-	}
-	fmt.Fprintf(&b, "trajectory over %d tick(s) — each field's value per tick (watch for clamp/stop vs reverse/bounce, and freezes):\n", steps)
-	lines := make([]string, len(writables))
-	for i, w := range writables {
-		var seq []uint32
-		if i < len(traj) {
-			seq = traj[i]
-		}
-		lines[i] = fmt.Sprintf("  %s: %s", w.name, sampleSeq(seq))
-	}
-	b.WriteString(strings.Join(lines, "\n"))
-	return b.String(), nil
-}
-
-// sampleSeq renders a per-tick value sequence compactly: in full when short,
-// head…tail when long, so a long run stays readable while the shape is visible.
-func sampleSeq(seq []uint32) string {
-	toStr := func(sub []uint32) []string {
-		out := make([]string, len(sub))
-		for i, v := range sub {
-			out[i] = fmt.Sprintf("%d", int32(v))
-		}
-		return out
-	}
-	if len(seq) <= 16 {
-		return "[" + strings.Join(toStr(seq), ",") + "]"
-	}
-	return "[" + strings.Join(toStr(seq[:7]), ",") + ",…," + strings.Join(toStr(seq[len(seq)-7:]), ",") + "]"
-}
-
-// fluxCorrectionDirective renders the sieve repair prompt for a Flux compile
-// error — a semantic sentence (a type/shape/parse message), not a stack trace.
-func fluxCorrectionDirective(err error) string {
+// macroCorrectionDirective renders the sieve repair prompt for a macro-WAT
+// expand/assemble error — a semantic sentence, not a stack trace.
+func macroCorrectionDirective(err error) string {
 	return fmt.Sprintf(`[INNER SIEVE CORRECTION DIRECTIVE]
-Your Flux program did not compile.
+Your (cell …) program did not expand/assemble.
 DEFECT: %v
-Regenerate the complete (cell …) program, fixing exactly that. Output only the Flux program.`, err)
+Regenerate the complete (cell …) program, fixing exactly that. Output only the program.`, err)
 }

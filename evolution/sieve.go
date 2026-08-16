@@ -65,13 +65,24 @@ func entryContractFor(genotype string) *EntryContract {
 	// A Flux genome names its shape by its terminal: a view cell has a (draw …),
 	// a compute cell a (write …). WAT names it by the export.
 	if strings.Contains(genotype, "(cell") {
-		if strings.Contains(genotype, "(draw") {
+		// s-expr Flux names a view by its (draw …); macro-WAT names it by the
+		// (cell render-frame …) entry or a (scene …) body.
+		if strings.Contains(genotype, "(draw") || strings.Contains(genotype, "(scene") || strings.Contains(genotype, "render-frame") {
 			return RenderFrameContract
 		}
 		return RunTickContract
 	}
 	if strings.Contains(genotype, `"render-frame"`) {
 		return RenderFrameContract
+	}
+	// A FORTH render cell has neither "(draw" nor "render-frame" — it ends in a bare
+	// draw terminal word (circle/rect/line). Recognize those so a Forth renderer gets
+	// the render-frame contract instead of compute's run-tick (otherwise its correct
+	// draw output is rejected with "no exported function run-tick").
+	for _, w := range []string{" circle", " rect", " line"} {
+		if strings.Contains(genotype, w) {
+			return RenderFrameContract
+		}
 	}
 	return RunTickContract
 }
@@ -89,7 +100,7 @@ func RunSieve(ctx context.Context, model Reasoner, systemPrompt, seedContext str
 	if len(contract) > 0 {
 		want = contract[0]
 	}
-	return runSieve(ctx, model, systemPrompt, seedContext, maxIters, nil, want)
+	return runSieve(ctx, model, systemPrompt, seedContext, maxIters, nil, "", want)
 }
 
 // RunSieveWithLayout is the Flux-aware inner loop: given a shared-state field
@@ -97,10 +108,16 @@ func RunSieve(ctx context.Context, model Reasoner, systemPrompt, seedContext str
 // here) as well as one that emits raw WAT — both feed the identical downstream
 // verification. A nil layout is exactly RunSieve.
 func RunSieveWithLayout(ctx context.Context, model Reasoner, systemPrompt, seedContext string, maxIters int, layout flux.Layout, want *EntryContract) (*SieveOutcome, error) {
-	return runSieve(ctx, model, systemPrompt, seedContext, maxIters, layout, want)
+	return runSieve(ctx, model, systemPrompt, seedContext, maxIters, layout, "", want)
 }
 
-func runSieve(ctx context.Context, model Reasoner, systemPrompt, seedContext string, maxIters int, layout flux.Layout, want *EntryContract) (*SieveOutcome, error) {
+// RunSieveWithPrologue is RunSieveWithLayout plus an application prologue (macro
+// definitions) prepended to the model's program before expansion.
+func RunSieveWithPrologue(ctx context.Context, model Reasoner, systemPrompt, seedContext string, maxIters int, layout flux.Layout, prologue string, want *EntryContract) (*SieveOutcome, error) {
+	return runSieve(ctx, model, systemPrompt, seedContext, maxIters, layout, prologue, want)
+}
+
+func runSieve(ctx context.Context, model Reasoner, systemPrompt, seedContext string, maxIters int, layout flux.Layout, prologue string, want *EntryContract) (*SieveOutcome, error) {
 	if maxIters < 1 {
 		maxIters = 1
 	}
@@ -114,7 +131,7 @@ func runSieve(ctx context.Context, model Reasoner, systemPrompt, seedContext str
 		if err != nil {
 			return nil, fmt.Errorf("sieve iteration %d: reasoning invocation failed: %w", i, err)
 		}
-		wat, fluxSrc, ferr := candidateWAT(resp, layout)
+		wat, fluxSrc, ferr := candidateWAT(resp, layout, prologue)
 		if ferr != nil {
 			// The model authored Flux that did not compile — feed the semantic
 			// error back. No assembler artifact exists this round.
@@ -122,7 +139,7 @@ func runSieve(ctx context.Context, model Reasoner, systemPrompt, seedContext str
 			last = nil
 			log.Printf("[FLUX] model authored a (cell …) that did not compile: %v", ferr)
 			taxoWAT(fluxSrc, nil, ferr.Error())
-			payload = fluxCorrectionDirective(ferr)
+			payload = macroCorrectionDirective(ferr)
 			continue
 		}
 		if fluxSrc != "" {

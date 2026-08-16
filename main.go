@@ -24,6 +24,7 @@ import (
 	"github.com/mdcfrancis/flow/compiler"
 	"github.com/mdcfrancis/flow/evolution"
 	"github.com/mdcfrancis/flow/execution"
+	"github.com/mdcfrancis/flow/flux"
 	"github.com/mdcfrancis/flow/gc"
 	"github.com/mdcfrancis/flow/inference"
 	"github.com/mdcfrancis/flow/integration"
@@ -73,6 +74,12 @@ const janitorCadence = 12
 // defaultModel / defaultModelURL are the cognitive engine's model id and
 // endpoint when HDM_LLM_MODEL / HDM_LLM_URL are unset. gemma-4-26b-a4b has been
 // the strongest local model here for both growth and optimization.
+//
+// Qwen3.8-27B-oQ4 was tried as the default and reverted: it is far slower on the
+// path that matters. On a comparable prompt it took 65s to gemma's 24s, and on a
+// full macro-WAT synthesis prompt it was never observed finishing inside 24
+// minutes — long enough to stall the evolution loop, which runs a frame
+// synchronously. Set HDM_LLM_MODEL to try it again.
 const (
 	defaultModel    = "gemma-4-26b-a4b-it-oQ4"
 	defaultModelURL = "http://localhost:8000"
@@ -127,6 +134,17 @@ func buildClient(provider, model, url, geminiKey string) *inference.LocalModelCl
 		return inference.NewGeminiClient(url, model, geminiKey)
 	}
 	return inference.NewLocalModelClient(url, model)
+}
+
+// fluxDisabled reports whether the macro-WAT surface has been explicitly turned OFF
+// via HDM_FLUX=0/false/off/no. It is ON by default (the only synthesis surface for a
+// cell with a contract layout); the opt-out authors raw WAT everywhere instead.
+func fluxDisabled() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("HDM_FLUX"))) {
+	case "0", "false", "off", "no":
+		return true
+	}
+	return false
 }
 
 // buildModelClient constructs the BASE cognitive-engine client (see baseModelConfig).
@@ -854,6 +872,37 @@ func activeCandidates(all []string, friction map[string]evolution.FrictionState,
 // Growth persists an envelope per app (with its subsystem list); on boot we
 // replay those envelopes and re-enroll every subsystem whose descriptor is
 // still live. Returns the first UI subsystem URN found, to refocus the canvas.
+// retiredCellURNs are cells removed from the codebase whose committed ledger state
+// may linger in a long-lived hdm.db from a prior session. purgeRetiredCells drops them.
+var retiredCellURNs = []string{
+	"urn:hdm:sys:flux-lexer",
+	"urn:hdm:sys:flux-parser",
+	"urn:hdm:sys:flux-ast-parser",
+}
+
+// purgeRetiredCells removes each retired cell's ledger refs (its descriptor, acceptance
+// suite, and any working draft) and un-enrolls it from the in-memory registry, so a
+// retired cell no longer appears in the cell space or gets rehydrated. Idempotent:
+// DeleteRefs on an absent key is a no-op, so this is safe on every boot.
+func purgeRetiredCells(ledger *storage.LedgerEngine, registry *evolution.CellRegistry) {
+	var refs []string
+	purged := 0
+	for _, u := range retiredCellURNs {
+		if _, err := ledger.GetRef(u); err == nil {
+			purged++
+		}
+		refs = append(refs, u, u+":acceptance", u+":flux-draft")
+	}
+	if err := ledger.DeleteRefs(refs...); err != nil {
+		log.Printf("[PURGE] retired-cell cleanup failed: %v", err)
+		return
+	}
+	registry.Remove(retiredCellURNs...)
+	if purged > 0 {
+		log.Printf("[PURGE] removed %d retired self-hosted parser cell(s) from the ledger", purged)
+	}
+}
+
 func rehydrateApps(ledger *storage.LedgerEngine, repo *manifest.Repository, registry *evolution.CellRegistry, activity *status.Broker) string {
 	refs, err := ledger.Refs()
 	if err != nil {
@@ -978,13 +1027,26 @@ func appNamespace(urn string) string {
 // block — so a render cell whose intent text happens to miss the keyword list still
 // brings the app on-screen rather than leaving it invisible behind a default view.
 func isRenderCell(repo *manifest.Repository, desc *manifest.NodeDescriptor) bool {
-	if appgen.IsUISubsystem(desc.Semantics.FunctionalIntent) {
-		return true
-	}
+	// The GENOME is authoritative — a cell's entry decides what it is, not its prose
+	// intent (a compute cell whose intent mentions "motion"/"visual" must NOT be treated
+	// as a renderer, or it steals the canvas focus and the real renderer never shows).
 	if src, err := repo.Genotype(desc); err == nil {
-		return strings.Contains(src, "render-frame") || strings.Contains(src, "(draw")
+		if strings.Contains(src, "render-frame") || strings.Contains(src, "(draw") || strings.Contains(src, "(scene") {
+			return true
+		}
+		// Forth render cells emit BARE draw words (no "(draw"): a trailing circle/rect/line.
+		for _, w := range []string{" circle", " rect", " line"} {
+			if strings.Contains(src, w) {
+				return true
+			}
+		}
+		// An explicit compute entry is DEFINITIVELY not a renderer, whatever the intent says.
+		if strings.Contains(src, "run-tick") {
+			return false
+		}
 	}
-	return false
+	// Only when the genome gives no signal (e.g. an empty scaffold) fall back to intent.
+	return appgen.IsUISubsystem(desc.Semantics.FunctionalIntent)
 }
 
 // challengeArchitectures asks, for each fully-complete grown application, whether
@@ -1099,7 +1161,7 @@ func visualCritic(ctx context.Context, grower *appgen.Grower, repo *manifest.Rep
 		return 0 // no app focused, or throttled
 	}
 	desc, err := repo.Load(active)
-	if err != nil || !appgen.IsUISubsystem(desc.Semantics.FunctionalIntent) {
+	if err != nil || !isRenderCell(repo, desc) {
 		return 0 // only critique a renderer
 	}
 	// Fold operator GUIDANCE into the judgement so the critic adversarially enforces the
@@ -1242,6 +1304,97 @@ func codeCritic(ctx context.Context, grower *appgen.Grower, orch *evolution.Orch
 	return reopened
 }
 
+// designCriticInterval throttles the design critics (a whole-design LLM pass) — like the
+// code critic, costlier and less time-sensitive than a per-frame check, so less frequent.
+var designCriticInterval = 180 * time.Second
+
+// designCritic runs the categorical DESIGN critics (type + architecture) over the focused
+// app and APPLIES their repairs to the design artifacts (contract types, plan structure),
+// then re-opens the cells that DEPEND on a changed field or component so they re-synthesize
+// against the corrected design. Throttled and de-duplicated on the design fingerprint
+// (contract + plan): it only re-runs when the design changed — which includes its own
+// repairs, so it converges (repair → fingerprint changes → re-check → coherent → settle).
+// Returns the number of cells re-opened.
+func designCritic(ctx context.Context, grower *appgen.Grower, canvasSrv *integration.CanvasServer, root string, persist func(string, evolution.FrictionState), activity *status.Broker, ledger *storage.LedgerEngine, lastKey *string, lastAt *time.Time) int {
+	ns := appNamespace(canvasSrv.Active())
+	if ns == "" || time.Since(*lastAt) < designCriticInterval {
+		return 0
+	}
+	contract := evolution.LoadContract(ledger, ns)
+	plan := evolution.LoadPlan(ledger, ns)
+	model := evolution.LoadModel(ledger, ns)
+	if contract == nil && plan == nil && model == nil {
+		return 0 // nothing designed yet — AuthorModel/AuthorPlan/EnsureContract run first
+	}
+	key := designFingerprint(model, contract, plan)
+	if *lastKey == key {
+		return 0 // same design as last judged
+	}
+	reps, err := grower.CritiqueDesign(ctx, ns)
+	if err != nil {
+		log.Printf("[DESIGN-CRITIC] %s failed (will retry): %v", ns, err)
+		return 0
+	}
+	*lastAt = time.Now()
+	if len(reps) == 0 {
+		*lastKey = key
+		log.Printf("[DESIGN-CRITIC] %s: design is type- and architecture-coherent", ns)
+		return 0
+	}
+	// Repairs changed the design — fingerprint the CORRECTED design so the next pass
+	// re-checks it and settles once coherent.
+	*lastKey = designFingerprint(evolution.LoadModel(ledger, ns), evolution.LoadContract(ledger, ns), evolution.LoadPlan(ledger, ns))
+
+	// Re-open the cells that depend on what changed: any cell whose ports touch a retyped
+	// field, an architecture repair's component, and — for a MODEL repair (which re-projects
+	// the whole contract) — every cell of the app, since the shared layout changed under all
+	// of them.
+	retyped := map[string]bool{}
+	reopen := map[string]bool{}
+	modelChanged := false
+	for _, r := range reps {
+		log.Printf("[DESIGN-CRITIC] %s %s", ns, r.String())
+		switch r.Category {
+		case "type":
+			retyped[r.Target] = true
+		case "architecture":
+			reopen[r.Target] = true
+		case "model":
+			modelChanged = true
+		}
+	}
+	if env := appgen.LoadEnvelope(ledger, ns); env != nil {
+		for _, s := range env.SubsystemRequirements {
+			if modelChanged {
+				reopen[s.Identity] = true
+				continue
+			}
+			for _, f := range append(append([]string{}, s.Reads...), s.Writes...) {
+				if retyped[f] {
+					reopen[s.Identity] = true
+				}
+			}
+		}
+	}
+	n := 0
+	for urn := range reopen {
+		persist(urn, evolution.FrictionState{Root: root})
+		activity.Event("mutate", urn, "design repaired upstream — rebuild against the corrected design")
+		n++
+	}
+	return n
+}
+
+// designFingerprint is a stable key over the design artifacts (model + contract + plan),
+// so the design critic only re-runs when the design actually changed — including its own
+// model repairs, so it converges.
+func designFingerprint(m *evolution.SystemModel, c *evolution.AppContract, p *evolution.AppPlan) string {
+	mb, _ := json.Marshal(m)
+	cb, _ := json.Marshal(c)
+	pb, _ := json.Marshal(p)
+	return string(mb) + "|" + string(cb) + "|" + string(pb)
+}
+
 // visionSatisfied parses a {"satisfied":bool} verdict from the model's answer;
 // ok=false when no JSON verdict is found (treated as "don't act").
 func visionSatisfied(ans string) (satisfied, ok bool) {
@@ -1286,7 +1439,7 @@ func syncAppCells(registry *evolution.CellRegistry, repo *manifest.Repository, h
 			continue
 		}
 		desc, err := repo.Load(u)
-		if err != nil || appgen.IsUISubsystem(desc.Semantics.FunctionalIntent) {
+		if err != nil || isRenderCell(repo, desc) {
 			continue
 		}
 		bc, err := repo.Phenotype(desc)
@@ -1704,8 +1857,41 @@ func seedLiveState(hyp *execution.RuntimeManager, ledger *storage.LedgerEngine, 
 			}
 		}
 	}
-	if best == nil {
+	// The DESIGNED initial conditions from the canonical model are authoritative for the
+	// fields they cover — a particle system's SCATTERED positions and velocities — so they
+	// override whatever a test scenario happened to seed. A model-driven app therefore boots
+	// from a designed cold start even when no scenario snapshot exists.
+	var designed map[uint32]uint32
+	if c := evolution.LoadContract(ledger, ns); c != nil {
+		designed = map[uint32]uint32{}
+		apply := func(seeds []evolution.SeedWrite) {
+			for _, sd := range seeds {
+				off, err := strconv.ParseInt(strings.TrimSpace(sd.At), 0, 64)
+				if err != nil {
+					continue
+				}
+				for i, w := range sd.U32 {
+					o := off + int64(4*i)
+					if o >= 0xB0000 && o < 0xC0000 {
+						designed[uint32(o)] = w
+					}
+				}
+			}
+		}
+		// Designed SCALAR state — the collection COUNT (= cardinality), config, and any
+		// scalar init. Without this the loop bound (particle_count) is scavenged from a test
+		// scenario (e.g. 2), so a 300-particle field renders two dots.
+		apply(c.InitSeeds())
+		// Designed DISTRIBUTIONS — the scattered arrays — win over the scalars (no overlap).
+		if m := evolution.LoadModel(ledger, ns); m != nil {
+			apply(m.InitialSeeds(c))
+		}
+	}
+	if best == nil && len(designed) == 0 {
 		return 0
+	}
+	if best == nil {
+		best = map[uint32]uint32{}
 	}
 	// Fill any contract field the chosen snapshot didn't set (typically static
 	// config like window dimensions, which every scenario agrees on) from other
@@ -1729,6 +1915,11 @@ func seedLiveState(hyp *execution.RuntimeManager, ledger *storage.LedgerEngine, 
 				}
 			}
 		}
+	}
+	// Overlay the designed initial conditions LAST, so a collection's scattered positions
+	// (and any other designed start) win over the scavenged scenario snapshot.
+	for off, w := range designed {
+		best[off] = w
 	}
 	n := 0
 	for off, v := range best {
@@ -1755,6 +1946,7 @@ type frameSkip struct {
 	pheno     map[string]string      // urn -> phenotype hash the info was built for
 	ranges    map[string][][2]uint32 // urn -> cached read-set [off,len] byte ranges
 	exclusive map[string]bool        // urn -> it is the SOLE writer of its outputs
+	ranOnce   map[string]bool        // urn -> a constant-output (no-read) cell has run this commit
 	am        map[string]*evolution.AppMap
 	ct        map[string]*evolution.AppContract
 	amAt      map[string]int // ns -> frame when map/contract were last (re)loaded
@@ -1765,8 +1957,8 @@ func newFrameSkip(hyp *execution.RuntimeManager, ledger *storage.LedgerEngine) *
 	return &frameSkip{
 		hyp: hyp, ledger: ledger,
 		inputHash: map[string]uint64{}, pheno: map[string]string{}, ranges: map[string][][2]uint32{},
-		exclusive: map[string]bool{},
-		am:        map[string]*evolution.AppMap{}, ct: map[string]*evolution.AppContract{}, amAt: map[string]int{},
+		exclusive: map[string]bool{}, ranOnce: map[string]bool{},
+		am: map[string]*evolution.AppMap{}, ct: map[string]*evolution.AppContract{}, amAt: map[string]int{},
 	}
 }
 
@@ -1791,6 +1983,7 @@ func (fs *frameSkip) buildInfo(ns, urn, phenoHash string) {
 	fs.exclusive[urn] = fs.writesExclusively(ns, urn)
 	fs.pheno[urn] = phenoHash
 	delete(fs.inputHash, urn)
+	delete(fs.ranOnce, urn) // a new commit gets to run its initializer once again
 }
 
 // shouldRun reports whether to tick this cell now (and refreshes its cached info). It
@@ -1802,13 +1995,24 @@ func (fs *frameSkip) shouldRun(ns, urn, phenoHash string, bytecode []byte, frame
 	if !fs.hyp.CellIsDeterministic(phenoHash, bytecode) {
 		return true // reads a clock/random/model — output isn't a function of memory
 	}
+	ranges := fs.ranges[urn]
+	if len(ranges) == 0 {
+		// A deterministic cell that reads NOTHING produces a CONSTANT output — an
+		// INITIALIZER (set starting positions/velocities/dimensions). Run it ONCE per
+		// commit, then skip forever, even though it's non-exclusive: re-running would
+		// re-stamp the same constants every frame and STOMP the cell that animates those
+		// fields (physics) → a frozen scene. buildInfo clears ranOnce on a new commit, so
+		// a re-authored initializer runs once again.
+		if fs.ranOnce[urn] {
+			fs.skips++
+			return false
+		}
+		fs.ranOnce[urn] = true
+		return true
+	}
 	if !fs.exclusive[urn] {
 		return true // another cell also writes this cell's outputs — a skip would let
 		// them clobber its frozen result, so it must re-run every frame
-	}
-	ranges := fs.ranges[urn]
-	if len(ranges) == 0 {
-		return true // unknown or empty read-set — never skip (conservative)
 	}
 	h, ok := fs.hashRanges(ranges)
 	if !ok {
@@ -1828,37 +2032,15 @@ func (fs *frameSkip) shouldRun(ns, urn, phenoHash string, bytecode []byte, frame
 // declares is permitted; everything else is hidden (reads) or undone (writes). "HMI
 // input" is a declared read of the input window, not a contract field, so it is never a
 // poison target. Returns nil,nil if there are no contract fields to govern.
+// buildMasks derives a cell's runtime read/write mask (poison/revert ranges) from
+// its declared ports + the contract. It delegates to evolution.BuildFieldMask so the
+// live runtime and acceptance grading (o.maskFor) enforce the IDENTICAL boundary —
+// one source of truth. Returns nil,nil when there is nothing to enforce.
 func buildMasks(comp *evolution.ComponentMap, ct *evolution.AppContract) (poison, revert [][2]uint32) {
-	if comp == nil || ct == nil {
-		return nil, nil
+	if m := evolution.BuildFieldMask(comp, ct); m != nil {
+		return m.Poison, m.Revert
 	}
-	readable := map[string]bool{}
-	for _, f := range comp.DeclaredReads { // EXPLICIT declarations only
-		readable[strings.ToLower(f)] = true
-	}
-	writable := map[string]bool{}
-	for _, f := range comp.DeclaredWrites {
-		writable[strings.ToLower(f)] = true
-	}
-	for _, f := range ct.Fields {
-		off, n, ok := ct.FieldRange(f.Name)
-		if !ok || n <= 0 {
-			continue
-		}
-		name := strings.ToLower(f.Name)
-		r := [2]uint32{uint32(off), uint32(n)}
-		if !writable[name] {
-			revert = append(revert, r)
-			// Poison ONLY a field the cell can neither read nor write. A field it may
-			// write is left alone: zeroing it and then not rewriting it that tick would
-			// leak a 0 (poison isn't restored for writable fields since they're not in
-			// revert). This keeps poison ⊆ revert, so every hidden field is restored.
-			if !readable[name] {
-				poison = append(poison, r)
-			}
-		}
-	}
-	return poison, revert
+	return nil, nil
 }
 
 // refreshMasks registers a deny-by-default read/write mask for EVERY application cell
@@ -2022,61 +2204,95 @@ func runFrameLoop(ctx context.Context, hyp *execution.RuntimeManager, repo *mani
 			if frame%300 == 0 && skip.skips > 0 {
 				log.Printf("[FRAME] memoization skipped %d cell-ticks (inputs unchanged)", skip.skips)
 			}
-			ns := appNamespace(canvasSrv.Active())
-			if ns == "" {
-				continue // no app focused — nothing to animate
-			}
-			// Boot the app's live state once, from its own accepted scenario seeds,
-			// so the simulation starts from a valid (moving) condition.
-			if !seeded[ns] {
-				if n := seedLiveState(hyp, ledger, registry, ns); n > 0 {
-					seeded[ns] = true
-					log.Printf("[FRAME] %s: seeded %d live shared-state field(s) from accepted scenarios", ns, n)
+			// EVERY live application ticks, not just the focused one. Focus decides
+			// what you LOOK at (which renderer draws on the canvas poll); it no longer
+			// decides which simulations are allowed to run. Each app owns a private
+			// contract arena, so their shared state cannot collide.
+			cells := registry.List()
+			for _, ns := range liveAppNamespaces(cells) {
+				// Boot the app's live state once, from its own accepted scenario seeds,
+				// so the simulation starts from a valid (moving) condition.
+				if !seeded[ns] {
+					if n := seedLiveState(hyp, ledger, registry, ns); n > 0 {
+						seeded[ns] = true
+						log.Printf("[FRAME] %s: seeded %d live shared-state field(s) from accepted scenarios", ns, n)
+					}
 				}
-			}
-			for _, u := range registry.List() {
-				if appNamespace(u) != ns {
-					continue
-				}
-				desc, err := repo.Load(u)
-				if err != nil {
-					continue
-				}
-				if appgen.IsUISubsystem(desc.Semantics.FunctionalIntent) {
-					continue // renderer draws on canvas poll, not here
-				}
-				bc, err := repo.Phenotype(desc)
-				if err != nil {
-					continue
-				}
-				if hyp.IsAsyncCell(desc.PhenotypeHash, bc) {
-					continue // async (cognitive-engine) cell — the async worker ticks it
-				}
-				// MEMOIZATION: skip a deterministic cell whose declared inputs are
-				// unchanged since it last ran — its outputs already sit in shared memory.
-				if memoOn && !skip.shouldRun(ns, u, desc.PhenotypeHash, bc, frame) {
-					continue
-				}
-				// Advance live state; ignore per-frame errors (a trapping cell mid-build
-				// shouldn't kill the loop) — it will be fixed by evolution. Measure the
-				// per-frame cost so an over-budget cell can be optimized to fit. The cell's
-				// enforced mask (if any) is applied inside execTrampoline automatically.
-				t0 := time.Now()
-				_, _, _, _ = hyp.TickAppCell("urn:hdm:sys:frame", u, desc.PhenotypeHash, bc)
-				budget.record(u, float64(time.Since(t0).Nanoseconds()))
+				tickAppFrame(hyp, repo, budget, skip, memoOn, cells, ns, frame)
 			}
 		}
 	}
 }
 
-// runAsyncLoop ticks the focused app's ASYNC cells — those importing the cognitive
+// liveAppNamespaces returns the distinct application namespaces present in a cell
+// list, in a stable order so the per-frame tick sequence never varies run to run.
+func liveAppNamespaces(cells []string) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, u := range cells {
+		ns := appNamespace(u)
+		if ns == "" || seen[ns] {
+			continue
+		}
+		seen[ns] = true
+		out = append(out, ns)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// tickAppFrame advances one application's non-render cells by a single display
+// frame. Split out of the frame loop so every app gets the identical treatment.
+func tickAppFrame(hyp *execution.RuntimeManager, repo *manifest.Repository, budget *frameBudget, skip *frameSkip, memoOn bool, cells []string, ns string, frame int) {
+	for _, u := range cells {
+		if appNamespace(u) != ns {
+			continue
+		}
+		desc, err := repo.Load(u)
+		if err != nil {
+			continue
+		}
+		// Skip the RENDER cell here (it draws on the canvas poll, not in the sim
+		// tick). Use the GENOME-authoritative isRenderCell — NOT the intent keyword
+		// heuristic, which mis-flags a compute cell whose intent merely mentions
+		// "screen"/"display" (e.g. a physics cell that reflects off the SCREEN
+		// walls) as a renderer and never ticks it, freezing the simulation.
+		if isRenderCell(repo, desc) {
+			continue // renderer draws on canvas poll, not here
+		}
+		bc, err := repo.Phenotype(desc)
+		if err != nil {
+			continue
+		}
+		if hyp.IsAsyncCell(desc.PhenotypeHash, bc) {
+			continue // async (cognitive-engine) cell — the async worker ticks it
+		}
+		// MEMOIZATION: skip a deterministic cell whose declared inputs are
+		// unchanged since it last ran — its outputs already sit in shared memory.
+		if memoOn && !skip.shouldRun(ns, u, desc.PhenotypeHash, bc, frame) {
+			continue
+		}
+		// Advance live state; ignore per-frame errors (a trapping cell mid-build
+		// shouldn't kill the loop) — it will be fixed by evolution. Measure the
+		// per-frame cost so an over-budget cell can be optimized to fit. The cell's
+		// enforced mask (if any) is applied inside execTrampoline automatically.
+		t0 := time.Now()
+		// Micro-tick enrollment: a cell enrolled for N ticks/frame advances N
+		// internal steps in one burst (a parser draining a buffer, an integrator
+		// sub-stepping) instead of being capped at one step per display frame.
+		_, _, _, _ = hyp.TickAppCellN("urn:hdm:sys:frame", u, desc.PhenotypeHash, bc, hyp.MicroTicksFor(u))
+		budget.record(u, float64(time.Since(t0).Nanoseconds()))
+	}
+}
+
+// runAsyncLoop ticks every live app's ASYNC cells — those importing the cognitive
 // engine, whose run-tick can take seconds. It runs OFF the frame thread: a tick
 // holds the runtime lock only for the cell's brief guest compute and yields it
 // during the model round-trip (invokeReasoningUnlocked), so the 30 FPS frame loop
 // never stalls. Async cells write live shared state directly; keeping their writes
 // to their declared Writes ports (which sync cells don't write) avoids clobber.
 // One worker ⇒ async cells are ticked one at a time, naturally paced by the model.
-func runAsyncLoop(ctx context.Context, hyp *execution.RuntimeManager, repo *manifest.Repository, registry *evolution.CellRegistry, canvasSrv *integration.CanvasServer) {
+func runAsyncLoop(ctx context.Context, hyp *execution.RuntimeManager, repo *manifest.Repository, registry *evolution.CellRegistry) {
 	ticker := time.NewTicker(50 * time.Millisecond)
 	defer ticker.Stop()
 	for {
@@ -2084,20 +2300,18 @@ func runAsyncLoop(ctx context.Context, hyp *execution.RuntimeManager, repo *mani
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			ns := appNamespace(canvasSrv.Active())
-			if ns == "" {
-				continue
-			}
+			// Like the frame loop, every live app's async cells run — focus selects
+			// what is displayed, not what is allowed to think.
 			for _, u := range registry.List() {
-				if appNamespace(u) != ns {
-					continue
+				if appNamespace(u) == "" {
+					continue // not an application cell
 				}
 				desc, err := repo.Load(u)
 				if err != nil {
 					continue
 				}
-				if appgen.IsUISubsystem(desc.Semantics.FunctionalIntent) {
-					continue
+				if isRenderCell(repo, desc) {
+					continue // renderer draws on canvas poll, not in the async tick
 				}
 				bc, err := repo.Phenotype(desc)
 				if err != nil {
@@ -2251,18 +2465,23 @@ func main() {
 	//    recording isolation passes.
 	orchestrator := evolution.NewOrchestrator(ledger, router)
 	orchestrator.Gravity = codependency.NewTracker(ledger)
-	// Flux functional-IR synthesis path (opt-in via HDM_FLUX): the sieve accepts a
-	// model that authors a Flux (cell …) program, lowered to WAT against the app
-	// contract. Off by default — raw-WAT synthesis is unchanged. See
-	// docs/functional-ir.md.
-	if os.Getenv("HDM_FLUX") != "" {
-		orchestrator.FluxEnabled = true
-		log.Printf("[FLUX] functional-IR synthesis path enabled (HDM_FLUX)")
+	// Flux (the macro-WAT surface) is the DEFAULT synthesis path: for a cell with an
+	// app-contract layout the model authors a (cell …) macro-WAT program (field macros
+	// over native WAT), expanded against the contract. Opt out with HDM_FLUX=0/false/off
+	// to author raw WAT everywhere.
+	orchestrator.FluxEnabled = !fluxDisabled()
+	if orchestrator.FluxEnabled {
+		log.Printf("[FLUX] macro-WAT synthesis surface enabled (default; set HDM_FLUX=0 to disable)")
 	}
 	// Route the evolution-loop sieve by the target cell's kind (render → vision,
 	// compute/leaf → code). Injected to avoid an evolution→appgen import cycle.
 	orchestrator.SieveModelType = func(urn string) inference.ModelType {
 		return appgen.ModelTypeForCell(ledger, urn)
+	}
+	// A combinator leaf authors macro-WAT over ITS element (arg-pointer-relative), not the
+	// global array layout — see appgen.LeafElementLayout.
+	orchestrator.LeafElementLayout = func(urn string) flux.Layout {
+		return appgen.LeafElementLayout(ledger, urn)
 	}
 	tapeStore := evolution.NewTapeStore(ledger)
 	orchestrator.Tapes = tapeStore
@@ -2299,7 +2518,15 @@ func main() {
 	}
 	grower := appgen.NewGrower(ledger, router)
 	grower.Activity = activity
-	grower.FluxEnabled = os.Getenv("HDM_FLUX") != "" // seed scaffolds as no-op Flux, not WAT
+	grower.FluxEnabled = !fluxDisabled() // seed scaffolds as no-op macro-WAT, not raw WAT (default)
+	// So retiring an app unregisters its cells too, not just drops their refs —
+	// otherwise the evolution loop keeps selecting candidates that no longer load.
+	grower.SetRegistry(registry)
+
+	// Drop cells that were RETIRED from the system but whose committed ledger state
+	// persists from an earlier session (e.g. the self-hosted Flux parser cells) — so
+	// they no longer surface in the cell space or get re-enrolled.
+	purgeRetiredCells(ledger, registry)
 
 	// Resume: re-enroll application subsystems grown in previous sessions so the
 	// loop picks up where it left off (the ledger persists them; the in-memory
@@ -2388,6 +2615,7 @@ func main() {
 			}
 		}
 	}
+
 	// HDM_HOTPATH seeds the crafted expensive+cacheable demo cell for proving the structural
 	// optimizer: an irreducible per-input sum (plateaus on local optimization) that a cache
 	// makes free on repeats (an amortized win). Enrolled + pre-flagged structural so a frame
@@ -2505,6 +2733,26 @@ func main() {
 			}
 			return ""
 		},
+		Contract: func() string {
+			ns := appNamespace(canvasSrv.Active())
+			if ns == "" {
+				return ""
+			}
+			if c := evolution.LoadContract(ledger, ns); c != nil {
+				return c.Render()
+			}
+			return ""
+		},
+		Model: func() string {
+			ns := appNamespace(canvasSrv.Active())
+			if ns == "" {
+				return ""
+			}
+			if m := evolution.LoadModel(ledger, ns); m != nil {
+				return m.Render()
+			}
+			return ""
+		},
 		Walk: func() string {
 			ns := appNamespace(canvasSrv.Active())
 			if ns == "" {
@@ -2521,7 +2769,77 @@ func main() {
 			}
 			return ""
 		},
-		Log: func() []string { return logBuf.Lines() },
+		Log:      func() []string { return logBuf.Lines() },
+		LogReset: func() int { return logBuf.Reset() },
+		Apps: func() any {
+			active := appNamespace(canvasSrv.Active())
+			live := map[string]int{}
+			for _, u := range registry.List() {
+				if ns := appNamespace(u); ns != "" {
+					live[ns]++
+				}
+			}
+			out := []any{}
+			for _, ns := range appgen.ListApps(ledger) {
+				env := appgen.LoadEnvelope(ledger, ns)
+				if env == nil {
+					continue
+				}
+				// Prefer the GENOME-authoritative renderer over the envelope's declared
+				// kind: fracture children are real cells that never appear in the
+				// envelope's roster, so an app whose renderer was split would otherwise
+				// report no viewable cell at all.
+				ui := ""
+				for _, u := range registry.List() {
+					if appNamespace(u) != ns {
+						continue
+					}
+					if desc, lErr := repo.Load(u); lErr == nil && isRenderCell(repo, desc) {
+						ui = u
+						break
+					}
+				}
+				if ui == "" {
+					for _, s := range env.SubsystemRequirements {
+						if s.IsRender() {
+							ui = s.Identity
+							break
+						}
+					}
+				}
+				out = append(out, map[string]any{
+					"namespace": ns,
+					"objective": env.Objective,
+					"arena":     fmt.Sprintf("0x%X", env.Arena()),
+					"cells":     live[ns],
+					"ui":        ui,
+					"focused":   ns == active,
+				})
+			}
+			return out
+		},
+		AppRetire: func(ns string) (int, error) {
+			n, err := grower.RetireApp(ns)
+			if err != nil {
+				return 0, err
+			}
+			// If the retired app was on the canvas, focus is now dangling — move it to
+			// another app's renderer so the console does not point at a deleted cell.
+			if appNamespace(canvasSrv.Active()) == ns {
+				canvasSrv.SetActive("")
+				for _, u := range registry.List() {
+					if appNamespace(u) == "" {
+						continue
+					}
+					if desc, lErr := repo.Load(u); lErr == nil && isRenderCell(repo, desc) {
+						canvasSrv.SetActive(u)
+						break
+					}
+				}
+			}
+			log.Printf("[APP] retired %s — %d ledger ref(s) dropped", ns, n)
+			return n, nil
+		},
 		State: func() any {
 			ns := appNamespace(canvasSrv.Active())
 			if ns == "" {
@@ -2820,11 +3138,13 @@ func main() {
 	// Deny-by-default read/write masks: a cell may only touch shared-state fields it
 	// EXPLICITLY declared, enforced in execTrampoline on every live path. A clean
 	// same-app A/B (toggling masks on a fixed, converged Mandelbrot via /mask) confirmed
-	// full read+write enforcement keeps the compute correct — the flips-to-0 seen in
-	// fresh grows were grow variance + evolution churn during BUILDING, not the masks;
-	// acceptance/scoring runs unmasked in a shadow sandbox, so evolution converges
-	// regardless of transient live-state masking. HDM_MASK=0 disables all enforcement;
-	// HDM_MASK_READS=0 keeps writes enforced but leaves reads open.
+	// full read+write enforcement keeps the compute correct. Acceptance/scoring now grades
+	// under the SAME boundary (o.maskFor feeds execScenario the identical ranges buildMasks
+	// installs here), so a cell whose declared ports are too tight FAILS acceptance and
+	// stalls — triggering boundary re-evolution — instead of committing green and then
+	// going static live. HDM_MASK=0 disables all enforcement (acceptance grades unmasked to
+	// match); HDM_MASK_READS=0 keeps writes enforced but leaves reads open (acceptance drops
+	// the read-hide side too).
 	denyReads := os.Getenv("HDM_MASK_READS") != "0"
 	hypervisor.SetMasksEnabled(os.Getenv("HDM_MASK") != "0")
 	refreshMasks(hypervisor, repo, ledger, registry, denyReads)
@@ -2842,7 +3162,7 @@ func main() {
 		log.Printf("[VERIFY] visual grader tightened to MinColors=%d MinBrightSpread=%d (meta-acceptance gated)", thr.MinColors, thr.MinBrightSpread)
 	}
 	go runFrameLoop(ctx, hypervisor, repo, registry, canvasSrv, ledger, budget, fps)
-	go runAsyncLoop(ctx, hypervisor, repo, registry, canvasSrv)
+	go runAsyncLoop(ctx, hypervisor, repo, registry)
 	ticker := time.NewTicker(heartbeat)
 	defer ticker.Stop()
 
@@ -2866,9 +3186,16 @@ func main() {
 	var lastVisualCritique time.Time
 	codeCritiqued := ""
 	var lastCodeCritique time.Time
+	designCritiqued := ""
+	var lastDesignCritique time.Time
 	if v := os.Getenv("HDM_VISION_INTERVAL"); v != "" {
 		if d, err := time.ParseDuration(v); err == nil && d > 0 {
 			visionCritiqueInterval = d
+		}
+	}
+	if v := os.Getenv("HDM_DESIGN_INTERVAL"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d > 0 {
+			designCriticInterval = d
 		}
 	}
 	// capturedCells remembers app cells already promoted to knowledge-base examples,
@@ -2971,6 +3298,16 @@ func main() {
 				idleWait, idleBackoff = 0, 1
 				hypervisor.SetReasoningGate(false)
 			}
+			// The DESIGN critics: categorical adversarial review of the focused app's
+			// design ARTIFACTS (the contract's types, the plan's architecture) that
+			// REPAIRS them in place, then re-opens the cells whose corrected contract/
+			// plan they depend on — so a design flaw (a continuous quantity typed i32, a
+			// map leaf planned as a renderer) is fixed once, upstream, instead of a cell
+			// churning against it for hours.
+			if reopened := designCritic(ctx, grower, canvasSrv, orchestrator.ManifestRoot(), persistFriction, activity, ledger, &designCritiqued, &lastDesignCritique); reopened > 0 {
+				idleWait, idleBackoff = 0, 1
+				hypervisor.SetReasoningGate(false)
+			}
 
 			// Out-of-band evolutionary mutation frame, targeting the highest-
 			// friction cell among those not yet settled at the current root. Only a
@@ -3022,10 +3359,21 @@ func main() {
 						// The system refining its own prompts: any prompt whose outputs have
 						// repeatedly been invalid gets auto-refined (adversarially validated).
 						grower.AutoOptimizePrompts(ctx)
+						// ORDER MATTERS. evolveBoundaries runs BEFORE retryStalled's deeper
+						// recovery: once a cell has spent its base retries (Parked beyond
+						// maxStallRetries), challenge its BOUNDARY first. A cell whose declared
+						// ports are too tight is graded under a mask that reverts/poisons the
+						// undeclared fields, so it can NEVER progress by re-synthesis — every
+						// draft caps at the masked score. Burning the judge-deepen ladder and
+						// then letting RecertifySuite drop the mask-failing checks as
+						// "unfaithful" (both inside retryStalled) is wasted and lossy. Evolving
+						// the boundary first corrects the ports; only a cell whose boundary is
+						// already STABLE (BoundaryCheck) falls through to retryStalled's
+						// judge/recertify/fracture path, where the problem really is the code.
 						progressed := ensureContracts(ctx, grower, registry) > 0 ||
 							recoverOrphanedCells(ctx, grower, orchestrator, registry, repo, ledger, hypervisor, orphanReauthors, activity) > 0 ||
-							retryStalled(ctx, orchestrator, registry.List(), friction, root, persistFriction, activity) > 0 ||
 							evolveBoundaries(ctx, grower, orchestrator, registry, friction, root, persistFriction, activity, boundaryEvaluated) > 0 ||
+							retryStalled(ctx, orchestrator, registry.List(), friction, root, persistFriction, activity) > 0 ||
 							fractureStalled(ctx, grower, orchestrator, registry, friction, root, activity, ledger) > 0 ||
 							expandCompleteSuites(ctx, grower, orchestrator, registry, root, persistFriction, activity) > 0 ||
 							challengeArchitectures(ctx, grower, orchestrator, registry, activity, ledger) > 0 ||
@@ -3207,6 +3555,20 @@ func inspectCell(ctx context.Context, ledger *storage.LedgerEngine, orch *evolut
 		out["state"] = "converged"
 	default:
 		out["state"] = "active"
+	}
+
+	// WHY the cell is failing: the concrete expected-vs-actual reason for each check it
+	// misses (graded under its enforced boundary), so the inspector shows the failing
+	// check's detail, not just the aggregate score.
+	if incomplete {
+		if reasons, rerr := orch.FailureReasons(ctx, urn); rerr == nil && len(reasons) > 0 {
+			out["failures"] = reasons
+		}
+	}
+	// The cell's last recorded ERROR/issue: the adversarial critic's note (why the last
+	// version was refuted against the goal or the operator's criteria), if any.
+	if note := evolution.LoadCriticNote(ledger, urn); note != "" {
+		out["note"] = note
 	}
 	return out
 }

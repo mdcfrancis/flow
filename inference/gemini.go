@@ -28,10 +28,23 @@ type geminiContent struct {
 	Parts []geminiPart `json:"parts"`
 }
 
-type geminiGenConfig struct {
-	Temperature     float32 `json:"temperature"`
-	MaxOutputTokens int     `json:"maxOutputTokens"`
+type geminiThinkingConfig struct {
+	ThinkingBudget int `json:"thinkingBudget"`
 }
+
+type geminiGenConfig struct {
+	Temperature     float32               `json:"temperature"`
+	MaxOutputTokens int                   `json:"maxOutputTokens"`
+	ThinkingConfig  *geminiThinkingConfig `json:"thinkingConfig,omitempty"`
+}
+
+// geminiNoThinking DISABLES the model's chain-of-thought. A Gemini "flash" THINKING
+// model otherwise spends its entire output-token budget on internal reasoning and
+// returns a TRUNCATED or empty answer (finishReason MAX_TOKENS) — so cell synthesis
+// came back as "empty source stream" on every cell. This is the Gemini analogue of the
+// local server's enable_thinking:false; thinkingBudget 0 is ignored by non-thinking
+// models, so it is safe to send unconditionally.
+var geminiNoThinking = &geminiThinkingConfig{ThinkingBudget: 0}
 
 type geminiRequestBody struct {
 	SystemInstruction *geminiContent  `json:"systemInstruction,omitempty"`
@@ -64,7 +77,7 @@ func (c *LocalModelClient) geminiRequest(ctx context.Context, sysPrompt, userCtx
 	payload, err := json.Marshal(geminiRequestBody{
 		SystemInstruction: &geminiContent{Parts: []geminiPart{{Text: sysPrompt}}},
 		Contents:          []geminiContent{{Role: "user", Parts: []geminiPart{{Text: userCtx}}}},
-		GenerationConfig:  geminiGenConfig{Temperature: 0.0, MaxOutputTokens: geminiMaxOutputTokens},
+		GenerationConfig:  geminiGenConfig{Temperature: 0.0, MaxOutputTokens: geminiMaxOutputTokens, ThinkingConfig: geminiNoThinking},
 	})
 	if err != nil {
 		return nil, err
@@ -95,7 +108,7 @@ func (c *LocalModelClient) geminiVisionRequest(ctx context.Context, sysPrompt, q
 	payload, err := json.Marshal(geminiRequestBody{
 		SystemInstruction: &geminiContent{Parts: []geminiPart{{Text: sysPrompt}}},
 		Contents:          []geminiContent{{Role: "user", Parts: parts}},
-		GenerationConfig:  geminiGenConfig{Temperature: 0.0, MaxOutputTokens: geminiMaxOutputTokens},
+		GenerationConfig:  geminiGenConfig{Temperature: 0.0, MaxOutputTokens: geminiMaxOutputTokens, ThinkingConfig: geminiNoThinking},
 	})
 	if err != nil {
 		return nil, err

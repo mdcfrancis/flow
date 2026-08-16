@@ -5,13 +5,16 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"os"
 	"strings"
 
 	"github.com/mdcfrancis/flow/codependency"
 	"github.com/mdcfrancis/flow/compiler"
 	"github.com/mdcfrancis/flow/engine"
+	"github.com/mdcfrancis/flow/flux"
 	"github.com/mdcfrancis/flow/inference"
 	"github.com/mdcfrancis/flow/manifest"
+	"github.com/mdcfrancis/flow/stdlib"
 	"github.com/mdcfrancis/flow/storage"
 	"github.com/mdcfrancis/flow/tapes"
 )
@@ -93,23 +96,11 @@ No prose, no markdown fences, no commentary.
 // style the hand-written cells compile with, so the model has a concrete,
 // parseable structure to imitate — directly targeting the "invalid WAT" failure
 // where a model can't balance parens. A test asserts they compile.
-const exampleRunTickWAT = `(module
-  (import "hdm:kernel/hardware-io" "shared-cluster-memory" (memory 100))
-  (func (export "run-tick") (param $ptr i32) (param $len i32) (result i32)
-    local.get $ptr i32.load8_u))`
+var exampleRunTickWAT = stdlib.MustCell("example-run-tick")
 
-const exampleRenderFrameWAT = `(module
-  (import "hdm:kernel/hardware-io" "shared-cluster-memory" (memory 100))
-  (func (export "render-frame") (param $base i32) (param $cap i32) (result i32)
-    local.get $base i32.const 257 i32.store
-    local.get $base i32.const 4 i32.add i32.const 20 i32.store
-    local.get $base i32.const 8 i32.add i32.const 30 i32.store
-    local.get $base i32.const 12 i32.add i32.const 8 i32.store
-    local.get $base i32.const 16 i32.add i32.const 8 i32.store
-    local.get $base i32.const 20 i32.add i32.const 0x33FF66FF i32.store
-    i32.const 24))`
+var exampleRenderFrameWAT = stdlib.MustCell("example-render-frame")
 
-const buildExamples = `
+var buildExamples = `
 WORKED EXAMPLES — valid WAT in the exact style to imitate (linear/stack form,
 balanced parens, one function). Match this structure:
 
@@ -125,7 +116,7 @@ UI cell (render-frame) — draws one rect on layer 1 (op=(layer<<8)|1=257) into 
 // Unlike the compass, it explicitly permits changing behavior to satisfy the
 // acceptance checks — that is the whole point of building. It is entry-agnostic:
 // the cell may export run-tick (compute) or render-frame (UI).
-const DefaultBuildPrompt = `SYSTEM ROLE: HDM BUILDER.
+var DefaultBuildPrompt = `SYSTEM ROLE: HDM BUILDER.
 You are given a cell's PLAN (the design to implement), the system it is part of,
 its current WAT genotype, and its ACCEPTANCE CHECKS. IMPLEMENT THE PLAN: write the
 cell's algorithm exactly as the plan's steps describe, reading and writing the
@@ -143,26 +134,25 @@ No prose, no markdown fences.
 ` + buildExamples + `
 ` + Capabilities
 
-// FluxBuildPrompt is the system prompt for the Flux synthesis path (HDM_FLUX):
-// the builder authors a typed functional program, not WAT. It carries no WAT
-// examples/ABI — the grammar, the typed field list, and a worked example are
-// injected into the build seed (fluxSeedBlock), so nothing pulls the model back
-// toward WAT.
-const FluxBuildPrompt = `SYSTEM ROLE: HDM BUILDER (FLUX).
+// FluxBuildPrompt is the system prompt for the macro-WAT synthesis path (the default
+// "flux" surface): the builder authors native WAT but uses field MACROS so it never
+// hand-writes the module boilerplate or a memory offset. The macro forms, the typed
+// field list, and a worked example are injected into the build seed (macroSeedBlock).
+const FluxBuildPrompt = `SYSTEM ROLE: HDM BUILDER (MACRO-WAT).
 You are given a cell's PLAN (the design to implement), the system it is part of,
-its shared-state fields, and its ACCEPTANCE CHECKS. IMPLEMENT THE PLAN as a FLUX
-functional program: write the cell's algorithm exactly as the plan's steps
-describe, reading and writing the shared fields it names. The acceptance checks
-VERIFY the plan — pass AS MANY as possible.
+its shared-state fields, and its ACCEPTANCE CHECKS. IMPLEMENT THE PLAN as a macro-WAT
+program: write the cell's algorithm exactly as the plan's steps describe, reading and
+writing the shared fields it names. The acceptance checks VERIFY the plan — pass AS
+MANY as possible.
 
-Flux is a small, typed functional language: a cell is a PURE FUNCTION over shared
-state. You write ONLY the logic; a compiler lowers it to WASM and owns all memory,
-stack, and types — so you never write WAT, never manage a stack, never touch an
-offset. The exact grammar, your typed field list, and a worked example are in the
-build context below; follow them precisely.
+You write native WebAssembly text (WAT), but you name shared-state fields with MACROS
+instead of hand-computing offsets, and you wrap the body in (cell ENTRY …) instead of
+the module/import/function boilerplate: (get NAME)/(set NAME EXPR) read/write a field,
+(scene …) emits a draw stream. Everything else is ordinary WAT (i32.*/f32.* math,
+typed locals). The exact macro forms, your typed field list, and a worked example are
+in the build context below; follow them precisely. Use f32 for continuous physics.
 
-OUTPUT: only a single complete (cell …) Flux program. No prose, no markdown
-fences, and never WAT/WASM/(module …).`
+OUTPUT: only a single complete (cell …) program. No prose, no markdown fences.`
 
 const (
 	// EntryPoint is the exported function the scheduler drives on each cell.
@@ -227,6 +217,12 @@ type Orchestrator struct {
 	// main (appgen.ModelTypeForCell) to avoid an evolution→appgen import cycle. When
 	// nil the sieve uses the code type. Optional; nil-safe.
 	SieveModelType func(urn string) inference.ModelType
+	// LeafElementLayout, when set, returns the ELEMENT layout for a combinator LEAF (its
+	// per-element fields arg-pointer-relative, shared globals absolute) or nil for a
+	// non-leaf. A leaf handed this authors macro-WAT over its own element instead of the
+	// (semantically wrong) global array layout. Injected from main (appgen) to avoid the
+	// evolution→appgen cycle. Optional; nil-safe.
+	LeafElementLayout func(urn string) flux.Layout
 	// structural marks cells whose LOCAL optimization has plateaued while they are
 	// still expensive: their next synthesis is offered the data-structure toolkit
 	// (StructureToolkit) so the model may refactor to dispatch to a shared primitive
@@ -234,6 +230,23 @@ type Orchestrator struct {
 	// unchanged, so a structural refactor is accepted only if behavior holds and cost
 	// drops. Set by the scheduler on plateau, cleared on a structural commit.
 	structural map[string]bool
+	// authoringInputs remembers, per cell URN, the DERIVATION INPUTS the last
+	// buildSeed authored that cell from — the language/grammar/prompt/model/examples/
+	// scenarios/contract edges of its lineage, assembled while the contract, suite,
+	// layout and retrieved examples are all in hand (the forward process). The commit
+	// path attaches the resulting genotype hash and records it (docs/lineage.md §4).
+	// Stale until the next build overwrites it. Serial with the evolution loop.
+	authoringInputs map[string]Lineage
+}
+
+// noteAuthoring stashes the derivation inputs buildSeed assembled for a cell, so a
+// subsequent commit can record them (with the new genotype hash as Result) as the
+// cell's lineage. Overwrites the previous note for that cell.
+func (o *Orchestrator) noteAuthoring(urn string, l Lineage) {
+	if o.authoringInputs == nil {
+		o.authoringInputs = map[string]Lineage{}
+	}
+	o.authoringInputs[urn] = l
 }
 
 // SetStructural flags (or clears) a cell for structural escalation — its next synthesis
@@ -379,8 +392,45 @@ func (o *Orchestrator) ScoreCell(ctx context.Context, cellURN string) (passed, t
 	if err != nil {
 		return 0, 0, fmt.Errorf("load phenotype: %w", err)
 	}
-	p, t := ScoreSuite(ctx, phenotype, EntryPoint, suite, o.PayloadOffset, o.StateWindow, o.resolver())
+	p, t := ScoreSuite(ctx, phenotype, EntryPoint, suite, o.PayloadOffset, o.StateWindow, o.resolver(), o.maskFor(cellURN))
 	return p, t, nil
+}
+
+// maskFor returns the enforced shared-state boundary an app cell will RUN under —
+// the SAME ranges main.refreshMasks installs at runtime — so acceptance grades a
+// cell against the boundary it actually executes with. This closes the "static
+// ball" gap: a cell whose declared ports omit a field it must write/read no longer
+// commits green (graded unmasked) only to go static live; it fails, stalls, and its
+// boundary is re-evolved. Returns nil (grade unmasked) for a cell with no contract,
+// not yet in the app map, or when runtime enforcement is off — so grading always
+// mirrors whatever the runtime enforces (HDM_MASK / HDM_MASK_READS).
+func (o *Orchestrator) maskFor(cellURN string) *FieldMask {
+	if os.Getenv("HDM_MASK") == "0" {
+		return nil // runtime enforces nothing → grade unmasked, stay consistent
+	}
+	ns := AppNamespaceOf(cellURN)
+	if ns == "" {
+		return nil
+	}
+	ct := LoadContract(o.ledger, ns)
+	m := LoadAppMap(o.ledger, ns)
+	if ct == nil || m == nil {
+		return nil
+	}
+	var comp *ComponentMap
+	for i := range m.Components {
+		if m.Components[i].Identity == cellURN {
+			comp = &m.Components[i]
+			break
+		}
+	}
+	fm := BuildFieldMask(comp, ct)
+	// HDM_MASK_READS=0 leaves reads open at runtime (writes-only enforcement); mirror
+	// that here by dropping the poison (read-hide) side so grading matches.
+	if fm != nil && os.Getenv("HDM_MASK_READS") == "0" {
+		fm.Poison = nil
+	}
+	return fm
 }
 
 // ScenarioResult is one coordination scenario's read-only status, for inspection.
@@ -406,13 +456,34 @@ func (o *Orchestrator) ScenarioFlags(ctx context.Context, cellURN string) ([]Sce
 	if err != nil {
 		return nil, err
 	}
-	flags := ScenarioPassFlags(ctx, phenotype, suite.Scenarios, o.PayloadOffset, o.StateWindow, o.resolver())
+	flags := ScenarioPassFlags(ctx, phenotype, suite.Scenarios, o.PayloadOffset, o.StateWindow, o.resolver(), o.maskFor(cellURN))
 	out := make([]ScenarioResult, 0, len(suite.Scenarios))
 	for i, s := range suite.Scenarios {
 		pass := i < len(flags) && flags[i]
 		out = append(out, ScenarioResult{Name: s.Name, Pass: pass})
 	}
 	return out, nil
+}
+
+// FailureReasons returns a concrete, human-readable reason for each acceptance check
+// the cell currently FAILS — the expected-vs-actual detail, graded under the cell's
+// ENFORCED mask (the same boundary it runs under) so a reason reflects live behavior,
+// not an unmasked ideal. For an inspector: WHY a check fails, not just which. nil when
+// the cell passes everything or can't be resolved.
+func (o *Orchestrator) FailureReasons(ctx context.Context, cellURN string) ([]string, error) {
+	suite, _ := LoadAcceptance(o.ledger, cellURN)
+	if suite == nil {
+		return nil, nil
+	}
+	desc, err := o.repo.Load(cellURN)
+	if err != nil {
+		return nil, err
+	}
+	phenotype, err := o.repo.Phenotype(desc)
+	if err != nil {
+		return nil, err
+	}
+	return SuiteFailureReasons(ctx, phenotype, EntryPoint, suite, o.PayloadOffset, o.StateWindow, o.resolver(), o.maskFor(cellURN)), nil
 }
 
 // resolver returns a CellResolver backed by the descriptor repository, so shadow
@@ -461,9 +532,15 @@ func (o *Orchestrator) synthesize(ctx context.Context, targetURN, intent, sysPro
 func (o *Orchestrator) synthesizeInner(ctx context.Context, targetURN, intent, sysPrompt, seed string, contract *EntryContract) (*SieveOutcome, error) {
 	m := o.sieveModel(targetURN)
 	layout := o.fluxLayoutFor(targetURN)
-	// Flux cells are authored test-driven and agentic BY DEFAULT (the model checks
-	// and RUNS its cell via tools) — not only on escalation. Raw-WAT cells stay
-	// agentic only after they stall, as before.
+	// The application prologue (default + app-harvested macros) is prepended to the
+	// model's program before expansion, so a cell can CALL (reflect …)/(clampi …) as a
+	// primitive. Only meaningful for a macro-WAT cell (one with a contract layout).
+	prologue := ""
+	if layout != nil {
+		prologue = PrologueText(EffectivePrologue(o.ledger, AppNamespaceOf(targetURN)))
+	}
+	// Macro-WAT cells are authored agentic BY DEFAULT — not only on escalation. Raw-WAT
+	// cells stay agentic only after they stall, as before.
 	if layout != nil || o.escalation[targetURN] >= sieveEscalateThreshold {
 		if tr, ok := m.(ToolReasoner); ok {
 			kind := ""
@@ -471,14 +548,14 @@ func (o *Orchestrator) synthesizeInner(ctx context.Context, targetURN, intent, s
 				kind = "render"
 			}
 			if layout != nil {
-				log.Printf("[FLUX] %s — agentic Flux synthesis (flux_check + flux_run)", targetURN)
+				log.Printf("[FLUX] %s — agentic macro-WAT synthesis", targetURN)
 			} else {
 				log.Printf("[MODEL] %s — agentic synthesis (knowledge + compiler tools)", targetURN)
 			}
-			return RunAgenticSieve(ctx, tr, o.ledger, sysPrompt, seed, kind, intent, layout, contract)
+			return RunAgenticSieve(ctx, tr, o.ledger, sysPrompt, seed, kind, intent, layout, prologue, contract)
 		}
 	}
-	return RunSieveWithLayout(ctx, m, sysPrompt, seed, o.SieveMaxIters, layout, contract)
+	return RunSieveWithPrologue(ctx, m, sysPrompt, seed, o.SieveMaxIters, layout, prologue, contract)
 }
 
 func (o *Orchestrator) resolver() CellResolver {
@@ -714,7 +791,7 @@ func (o *Orchestrator) RunFrame(ctx context.Context, targetURN string) (*FrameRe
 
 	// 4. Atomic reference commit: persist the new genotype+phenotype as a fresh
 	//    descriptor and hot-swap under an optimistic concurrency check.
-	newDescHash, _, err := o.repo.PutCell(targetURN, sieve.Genotype(), sieve.Artifact.Bytecode, desc.Semantics, desc.Saliency)
+	newDescHash, newDesc, err := o.repo.PutCell(targetURN, sieve.Genotype(), sieve.Artifact.Bytecode, desc.Semantics, desc.Saliency)
 	if err != nil {
 		return nil, fmt.Errorf("persist evolved descriptor: %w", err)
 	}
@@ -728,6 +805,7 @@ func (o *Orchestrator) RunFrame(ctx context.Context, targetURN string) (*FrameRe
 	fr.NewRoot = newRoot
 	fr.Reason = fmt.Sprintf("evolved across %d tapes: fuel %d->%d, H %.4f->%.4f",
 		verdict.TapesMatched, verdict.BaselineFuel, verdict.CandidateFuel, verdict.BaselineH, verdict.CandidateH)
+	o.recordLineage(targetURN, newDesc)
 	return fr, nil
 }
 
@@ -771,7 +849,7 @@ func (o *Orchestrator) compactCorpus(ctx context.Context, baseline []byte) ([]Re
 // under the MVCC optimistic-concurrency check.
 func (o *Orchestrator) commit(ctx context.Context, fr *FrameResult, baseRoot, targetURN string, desc *manifest.NodeDescriptor, sieve *SieveOutcome, reason string) (*FrameResult, error) {
 	delete(o.escalation, targetURN) // progress: reset the cost-driven escalation counter
-	newDescHash, _, err := o.repo.PutCell(targetURN, sieve.Genotype(), sieve.Artifact.Bytecode, desc.Semantics, desc.Saliency)
+	newDescHash, newDesc, err := o.repo.PutCell(targetURN, sieve.Genotype(), sieve.Artifact.Bytecode, desc.Semantics, desc.Saliency)
 	if err != nil {
 		return nil, fmt.Errorf("persist evolved descriptor: %w", err)
 	}
@@ -783,6 +861,13 @@ func (o *Orchestrator) commit(ctx context.Context, fr *FrameResult, baseRoot, ta
 	fr.Committed = true
 	fr.NewRoot = newRoot
 	fr.Reason = reason
+	o.recordLineage(targetURN, newDesc)
+	// Promote any NEW macro this genome defined inline into the app prologue, so sibling
+	// cells can call it as a primitive. The committing cell already proved it (expanded +
+	// assembled + passed acceptance).
+	if n := HarvestPrologue(o.ledger, AppNamespaceOf(targetURN), sieve.Genotype()); n > 0 {
+		log.Printf("[PROLOGUE] %s contributed %d new macro(s) to the app prologue", shortName(targetURN), n)
+	}
 	// Emit a lifecycle event whose kind matches the structural change, so the
 	// activity visual transitions the cell correctly (live / split / fused).
 	kind := "commit"
@@ -796,20 +881,47 @@ func (o *Orchestrator) commit(ctx context.Context, fr *FrameResult, baseRoot, ta
 	return fr, nil
 }
 
+// recordLineage persists the committed cell's derivation graph node: the inputs
+// stashed by the last buildSeed for this cell (docs/lineage.md §4), keyed by the new
+// genotype hash. Best-effort. A commit with no stashed inputs (e.g. a rare path that
+// did not run buildSeed) is skipped rather than recorded with empty inputs, which
+// would pollute the authoring memo (docs/lineage.md §2).
+func (o *Orchestrator) recordLineage(targetURN string, newDesc *manifest.NodeDescriptor) {
+	if newDesc == nil {
+		return
+	}
+	l, ok := o.authoringInputs[targetURN]
+	if !ok {
+		return
+	}
+	l.Result = newDesc.GenotypeHash
+	l.URN = targetURN
+	if err := RecordLineage(o.ledger, l); err != nil {
+		log.Printf("[LINEAGE] record %s: %v", shortName(targetURN), err)
+	}
+}
+
 // buildSeed renders the sieve seed for spec-driven building: the goal, the
 // required entry, the acceptance checks to satisfy, and the current genotype.
 // renderKnowledge retrieves the top docs + worked examples for a cell of this entry
 // kind and intent from the knowledge base, formatted for the synthesis prompt. Empty
 // when the stores hold nothing relevant (the static few-shot then carries synthesis).
-func (o *Orchestrator) renderKnowledge(contract *EntryContract, intent string) string {
+// renderKnowledge inlines the relevant docs + worked examples for a cell. lang
+// selects the language of the worked examples ("flux" when this cell is authored in
+// Flux, "wat" otherwise), so the example the prompt shows is always in the language
+// the model must write — and, crucially, is drawn FROM THE STORE rather than
+// hard-coded in the seed. This is the lazy-inlining that keeps Flux single-sourced
+// (docs/language-evolution.md §6). ids returns the example IDs actually inlined, so
+// the caller can record them as the cell's `examples` lineage edge (docs/lineage.md).
+func (o *Orchestrator) renderKnowledge(contract *EntryContract, intent, lang string) (text string, ids []string) {
 	kind := ""
 	if contract == RenderFrameContract {
 		kind = "render"
 	}
 	docs := FindDocuments(o.ledger, kind, intent, 2)
-	exs := FindExamples(o.ledger, kind, intent, nil, nil, 2)
+	exs := FindExamples(o.ledger, kind, lang, intent, nil, nil, 2)
 	if len(docs) == 0 && len(exs) == 0 {
-		return ""
+		return "", nil
 	}
 	var b strings.Builder
 	b.WriteString("RELEVANT KNOWLEDGE (retrieved for this cell — apply it):\n")
@@ -818,9 +930,10 @@ func (o *Orchestrator) renderKnowledge(contract *EntryContract, intent string) s
 	}
 	for _, e := range exs {
 		fmt.Fprintf(&b, "WORKED EXAMPLE (%s, %s):\n%s\n", e.Kind, e.Semantics, e.WAT)
+		ids = append(ids, e.ID)
 	}
 	b.WriteString("\n")
-	return b.String()
+	return b.String(), ids
 }
 
 func (o *Orchestrator) buildSeed(urn, intent, genotype string, contract *EntryContract, suite *AcceptanceSuite) string {
@@ -881,9 +994,19 @@ func (o *Orchestrator) buildSeed(urn, intent, genotype string, contract *EntryCo
 	// knowledge base most relevant to a cell of THIS kind and intent — concrete guidance
 	// targeting exactly this synthesis shape (the doc explains the pattern, the example
 	// shows it working). The static few-shot in the system prompt is only the floor.
-	if k := o.renderKnowledge(contract, intent); k != "" {
-		b.WriteString(k)
+	knowledgeLang := "wat"
+	if fluxOn {
+		knowledgeLang = "flux" // worked examples in the macro-WAT surface
 	}
+	var inlinedExamples []string
+	if k, ids := o.renderKnowledge(contract, intent, knowledgeLang); k != "" {
+		b.WriteString(k)
+		inlinedExamples = ids
+	}
+	// Record this cell's DERIVATION INPUTS (docs/lineage.md §4) while the contract,
+	// suite, layout and retrieved examples are all in hand — the forward process. The
+	// commit path attaches the resulting genotype hash and persists it.
+	o.noteAuthoring(urn, o.authoringLineage(urn, ns, contract, suite, fluxLayout, fluxOn, inlinedExamples))
 	// User guidance (soft): cross-app SYSTEM principles and this APP's principles,
 	// rewritten from operator commentary. The model weighs these while building; an
 	// adversarial feedback critic enforces them separately.
@@ -916,15 +1039,18 @@ func (o *Orchestrator) buildSeed(urn, intent, genotype string, contract *EntryCo
 		b.WriteString("\n")
 	}
 	if fluxOn {
-		// Author in Flux: the grammar + typed field list + a worked example, and an
-		// explicit instruction to output only a (cell …) program. The lowerer owns
-		// the encoding, so the model only writes logic.
-		b.WriteString(fluxSeedBlock(contract, fluxLayout))
+		// Author in macro-WAT: the macro forms + the typed field list, and an explicit
+		// instruction to output only a (cell …) program.
+		b.WriteString(macroSeedBlock(contract, fluxLayout))
+		// The application prologue: the composite macros this cell may CALL as primitives
+		// (defaults + whatever sibling cells have already defined), so it reuses them
+		// instead of re-deriving the inline WAT.
+		b.WriteString(PrologueGuide(EffectivePrologue(o.ledger, ns)))
 		// DFS iteration: refine the model's latest working DRAFT (its most recent
 		// non-regressing attempt), not the last commit — so synthesis goes deeper on
 		// the candidate it was building instead of restarting each frame. Fall back to
-		// the committed Flux genome, then to nothing (a fresh start after an unwind,
-		// which clears the draft).
+		// the committed genome, then to nothing (a fresh start after an unwind, which
+		// clears the draft).
 		wip := LoadFluxDraft(o.ledger, urn)
 		if wip == "" && strings.HasPrefix(strings.TrimSpace(genotype), "(cell") {
 			wip = genotype
@@ -938,14 +1064,59 @@ func (o *Orchestrator) buildSeed(urn, intent, genotype string, contract *EntryCo
 	return b.String()
 }
 
+// authoringLineage assembles the DERIVATION INPUTS a cell is being authored from —
+// every edge of docs/lineage.md §3 that is knowable at build time: the language
+// version, the grammar it decodes under, the prompt TEMPLATE (never the inlined
+// examples — those are the `examples` edge), the model, the acceptance suite it will
+// be verified against, the shared-state contract, and the worked examples inlined.
+// The Result (genotype hash) is attached by the commit path. Hashing an input means
+// a later change to it moves this cell's InputsHash and so triggers its rebuild.
+func (o *Orchestrator) authoringLineage(urn, ns string, contract *EntryContract, suite *AcceptanceSuite, layout flux.Layout, fluxOn bool, examples []string) Lineage {
+	l := Lineage{URN: urn, Examples: examples}
+	// language: macro-WAT when the cell has a contract layout, raw WAT otherwise.
+	if fluxOn {
+		l.Language = MacroLanguageVersion
+	} else {
+		l.Language = langWAT
+	}
+	// prompt TEMPLATE: the stable system prompt plus (macro mode) the example-free
+	// authoring block — NOT the inlined worked examples, which are the examples edge.
+	tmpl := o.CompassPrompt
+	if fluxOn {
+		tmpl += macroSeedBlock(contract, layout)
+	}
+	l.Prompt = hashStr(tmpl)
+	// model: which model authored it (decode identity).
+	if o.SieveModelType != nil {
+		l.Model = fmt.Sprintf("%v", o.SieveModelType(urn))
+	}
+	// scenarios: the behavioral contract it is verified against — language-INDEPENDENT
+	// (docs/language-evolution.md §2), so a language change does not move this edge.
+	if suite != nil {
+		var sb strings.Builder
+		for _, c := range describeChecks(suite) {
+			fmt.Fprintf(&sb, "%s=%s\n", c["name"], c["spec"])
+		}
+		l.Scenarios = hashStr(sb.String())
+	}
+	// contract: the shared-state memory layout the cell coordinates through.
+	if sc := LoadContract(o.ledger, ns); sc != nil {
+		l.Contract = hashStr(sc.Render())
+	}
+	return l
+}
+
 // acceptanceFrame evaluates a candidate against the cell's spec acceptance
 // suite. Correctness progress (more tests passing) is committed even though it
 // changes behavior; a correctness regression is rejected; an equal score falls
 // back to the optimization gauntlet so a crude cell can still be trimmed.
 func (o *Orchestrator) acceptanceFrame(ctx context.Context, fr *FrameResult, baseRoot, targetURN string, desc *manifest.NodeDescriptor, baseline []byte, sieve *SieveOutcome, suite *AcceptanceSuite, contract *EntryContract) (*FrameResult, error) {
 	candidate := sieve.Artifact.Bytecode
-	basePass, total := ScoreSuite(ctx, baseline, contract.Name, suite, o.PayloadOffset, o.StateWindow, o.resolver())
-	candPass, _ := ScoreSuite(ctx, candidate, contract.Name, suite, o.PayloadOffset, o.StateWindow, o.resolver())
+	// Grade baseline and candidate under the boundary the cell RUNS under, so a cell
+	// whose declared ports are too tight cannot commit green and then go static live.
+	mask := o.maskFor(targetURN)
+	basePass, total := ScoreSuite(ctx, baseline, contract.Name, suite, o.PayloadOffset, o.StateWindow, o.resolver(), mask)
+	candPass, _ := ScoreSuite(ctx, candidate, contract.Name, suite, o.PayloadOffset, o.StateWindow, o.resolver(), mask)
 	fr.AcceptBase, fr.AcceptCand, fr.AcceptTotal = basePass, candPass, total
 	// DFS iteration: keep the model's latest NON-REGRESSING Flux as the working
 	// draft, so the next frame refines THIS candidate (goes deeper) instead of
@@ -958,7 +1129,7 @@ func (o *Orchestrator) acceptanceFrame(ctx context.Context, fr *FrameResult, bas
 	// log WHY each scenario failed — the concrete check + expected vs actual — so a
 	// stall is traceable to a cause instead of a bare score.
 	if acceptDebug && candPass <= basePass {
-		for _, r := range SuiteFailureReasons(ctx, candidate, contract.Name, suite, o.PayloadOffset, o.StateWindow, o.resolver()) {
+		for _, r := range SuiteFailureReasons(ctx, candidate, contract.Name, suite, o.PayloadOffset, o.StateWindow, o.resolver(), mask) {
 			log.Printf("[ACCEPT] %s %d/%d: %s", shortName(targetURN), candPass, total, r)
 		}
 	}

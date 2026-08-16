@@ -129,11 +129,19 @@ func NewLocalModelClient(baseURL, model string) *LocalModelClient {
 		}
 	}
 	// Per-request HTTP timeout. Non-streaming completions return headers only when
-	// the whole generation is done, so a slow REASONING model (e.g. qwen3.6, which
-	// emits hundreds of hidden reasoning tokens before any content) can exceed the
-	// default on a large prompt and fail "awaiting headers". Raise it with
-	// HDM_LLM_TIMEOUT (e.g. 600s) for such models.
-	timeout := 120 * time.Second
+	// the whole generation is done, so the WHOLE generation must fit inside this
+	// window — a slow model on a large prompt otherwise has its response cut
+	// mid-body, which used to surface as a bogus "malformed completion" (see
+	// parseOpenAI's caller).
+	//
+	// Sized from a measured run of the default model: a full agentic macro-WAT
+	// synthesis on gemma-4-26b-a4b-it-oQ4 completes its whole correction loop in
+	// ~4.5min, i.e. ~33s per round, so this leaves roughly 9x headroom on a single
+	// call. It is deliberately not larger: runEvolutionFrame calls synthesis
+	// SYNCHRONOUSLY, so this bounds how long one wedged request can stall the
+	// evolution loop. Raise it with HDM_LLM_TIMEOUT for a slower local model
+	// (Qwen3.8-27B-oQ4 wanted 600s+), lower it for a fast hosted backend.
+	timeout := 300 * time.Second
 	if v := os.Getenv("HDM_LLM_TIMEOUT"); v != "" {
 		if d, err := time.ParseDuration(v); err == nil && d > 0 {
 			timeout = d
@@ -246,10 +254,13 @@ func (c *LocalModelClient) visionAttempt(ctx context.Context, sysPrompt, questio
 		return "", true, fmt.Errorf("%w: %v", ErrServerUnreachable, err)
 	}
 	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
+	body, rerr := io.ReadAll(resp.Body)
 	if resp.StatusCode != http.StatusOK {
 		retry := resp.StatusCode >= 500 || resp.StatusCode == http.StatusTooManyRequests
 		return "", retry, fmt.Errorf("vision server returned status %d: %s", resp.StatusCode, string(body))
+	}
+	if rerr != nil {
+		return "", true, fmt.Errorf("%w: truncated vision response after %d bytes: %v", ErrServerUnreachable, len(body), rerr)
 	}
 	var tokens int
 	if c.provider == providerGemini {
@@ -291,12 +302,19 @@ func (c *LocalModelClient) attempt(ctx context.Context, sysPrompt, userCtx strin
 		return "", true, fmt.Errorf("%w: %v", ErrServerUnreachable, err)
 	}
 	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
+	body, rerr := io.ReadAll(resp.Body)
 
 	if resp.StatusCode != http.StatusOK {
 		// 5xx / 429 are transient (server busy/rate-limited); 4xx are permanent.
 		retry := resp.StatusCode >= 500 || resp.StatusCode == http.StatusTooManyRequests
 		return "", retry, fmt.Errorf("inference server returned status %d: %s", resp.StatusCode, string(body))
+	}
+	// A body cut short mid-stream (client timeout mid-generation, server hangup)
+	// otherwise reaches the JSON parser as a truncated document and is misreported
+	// as a permanent "malformed completion" — the model's own output blamed for what
+	// is really a transient transport failure, so it never gets retried.
+	if rerr != nil {
+		return "", true, fmt.Errorf("%w: truncated response body after %d bytes: %v", ErrServerUnreachable, len(body), rerr)
 	}
 
 	var tokens int

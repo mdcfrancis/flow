@@ -14,7 +14,7 @@ func TestPackOffsetsReservesArraySpace(t *testing.T) {
 		{Name: "max_iter", Type: "i32", Offset: 0xB0004},   // model put it overlapping
 		{Name: "zoom", Type: "i32", Offset: 0xB0008},
 	}
-	out := packOffsets(in)
+	out := packOffsets(in, evolution.LegacyArenaBase)
 	if len(out) != 3 {
 		t.Fatalf("expected 3 fields, got %d", len(out))
 	}
@@ -37,7 +37,7 @@ func TestPackOffsetsDropsOversizedField(t *testing.T) {
 		{Name: "huge", Type: "i32[100000]"}, // 400KB > 64KB region -> dropped
 		{Name: "after", Type: "i32"},
 	}
-	out := packOffsets(in)
+	out := packOffsets(in, evolution.LegacyArenaBase)
 	names := map[string]bool{}
 	for _, f := range out {
 		names[f.Name] = true

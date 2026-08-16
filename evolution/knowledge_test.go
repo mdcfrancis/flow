@@ -76,7 +76,7 @@ func TestExampleRetrievalKindFilterAndRanking(t *testing.T) {
 		Tags: []string{"wall-bounce"}, WAT: "C1", Score: "4/4"})
 
 	// A render target must NOT see the compute example (hard kind filter).
-	got := FindExamples(le, "render", "draw the ball at its position", []string{"ball_x", "ball_y"}, nil, 5)
+	got := FindExamples(le, "render", "", "draw the ball at its position", []string{"ball_x", "ball_y"}, nil, 5)
 	for _, e := range got {
 		if e.Kind != "render" {
 			t.Fatalf("kind filter leaked a %s example", e.Kind)

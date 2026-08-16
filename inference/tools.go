@@ -48,6 +48,14 @@ type toolsResponse struct {
 	} `json:"usage"`
 }
 
+// SupportsTools reports whether this backend can run the client-side tool loop. The
+// Gemini generateContent path does NOT (we don't send its function-calling schema), so
+// InvokeTools degrades to a plain completion for it — and, crucially, a caller must not
+// give Gemini a tool-USING preamble: told to call a tool that isn't declared, Gemini
+// emits a MALFORMED_FUNCTION_CALL and returns EMPTY. Callers check this to pick a
+// direct-authoring preamble instead.
+func (c *LocalModelClient) SupportsTools() bool { return c.provider != providerGemini }
+
 // InvokeTools runs a CLIENT-SIDE agentic loop: it offers the model the given tools on
 // /v1/chat/completions and, while the model responds with tool_calls, executes each via
 // exec (a Go callback) and feeds the results back — up to maxSteps rounds — then returns
@@ -121,10 +129,13 @@ func (c *LocalModelClient) toolRound(ctx context.Context, messages, tools []any)
 			return "", true, fmt.Errorf("%w: %v", ErrServerUnreachable, e)
 		}
 		defer resp.Body.Close()
-		b, _ := io.ReadAll(resp.Body)
+		b, rerr := io.ReadAll(resp.Body)
 		if resp.StatusCode != http.StatusOK {
 			retry := resp.StatusCode >= 500 || resp.StatusCode == http.StatusTooManyRequests
 			return "", retry, fmt.Errorf("tools request status %d: %s", resp.StatusCode, string(b))
+		}
+		if rerr != nil {
+			return "", true, fmt.Errorf("%w: truncated tools response after %d bytes: %v", ErrServerUnreachable, len(b), rerr)
 		}
 		var tr toolsResponse
 		if e := json.Unmarshal(b, &tr); e != nil || len(tr.Choices) == 0 {

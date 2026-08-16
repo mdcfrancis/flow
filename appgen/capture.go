@@ -1,6 +1,8 @@
 package appgen
 
 import (
+	"strings"
+
 	"github.com/mdcfrancis/flow/evolution"
 )
 
@@ -34,9 +36,23 @@ func (g *Grower) CaptureExample(urn, score string) (bool, error) {
 	if err != nil || wat == "" {
 		return false, err
 	}
+	// Under P0 the stored genome is the SURFACE source; tag the captured example with
+	// its language so it lands in the right retrieval bucket: "(module" → raw WAT,
+	// "(cell" → S-expression Flux, otherwise the concatenative Forth surface (a word
+	// stream). This keeps a captured green cell superseding the seed example in the
+	// SAME surface.
+	src := strings.TrimSpace(wat)
+	lang := "forth"
+	switch {
+	case strings.HasPrefix(src, "(module"):
+		lang = ""
+	case strings.HasPrefix(src, "(cell"):
+		lang = "flux"
+	}
 	return evolution.AddExample(g.ledger, evolution.Example{
 		Kind:       string(kindOf(*sub)),
 		Entry:      entryFor(*sub),
+		Lang:       lang,
 		Semantics:  sub.Semantics,
 		Reads:      sub.Reads,
 		Writes:     sub.Writes,

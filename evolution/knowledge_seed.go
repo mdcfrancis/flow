@@ -4,23 +4,36 @@ import (
 	"log"
 
 	"github.com/mdcfrancis/flow/compiler"
+	"github.com/mdcfrancis/flow/flux"
+	"github.com/mdcfrancis/flow/stdlib"
 	"github.com/mdcfrancis/flow/storage"
 )
 
-// seedDrawAtPositionWAT is a WORKED render cell: it reads ball_x (0xB0000) and ball_y
-// (0xB0004) from the shared contract and emits ONE circle record at those coordinates —
-// the exact "read a field, draw there" pattern the single-ball renderer kept missing. A
-// circle record is op=3 with a=cx, b=cy, c=radius; the 24-byte stream is [op,a,b,c,d,rgba].
-const seedDrawAtPositionWAT = `(module
-  (import "hdm:kernel/hardware-io" "shared-cluster-memory" (memory 100))
-  (func (export "render-frame") (param $base i32) (param $cap i32) (result i32)
-    local.get $base i32.const 3 i32.store
-    local.get $base i32.const 4 i32.add i32.const 0xB0000 i32.load i32.store
-    local.get $base i32.const 8 i32.add i32.const 0xB0004 i32.load i32.store
-    local.get $base i32.const 12 i32.add i32.const 8 i32.store
-    local.get $base i32.const 16 i32.add i32.const 0 i32.store
-    local.get $base i32.const 20 i32.add i32.const 0xFFCC33FF i32.store
-    i32.const 24))`
+// seedMacroLayout is a representative field layout used ONLY to expand + assemble the
+// macro seed examples at seed time (offsets are arbitrary; the surface cares about
+// names + types). It mirrors the fields the examples reference.
+var seedMacroLayout = flux.Layout{
+	"ball_x":   {Type: flux.TInt, Offset: 0xB0000},
+	"ball_y":   {Type: flux.TInt, Offset: 0xB0004},
+	"vel_x":    {Type: flux.TInt, Offset: 0xB0008},
+	"vel_y":    {Type: flux.TInt, Offset: 0xB000C},
+	"screen_w": {Type: flux.TInt, Offset: 0xB0010},
+	"screen_h": {Type: flux.TInt, Offset: 0xB0014},
+	// Array (buffer) fields, so the LOOPED seed examples (for/draw over a particle
+	// field, map over an array) validate at seed time.
+	"px":    {Type: flux.TBuffer, Offset: 0xB1000, Len: 256},
+	"py":    {Type: flux.TBuffer, Offset: 0xB2000, Len: 256},
+	"count": {Type: flux.TInt, Offset: 0xB0018},
+	// f32 collection columns + a scalar attractor, so the COLLECTION-LOOP physics example
+	// (gravity + in-place integration over a particle system) validates at seed time.
+	"particle_count": {Type: flux.TInt, Offset: 0xB001C},
+	"attractor_x":    {Type: flux.TFloat, Offset: 0xB0020},
+	"attractor_y":    {Type: flux.TFloat, Offset: 0xB0024},
+	"particle_x":     {Type: flux.TBuffer, EType: flux.TFloat, Offset: 0xB3000, Len: 200},
+	"particle_y":     {Type: flux.TBuffer, EType: flux.TFloat, Offset: 0xB4000, Len: 200},
+	"particle_vx":    {Type: flux.TBuffer, EType: flux.TFloat, Offset: 0xB5000, Len: 200},
+	"particle_vy":    {Type: flux.TBuffer, EType: flux.TFloat, Offset: 0xB6000, Len: 200},
+}
 
 // seedDocs is the starter DOCUMENT set — the ABI/pattern knowledge that today lives only
 // inside evolution.Capabilities and the prompts, lifted into the retrievable store.
@@ -103,15 +116,29 @@ func SeedKnowledge(ledger *storage.LedgerEngine) {
 		_ = AddDocument(ledger, d)
 	}
 	svc := compiler.NewCompilerService()
-	seedExamples := []Example{
-		{Kind: "render", Entry: "render-frame", Semantics: "read ball_x and ball_y and draw a filled circle at that position",
-			Reads: []string{"ball_x", "ball_y"}, Tags: []string{"draw-at-position"},
-			WAT: seedDrawAtPositionWAT, Score: "seed", Provenance: "seed"},
-	}
+	// Seed examples are loaded from the embedded stdlib/examples source files. A raw-WAT
+	// (.wat) example is assembler-checked; a macro-WAT (.macro) example is flux.Expand-ed
+	// against a representative layout, then assembler-checked. A seed that fails is
+	// skipped, never stored — the same discipline for both surfaces.
 	kept := 0
-	for _, e := range seedExamples {
-		if art, err := svc.CompileGenotype(e.WAT); err != nil || art == nil || !art.SyntaxPassed {
-			log.Printf("[DOC] seed example %q skipped (did not compile)", e.Semantics)
+	for _, se := range stdlib.Examples() {
+		e := Example{
+			Kind: se.Kind, Entry: se.Entry, Semantics: se.Semantics,
+			Reads: se.Reads, Writes: se.Writes, Tags: se.Tags,
+			WAT: se.Src, Score: "seed", Provenance: "seed",
+		}
+		wat := se.Src
+		if se.IsMacro {
+			e.Lang = "flux" // macro-WAT examples are retrieved for the macro surface
+			w, err := flux.Expand(se.Src, seedMacroLayout)
+			if err != nil {
+				log.Printf("[DOC] macro seed example %q skipped (did not expand): %v", e.Semantics, err)
+				continue
+			}
+			wat = w
+		}
+		if art, err := svc.CompileGenotype(wat); err != nil || art == nil || !art.SyntaxPassed {
+			log.Printf("[DOC] seed example %q skipped (did not assemble)", e.Semantics)
 			continue
 		}
 		if ok, _ := AddExample(ledger, e); ok {

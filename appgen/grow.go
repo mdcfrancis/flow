@@ -11,6 +11,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
+	"sort"
 	"strings"
 
 	"github.com/mdcfrancis/flow/compiler"
@@ -18,6 +20,7 @@ import (
 	"github.com/mdcfrancis/flow/execution"
 	"github.com/mdcfrancis/flow/inference"
 	"github.com/mdcfrancis/flow/manifest"
+	"github.com/mdcfrancis/flow/stdlib"
 	"github.com/mdcfrancis/flow/storage"
 )
 
@@ -70,6 +73,20 @@ type AppEnvelope struct {
 	// Objective is the original natural-language ask, persisted so the
 	// architecture-completeness critic can judge the app against it.
 	Objective string `json:"objective,omitempty"`
+	// ArenaBase is the base address of this application's private contract arena —
+	// the 64 KiB window its shared-state fields are packed into. Zero means the app
+	// predates arenas and keeps the legacy base, so its already-synthesized cells
+	// still resolve their fields. See the arena geometry in evolution/contract.go.
+	ArenaBase int `json:"arena_base,omitempty"`
+}
+
+// Arena returns the base address of the application's contract arena, falling
+// back to the legacy base for an envelope grown before arenas existed.
+func (e *AppEnvelope) Arena() int {
+	if e == nil || e.ArenaBase == 0 {
+		return evolution.LegacyArenaBase
+	}
+	return e.ArenaBase
 }
 
 const envelopePrompt = `You decompose a natural-language application objective into a strict JSON
@@ -113,19 +130,28 @@ Decompose for INCREMENTAL construction, keeping the first version tiny:
   write it (one reads HMI input and writes the player position; others update
   bullet/enemy state).
 
-COMPOSITION (data-parallel kernels): when a subsystem computes a value FOR EACH cell
-of a grid/array (e.g. a fractal's escape-time per pixel, a heatmap, a per-entity
-update), do NOT hand-write the whole nested-loop kernel. Instead emit TWO subsystems:
-  1. a small LEAF compute subsystem — its run-tick reads ONE element's inputs at the
-     arg pointer and returns one i32 (e.g. "read (cr,ci) as two f32 at the arg
-     pointer; iterate z=z*z+c up to 64; return the escape iteration count"), and
-  2. a COMPOSITION subsystem that maps the leaf across the array, with:
+PER-ELEMENT WORK — two shapes, pick by whether the element carries STATE across ticks:
+
+A) A COLLECTION of entities UPDATED IN PLACE each tick — particles, agents, bodies:
+   their per-instance state (x, y, vx, vy) is read AND written every tick and evolves
+   over time. Author ONE ordinary cell that LOOPS over the collection — do NOT split
+   it into a map+leaf (the map's per-element function ABI is for stateless transforms
+   and cannot carry a mutable record cleanly). A collection entity's fields are array
+   columns "<entity>_x", "<entity>_vx" with a count "<entity>_count"; the cell loops
+   (for $i (get <entity>_count) …) and reads/writes record i with
+   (atidx <entity>_vx $i) / (setidx <entity>_vx $i EXPR). The physics cell is a
+   run-tick loop; the renderer is a render-frame loop over the same columns. Declare
+   the collection's columns in reads/writes.
+
+B) A PURE per-element TRANSFORM — out[i] = f(in[i]), NO cross-tick state (a fractal's
+   escape-time per pixel, a heatmap): do NOT hand-write the nested loop. Emit TWO
+   subsystems — a LEAF (run-tick reads ONE element at the arg pointer, returns one i32)
+   and a COMPOSITION that maps it:
      "composition": { "combinator": "map", "leaf": "<leaf identity>",
                       "in": "<input array field>", "out": "<output array field>",
                       "elemWords": <words per input element> }
-HDM GENERATES the map driver; you implement only the leaf. Declare the input/output
-as ARRAY contract fields ("i32[N]"). Prefer this for any per-element grid computation
-— it is far more reliable than a monolithic kernel.
+   HDM generates the map driver; you implement only the leaf. Use this ONLY for a
+   stateless transform, never for an in-place collection update (shape A).
 
 WORKED EXAMPLE (a Mandelbrot viewer) — note the "composition" object is REQUIRED for
 the map subsystem; do not hand-write the grid loop:
@@ -255,9 +281,7 @@ func (g *Grower) leafScenarios(ctx context.Context, sub Subsystem) *evolution.Ac
 // fallbackSkeleton is a minimal valid genesis cell used when the model cannot
 // produce a compilable skeleton — the cell exists (crude, high-energy) so the
 // annealing loop can improve it later.
-const fallbackSkeleton = `(module
-  (import "hdm:kernel/hardware-io" "shared-cluster-memory" (memory 100))
-  (func (export "run-tick") (param i32 i32) (result i32) i32.const 0))`
+var fallbackSkeleton = stdlib.MustCell("fallback-compute")
 
 // Grower runs the growth pipeline against a ledger and cognitive engine.
 type Grower struct {
@@ -266,15 +290,22 @@ type Grower struct {
 	sieve     *compiler.CompilerService
 	model     Reasoner
 	SieveIter int
-	// FluxEnabled mirrors the orchestrator's Flux path: when on, a freshly
-	// scaffolded cell is seeded with a no-op FLUX program (not a WAT skeleton), so
-	// the stored genome is Flux from birth and the synthesis loop iterates on a
-	// Flux draft ("improve THIS") instead of building from scratch atop WAT.
+	// FluxEnabled mirrors the orchestrator's macro-WAT path: when on, a freshly
+	// scaffolded cell is seeded with a no-op macro-WAT program (not a raw-WAT
+	// skeleton), so the stored genome is macro-WAT from birth and the synthesis loop
+	// iterates on that draft ("improve THIS") instead of building from scratch atop WAT.
 	FluxEnabled bool
 	// Activity, when set, receives growth progress so the console can show the
 	// app being scaffolded subsystem by subsystem. Optional; nil-safe.
 	Activity evolution.ActivitySink
+	// registry, when set, is unregistered alongside the ledger on RetireApp, so a
+	// deleted app leaves no candidates behind for the evolution loop. Optional.
+	registry *evolution.CellRegistry
 }
+
+// SetRegistry wires the evolution registry so RetireApp can unregister a deleted
+// application's cells, not just drop their ledger refs.
+func (g *Grower) SetRegistry(r *evolution.CellRegistry) { g.registry = r }
 
 // NewGrower constructs a Grower.
 // modelFor selects the client bound to a logical model type when the model is a
@@ -314,6 +345,18 @@ func (g *Grower) event(kind, cell, detail string) {
 // CompileEnvelope compiles an NL objective into an App Envelope and persists it
 // under "<namespace>:envelope".
 func (g *Grower) CompileEnvelope(ctx context.Context, objective string) (*AppEnvelope, error) {
+	return g.compileEnvelope(ctx, objective, false)
+}
+
+// CompileEnvelopeNew is CompileEnvelope for an explicit "new application" request:
+// if the namespace the model picks is already taken, it is suffixed to a free one
+// rather than silently refining the existing app. This is what makes a deliberate
+// "new app" distinct from a re-prompt of the same idea.
+func (g *Grower) CompileEnvelopeNew(ctx context.Context, objective string) (*AppEnvelope, error) {
+	return g.compileEnvelope(ctx, objective, true)
+}
+
+func (g *Grower) compileEnvelope(ctx context.Context, objective string, forceNew bool) (*AppEnvelope, error) {
 	resp, err := g.model.InvokeReasoning(ctx, g.prompt("envelope", envelopePrompt), objective)
 	if err != nil {
 		return nil, fmt.Errorf("envelope reasoning failed: %w", err)
@@ -335,6 +378,12 @@ func (g *Grower) CompileEnvelope(ctx context.Context, objective string) (*AppEnv
 	// grows — the model otherwise drifts between separators ("space-invaders" vs
 	// "space_invaders"), which spawns duplicate apps when a prompt is re-built.
 	env.ApplicationNamespace = canonicalNamespace(env.ApplicationNamespace)
+	// An explicit "new app" must not collide with one already grown: the model tends
+	// to reach for the same short name for the same kind of idea, and without this a
+	// deliberate second app would be swallowed by the refine branch below.
+	if forceNew {
+		env.ApplicationNamespace = freeNamespace(g.ledger, env.ApplicationNamespace)
+	}
 	for i := range env.SubsystemRequirements {
 		env.SubsystemRequirements[i].Identity = rebaseIdentity(env.SubsystemRequirements[i].Identity, env.ApplicationNamespace)
 	}
@@ -353,8 +402,12 @@ func (g *Grower) CompileEnvelope(ctx context.Context, objective string) (*AppEnv
 		return existing, nil
 	}
 	env.Objective = objective // anchor for the architecture-completeness critic
-	normalizeKinds(&env)      // declared kinds validated against ports (ports win); logs overrides
+	// Claim a private contract arena BEFORE the contract is authored, so this app's
+	// shared state cannot land on top of another live app's fields.
+	env.ArenaBase = allocateArena(g.ledger, env.ApplicationNamespace)
+	normalizeKinds(&env) // declared kinds validated against ports (ports win); logs overrides
 	saveEnvelope(g.ledger, &env)
+	log.Printf("[GROW] %s claimed contract arena 0x%X..0x%X", env.ApplicationNamespace, env.Arena(), evolution.ArenaEnd(env.Arena()))
 	return &env, nil
 }
 
@@ -427,10 +480,25 @@ func (g *Grower) Refine(ctx context.Context, namespace, objective string) (*AppE
 // acceptance, friction, …) from the ledger so it no longer rehydrates — used to
 // delete a stray/duplicate app. Returns how many refs were dropped. Content
 // blocks are reclaimed by the GC sweep once unreachable.
+//
+// It also unregisters the app's cells from the evolution registry when one is
+// wired (SetRegistry). Dropping the refs alone would leave the registry holding
+// URNs whose descriptors no longer load — the evolution loop would keep selecting
+// them as candidates forever. The app's contract arena is freed implicitly: the
+// envelope is gone, so allocateArena stops seeing the claim and hands the window
+// to the next app grown.
 func (g *Grower) RetireApp(namespace string) (int, error) {
 	refs, err := g.ledger.Refs()
 	if err != nil {
 		return 0, err
+	}
+	// Collect the cell identities BEFORE the envelope is deleted — afterwards there
+	// is no record of which subsystems belonged to this app.
+	var cells []string
+	if env := LoadEnvelope(g.ledger, namespace); env != nil {
+		for _, s := range env.SubsystemRequirements {
+			cells = append(cells, s.Identity)
+		}
 	}
 	var drop []string
 	for urn := range refs {
@@ -441,10 +509,75 @@ func (g *Grower) RetireApp(namespace string) (int, error) {
 	if len(drop) == 0 {
 		return 0, nil
 	}
-	return len(drop), g.ledger.DeleteRefs(drop...)
+	if err := g.ledger.DeleteRefs(drop...); err != nil {
+		return 0, err
+	}
+	if g.registry != nil {
+		// Every dropped ref that is a cell URN, plus the envelope's roster — fracture
+		// children are refs but not always listed as subsystems, so take both.
+		g.registry.Remove(append(cells, drop...)...)
+	}
+	return len(drop), nil
 }
 
 func envelopeRefURN(namespace string) string { return namespace + ":envelope" }
+
+// freeNamespace returns ns if no application holds it, else the first free
+// "<ns>_2", "<ns>_3", … so a deliberate new app gets its own identity instead of
+// colliding with one already grown.
+func freeNamespace(ledger *storage.LedgerEngine, ns string) string {
+	if LoadEnvelope(ledger, ns) == nil {
+		return ns
+	}
+	for n := 2; n < 1000; n++ {
+		cand := fmt.Sprintf("%s_%d", ns, n)
+		if LoadEnvelope(ledger, cand) == nil {
+			return cand
+		}
+	}
+	return ns
+}
+
+// ListApps returns every application namespace that has a persisted envelope,
+// sorted so callers see a deterministic order across restarts.
+func ListApps(ledger *storage.LedgerEngine) []string {
+	refs, err := ledger.Refs()
+	if err != nil {
+		return nil
+	}
+	var out []string
+	for key := range refs {
+		if ns := strings.TrimSuffix(key, ":envelope"); ns != key {
+			out = append(out, ns)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// allocateArena picks the lowest private arena not already claimed by another
+// application, so a retired app's window is reused rather than leaked. Returns 0
+// when every arena is taken — the caller then falls back to the legacy base,
+// which is correct-but-shared, matching the pre-arena behavior instead of
+// refusing to grow the app.
+func allocateArena(ledger *storage.LedgerEngine, selfNamespace string) int {
+	taken := map[int]bool{}
+	for _, ns := range ListApps(ledger) {
+		if ns == selfNamespace {
+			continue
+		}
+		if env := LoadEnvelope(ledger, ns); env != nil && env.ArenaBase != 0 {
+			taken[env.ArenaBase] = true
+		}
+	}
+	for i := 0; i < evolution.MaxArenas; i++ {
+		if base := evolution.ArenaBaseAt(i); !taken[base] {
+			return base
+		}
+	}
+	log.Printf("[GROW] all %d contract arenas in use — %s falls back to the shared legacy arena", evolution.MaxArenas, selfNamespace)
+	return 0
+}
 
 // saveEnvelope persists an envelope under "<namespace>:envelope".
 func saveEnvelope(ledger *storage.LedgerEngine, env *AppEnvelope) {
@@ -508,6 +641,14 @@ func (g *Grower) GrowConcurrent(ctx context.Context, objective string, enroll fu
 	if err != nil {
 		return nil, nil, "", err
 	}
+	// Define the CANONICAL MODEL before the contract — the contract is a PROJECTION of it
+	// (viewport fields, canonical column names, world-space types). Without this the
+	// EnsureContract below would author a LEGACY contract first (inventing screen_width,
+	// omitting world_w/screen_w), and growAll's projection would then be a no-op — so the
+	// model's viewport + world-space design would never reach the shared state.
+	if merr := g.AuthorModel(ctx, env.ApplicationNamespace); merr != nil {
+		g.event("hold", env.ApplicationNamespace, "model authoring deferred: "+merr.Error())
+	}
 	// Author the shared-state contract up front so the subsystems co-evolve
 	// against an agreed memory layout (how they will coordinate).
 	if _, cerr := g.EnsureContract(ctx, env.ApplicationNamespace); cerr != nil {
@@ -531,13 +672,23 @@ func (g *Grower) ScaffoldAll(ctx context.Context, env *AppEnvelope, enroll func(
 // enrolling each as it comes online. Returns the created URNs and the first UI
 // subsystem's URN.
 func (g *Grower) growAll(ctx context.Context, env *AppEnvelope, enroll func(urn string)) (created []string, uiURN string, err error) {
+	// Define the CANONICAL MODEL first — the single source of truth the contract and
+	// ports derive from — so the shared state has one coherent vocabulary rather than
+	// three independently-authored ones. Best-effort: no model just falls back to
+	// authoring the contract directly.
+	if merr := g.AuthorModel(ctx, env.ApplicationNamespace); merr != nil {
+		g.event("hold", env.ApplicationNamespace, "model authoring deferred: "+merr.Error())
+	}
 	// Ensure the shared-state contract exists BEFORE scaffolding, so a compute
 	// cell is authored with contract-aware coordination scenarios rather than
-	// contrived scalar tests (see scaffold). Idempotent — a no-op if already
-	// authored (e.g. by GrowConcurrent).
+	// contrived scalar tests (see scaffold). Projected from the model when one exists.
+	// Idempotent — a no-op if already authored (e.g. by GrowConcurrent).
 	if _, cerr := g.EnsureContract(ctx, env.ApplicationNamespace); cerr != nil {
 		g.event("hold", env.ApplicationNamespace, "contract authoring deferred: "+cerr.Error())
 	}
+	// Resolve every component port to a canonical model field (no phantom fields, no
+	// name drift) now that the contract exists.
+	g.resolvePortsToModel(env.ApplicationNamespace)
 	// Seed the map with the PLANNED architecture before anything is built, so even
 	// the first cell is synthesized knowing what the application is and which
 	// siblings are coming.
@@ -925,13 +1076,12 @@ Output ONLY a single (module ...) form — no prose, no markdown fences.
 // (render-frame) or compute (run-tick) contract from its semantics, and falling
 // back to a minimal valid skeleton if the model cannot produce a compilable one.
 func (g *Grower) genesis(ctx context.Context, env *AppEnvelope, sub Subsystem, wit string) (string, []byte) {
-	// Flux mode: seed a deterministic no-op FLUX cell so the genome is Flux from
-	// birth and the synthesis loop iterates on a Flux draft rather than a WAT
-	// skeleton. Falls through to WAT genesis when the app has no Flux-addressable
-	// contract (or the no-op doesn't compile) — exactly where the orchestrator's
-	// Flux path also falls back to WAT.
+	// Macro-WAT mode: seed a deterministic no-op macro-WAT cell so the genome is in
+	// the authoring surface from birth and the synthesis loop iterates on a real draft
+	// rather than a WAT skeleton. Falls through to WAT genesis when the app has no
+	// contract-addressable layout (or the no-op doesn't assemble).
 	if g.FluxEnabled {
-		if src, bc, ok := g.seedNoopFlux(env, sub); ok {
+		if src, bc, ok := g.seedNoopMacro(env, sub); ok {
 			return src, bc
 		}
 	}
@@ -970,16 +1120,7 @@ Requirements:
 
 // uiFallbackSkeleton draws a single placeholder rectangle so a UI subsystem
 // renders something (not a blank canvas) even if genesis synthesis fails.
-const uiFallbackSkeleton = `(module
-  (import "hdm:kernel/hardware-io" "shared-cluster-memory" (memory 100))
-  (func (export "render-frame") (param $base i32) (param $cap i32) (result i32)
-    local.get $base i32.const 1 i32.store
-    local.get $base i32.const 4 i32.add i32.const 20 i32.store
-    local.get $base i32.const 8 i32.add i32.const 20 i32.store
-    local.get $base i32.const 12 i32.add i32.const 80 i32.store
-    local.get $base i32.const 16 i32.add i32.const 80 i32.store
-    local.get $base i32.const 20 i32.add i32.const 0x3A6EA5FF i32.store
-    i32.const 24))`
+var uiFallbackSkeleton = stdlib.MustCell("fallback-render")
 
 // IsUISubsystem is the LIVE-CELL role heuristic: it guesses whether a running
 // cell renders, from its semantic-intent text. It is the fallback used at runtime
@@ -995,6 +1136,21 @@ func IsUISubsystem(semantics string) bool { return isUISubsystem(semantics) }
 func isUISubsystem(semantics string) bool {
 	s := strings.ToLower(semantics)
 	for _, kw := range []string{"render", "ui", "canvas", "draw", "visual", "display", "paint", "graphic", "screen", "view", "frontend", "front-end"} {
+		if strings.Contains(s, kw) {
+			return true
+		}
+	}
+	return false
+}
+
+// isInitSubsystem reports whether a subsystem's role is INITIALIZATION — seeding the
+// shared state to its starting values. Such a cell is compute (run-tick), never a
+// renderer, even if it under-declared its write ports or its semantics also mention the
+// "screen". The verb forms are deliberately specific so a view that merely "draws the
+// initial screen" is not swept in (it says draw/render, not initialize).
+func isInitSubsystem(semantics string) bool {
+	s := strings.ToLower(semantics)
+	for _, kw := range []string{"initializ", "initialis", "seed the initial", "set up the initial"} {
 		if strings.Contains(s, kw) {
 			return true
 		}

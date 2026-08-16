@@ -7,76 +7,28 @@ import (
 	"github.com/mdcfrancis/flow/flux"
 )
 
-// The no-op Flux seeds must be REAL Flux: parse, type-check, and lower to WAT.
-// If any doesn't compile, genesis would fall back to WAT and the "Flux from birth"
-// property is lost — so this guards the exact programs seedNoopFlux emits.
-func TestNoopFluxCompiles(t *testing.T) {
+// A compute cell that writes an ARRAY (buffer) field seeds a valid no-op macro-WAT cell
+// via array-element macros — (setidx pos (i32.const 0) (atidx pos (i32.const 0))) —
+// instead of failing (which fell back to raw WAT). Scalar ports write back with
+// (set field (get field)). The seed must expand + assemble.
+func TestMacroNoopSeedsBufferPort(t *testing.T) {
 	layout := flux.Layout{
-		"ball_x":  {Type: flux.TInt, Offset: 0},
-		"ball_y":  {Type: flux.TInt, Offset: 4},
-		"ball_vx": {Type: flux.TInt, Offset: 8},
-		"ball_vy": {Type: flux.TInt, Offset: 12},
+		"count": {Type: flux.TInt, Offset: 0xB0000},
+		"pos":   {Type: flux.TBuffer, Offset: 0xB0100, Len: 64},
 	}
-	cases := []struct {
-		name string
-		sub  Subsystem
-		want string // a substring the emitted program must contain
-	}{
-		{
-			name: "compute writes fields back unchanged",
-			sub: Subsystem{
-				Identity: "urn:hdm:apps:bounce:physics", Kind: KindCompute,
-				Reads:  []string{"ball_x", "ball_y", "ball_vx", "ball_vy"},
-				Writes: []string{"ball_x", "ball_y", "ball_vx", "ball_vy"},
-			},
-			want: "(write (ball_x ball_x)",
-		},
-		{
-			// A view seed is a NEUTRAL checkerboard placeholder, never the real sprite,
-			// so the model genuinely has to build the state-driven renderer.
-			name: "view draws a checkerboard placeholder, not the sprite",
-			sub: Subsystem{
-				Identity: "urn:hdm:apps:bounce:renderer", Kind: KindRender,
-				Reads: []string{"ball_x", "ball_y"},
-			},
-			want: "(rect 0 0 80 80 #xFF00FFFF)",
-		},
-		{
-			// The placeholder never reads state — constants regardless of declared read
-			// ports, so it can't accidentally be the solution.
-			name: "view placeholder reads no state",
-			sub: Subsystem{
-				Identity: "urn:hdm:apps:bounce:renderer", Kind: KindRender,
-				Reads: []string{"ball_x", "ball_y"},
-			},
-			want: "(cell renderer (reads)",
-		},
+	arrays := map[string]bool{"pos": true}
+	sub := Subsystem{Identity: "urn:hdm:apps:x:sim", Kind: KindCompute, Writes: []string{"count", "pos"}}
+	src, ok := macroNoop(sub, layout, arrays)
+	if !ok {
+		t.Fatal("a cell writing an addressable buffer must seed a macro no-op, not fall back")
 	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			src, ok := noopFlux(tc.sub, layout)
-			if !ok {
-				t.Fatalf("noopFlux returned ok=false for %s", tc.sub.Identity)
-			}
-			if !strings.Contains(src, tc.want) {
-				t.Fatalf("program %q missing %q", src, tc.want)
-			}
-			if _, err := flux.Compile("cell", src, layout); err != nil {
-				t.Fatalf("no-op Flux did not compile: %v\nsrc: %s", err, src)
-			}
-		})
+	if !strings.Contains(src, "(setidx pos (i32.const 0) (atidx pos (i32.const 0)))") {
+		t.Errorf("buffer no-op element store missing:\n%s", src)
 	}
-}
-
-// A compute cell with no Flux-addressable write ports has no valid no-op Flux —
-// genesis must fall back to WAT, so ok=false.
-func TestNoopFluxUnaddressableFallsBack(t *testing.T) {
-	layout := flux.Layout{"ball_x": {Type: flux.TInt, Offset: 0}}
-	sub := Subsystem{
-		Identity: "urn:hdm:apps:x:leaf", Kind: KindCompute,
-		Writes: []string{"grid"}, // array field, not in the i32 layout
+	if !strings.Contains(src, "(set count (get count))") {
+		t.Errorf("scalar no-op write missing:\n%s", src)
 	}
-	if _, ok := noopFlux(sub, layout); ok {
-		t.Fatal("expected ok=false when no write port is addressable")
+	if _, err := flux.Expand(src, layout); err != nil {
+		t.Fatalf("buffer no-op seed must expand: %v\n%s", err, src)
 	}
 }

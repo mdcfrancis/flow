@@ -10,10 +10,48 @@ package evolution
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"strings"
 
 	"github.com/mdcfrancis/flow/storage"
 )
+
+// Contract ARENAS. Contract offsets are absolute addresses into the one shared
+// linear memory, so every application needs its own window or two live apps
+// overwrite each other field-for-field. The geometry is:
+//
+//	0xB0000..0xC0000  host-return scratch (the hypervisor's bump allocator) AND
+//	                  the legacy arena — apps grown before arenas existed have
+//	                  their offsets baked in here and keep them.
+//	0xC0000..0x400000 52 per-app arenas of 64 KiB each.
+//
+// LegacyArenaBase is deliberately the old hardcoded base: an envelope with no
+// assigned arena resolves to it, so an app already in the ledger keeps working at
+// the offsets its cells were synthesized against. Only newly grown apps get a
+// private arena.
+//
+// The upper bound must stay in step with the hypervisor's scratch ceiling
+// (execution/hypervisor.go: scratchEnd) and its page window (windowBase); the two
+// packages do not import each other, so the constants are cross-referenced by
+// comment rather than shared.
+const (
+	ArenaSize       = 0x10000  // 64 KiB per application
+	LegacyArenaBase = 0xB0000  // pre-arena apps (and the host-return scratch zone)
+	FirstArenaBase  = 0xC0000  // first private arena, immediately above scratch
+	ArenaLimit      = 0x400000 // == windowBase; arenas must stay below the page window
+)
+
+// MaxArenas is how many applications can hold a private contract arena at once.
+const MaxArenas = (ArenaLimit - FirstArenaBase) / ArenaSize
+
+// ArenaBaseAt returns the base address of the index'th private arena.
+func ArenaBaseAt(index int) int { return FirstArenaBase + index*ArenaSize }
+
+// ArenaEnd returns the exclusive upper bound of the arena starting at base.
+func ArenaEnd(base int) int { return base + ArenaSize }
+
+// InArena reports whether an absolute offset falls inside the arena at base.
+func InArena(base, offset int) bool { return offset >= base && offset < ArenaEnd(base) }
 
 // ContractField is one named shared-memory slot.
 type ContractField struct {
@@ -21,6 +59,13 @@ type ContractField struct {
 	Offset int    `json:"offset"` // absolute shared-memory offset (sandbox region)
 	Type   string `json:"type"`   // e.g. "i32", "i32[40]"
 	Desc   string `json:"desc"`
+	// Stride is the byte gap between consecutive elements of an array field, in BYTES.
+	// Zero means a dense array (stride = element width, 4). A non-zero stride marks this
+	// field as one column of an INTERLEAVED collection buffer: particle_x, particle_y, …
+	// occupy one array-of-structs block, each starting at its own Offset and stepping by
+	// Stride (bytes-per-record). This is how a model's collection entity projects to one
+	// buffer the map iterates by stride while cells still address fields by name.
+	Stride int `json:"stride,omitempty"`
 	// Init is the field's initial value — the MOCK/boot state authored during the
 	// specification phase. It is what every cell is tested against (a scenario
 	// baseline) and what the live app boots from, so a cell that reads a config
@@ -42,7 +87,14 @@ func (c *AppContract) InitSeeds() []SeedWrite {
 		if typeWords(f.Type) != 1 { // scalars only
 			continue
 		}
-		out = append(out, SeedWrite{At: fmt.Sprintf("0x%X", f.Offset), U32: []uint32{uint32(int32(f.Init))}})
+		// An f32 field's Init is a decimal count (e.g. an attractor at x=160): seed the
+		// FLOAT bit pattern, not the raw integer, so a cell reading it with f32.load sees
+		// 160.0 rather than a denormal. i32 fields seed the integer directly.
+		bits := uint32(int32(f.Init))
+		if strings.TrimSpace(f.Type) == "f32" {
+			bits = math.Float32bits(float32(f.Init))
+		}
+		out = append(out, SeedWrite{At: fmt.Sprintf("0x%X", f.Offset), U32: []uint32{bits}})
 	}
 	return out
 }
@@ -61,7 +113,14 @@ func (c *AppContract) FieldRange(name string) (offset, byteLen int, ok bool) {
 	}
 	for _, f := range c.Fields {
 		if strings.EqualFold(f.Name, name) {
-			return f.Offset, typeWords(f.Type) * 4, true
+			// A strided (interleaved) field's elements span the whole record block, so its
+			// change-detection range is elementCount*stride bytes — conservative (it covers
+			// the block), never wrongly skipping a cell whose element changed.
+			step := 4
+			if f.Stride > 0 {
+				step = f.Stride
+			}
+			return f.Offset, typeWords(f.Type) * step, true
 		}
 	}
 	return 0, 0, false

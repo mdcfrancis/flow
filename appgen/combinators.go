@@ -6,6 +6,7 @@ import (
 
 	"github.com/mdcfrancis/flow/evolution"
 	"github.com/mdcfrancis/flow/execution"
+	"github.com/mdcfrancis/flow/stdlib"
 )
 
 // Activating the WAT substrate: the sys:* combinators become EVOLVABLE cells. Enrolled in the
@@ -28,23 +29,10 @@ const (
 // seeded so the resolver can find them during scoring.
 func CombinatorTestLeaves() []EvolvableLeaf {
 	return []EvolvableLeaf{
-		{leafDoubleURN, `(module
-  (import "hdm:kernel/hardware-io" "shared-cluster-memory" (memory 1))
-  (func (export "run-tick") (param i32 i32) (result i32)
-    (i32.mul (i32.const 2) (i32.load (local.get 0)))))`},
-		{leafSumPairURN, `(module
-  (import "hdm:kernel/hardware-io" "shared-cluster-memory" (memory 1))
-  (func (export "run-tick") (param i32 i32) (result i32)
-    (i32.add (i32.load (local.get 0)) (i32.load offset=4 (local.get 0)))))`},
-		{leafPosURN, `(module
-  (import "hdm:kernel/hardware-io" "shared-cluster-memory" (memory 1))
-  (func (export "run-tick") (param i32 i32) (result i32)
-    (i32.gt_s (i32.load (local.get 0)) (i32.const 0))))`},
-		{leafDecURN, `(module
-  (import "hdm:kernel/hardware-io" "shared-cluster-memory" (memory 1))
-  (func (export "run-tick") (param i32 i32) (result i32)
-    (i32.store (local.get 0) (i32.sub (i32.load (local.get 0)) (i32.const 1)))
-    (i32.gt_s (i32.load (local.get 0)) (i32.const 0))))`},
+		{leafDoubleURN, stdlib.MustCell("leaf-double")},
+		{leafSumPairURN, stdlib.MustCell("leaf-sumpair")},
+		{leafPosURN, stdlib.MustCell("leaf-pos")},
+		{leafDecURN, stdlib.MustCell("leaf-dec")},
 	}
 }
 

@@ -18,7 +18,7 @@ var acceptDebug = os.Getenv("HDM_ACCEPT_DEBUG") != ""
 // SuiteFailureReasons runs a suite's scenarios against a phenotype and returns a
 // human-readable reason for each FAILING scenario (an exec trap, or the first
 // unmet expectation with expected-vs-actual values). Used only for diagnostics.
-func SuiteFailureReasons(ctx context.Context, phenotype []byte, entry string, suite *AcceptanceSuite, payloadOffset, stateWindow uint32, resolver CellResolver) []string {
+func SuiteFailureReasons(ctx context.Context, phenotype []byte, entry string, suite *AcceptanceSuite, payloadOffset, stateWindow uint32, resolver CellResolver, mask ...*FieldMask) []string {
 	if suite == nil {
 		return nil
 	}
@@ -41,7 +41,7 @@ func SuiteFailureReasons(ctx context.Context, phenotype []byte, entry string, su
 		}
 	}
 	for _, sc := range suite.Scenarios {
-		results, frames, reads, pre, traj, err := execScenario(ctx, phenotype, sc, payloadOffset, stateWindow, resolver)
+		results, frames, reads, pre, traj, err := execScenario(ctx, phenotype, sc, payloadOffset, stateWindow, resolver, mask...)
 		if err != nil {
 			out = append(out, fmt.Sprintf("scenario %q: EXEC ERROR: %v", sc.Name, err))
 			continue

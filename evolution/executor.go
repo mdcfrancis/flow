@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/mdcfrancis/flow/compiler"
+	"github.com/mdcfrancis/flow/stdlib"
 	"github.com/mdcfrancis/flow/telemetry"
 	"github.com/tetratelabs/wazero"
 	"github.com/tetratelabs/wazero/api"
@@ -81,7 +82,7 @@ func installHostStubs(ctx context.Context, r wazero.Runtime, env replayEnv) erro
 		pages = env.chaos.MemoryPages
 	}
 	memArt, err := compiler.NewCompilerService().
-		CompileGenotype(fmt.Sprintf(`(module (memory (export "shared-cluster-memory") %d))`, pages))
+		CompileGenotype(stdlib.MustTemplate("mem-export", map[string]any{"Name": "shared-cluster-memory", "Pages": pages}))
 	if err != nil {
 		return fmt.Errorf("compile shared memory: %w", err)
 	}

@@ -1,0 +1,7 @@
+;; kind: render
+;; entry: render-frame
+;; semantics: read ball_x and ball_y and draw a filled circle at that position
+;; reads: ball_x, ball_y
+;; tags: draw-at-position
+(cell render-frame
+  (scene (circle (get ball_x) (get ball_y) (i32.const 8) (i32.const 0xFFCC33FF))))
